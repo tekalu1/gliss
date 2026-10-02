@@ -80,7 +80,7 @@ node scripts/smoke-addon.mjs --models <重みのフォルダ>   # 展開版で�
   3. そろえる（`scripts/release-assets.mjs`）: インストーラ・`.blockmap`・`latest.yml`（版と SHA-512・大きさを照らす）・`THIRD_PARTY_NOTICES.txt`・copyleft のパッケージの sdist（`scripts/gpl-sources.mjs`）・アドオンの zip（アプリに埋めた目録と大きさ・SHA-256 を照らす）・`SHA256SUMS.txt`
   4. 公開する（`scripts/release-publish.mjs`）: **下書きで作って全部載せてから公開**（載せている途中の Release を自動更新が見ないように）。beta は `--prerelease` で「Latest」にしない、正式版は「Latest」。既にあれば止める
 - **electron-builder 自身にはアップロードさせない**（Pleiad と同じ。成果物の検証を挟むため）。`permissions` は既定 `contents: read`、公開のジョブだけ `contents: write`。アクションはコミットの SHA で固定。
-- **`.github/workflows/test.yml`**: PR と `main` への push。`engine`（ubuntu）は素材・重みなしの pytest（要るものは skip）、`app`（windows）は `sync-version --check`・`release-check`・単体テスト（`app/tests/unit`。Electron を起動しない）。Electron を起動する Playwright（`app/tests/*.spec.js`）はエンジンの venv と素材が要るので回さない（開発機で回す）。
+- **`.github/workflows/test.yml`**: PR と `main` への push。`engine`（ubuntu）は素材・重みなしの pytest（要るものは skip）、`app`（windows）は `sync-version --check`・`release-check`・単体テスト（`app/tests/unit`。Electron を起動しない）。Electron を起動する Playwright（`app/tests/*.spec.js`）はエンジンの venv と素材が要るので回さない（開発機で回す）。`secrets`（ubuntu）は gitleaks で全履歴の秘密情報を探す（gitleaks 本体を公式 Release から取り、SHA-256 を照らす。gitleaks-action は v2 から独自のライセンスなので使わない）。
 - 公開リポジトリなら GitHub ホストのランナー（Windows を含む）は無料。
 
 ### リリースの手順（人がすること）

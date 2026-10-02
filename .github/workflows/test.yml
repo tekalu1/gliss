@@ -5,6 +5,8 @@
 #   needs_clips / needs_model）。素材・重みを使う通しのテストは開発機で回す
 # - app: 画面の単体テスト（app/tests/unit。Electron を起動しない）と、版・リリースノートの検査（windows）。
 #   Electron を起動する Playwright のテスト（app/tests/*.spec.js）はエンジンの venv と素材が要るので、ここでは回さない
+# - secrets: gitleaks で全履歴の秘密情報を探す（ubuntu）。公開リポジトリなので、トークン・鍵が入ったら止める。
+#   gitleaks-action（v2 以降は独自のライセンス）ではなく、MIT の gitleaks 本体を公式 Release から取り、SHA-256 を照らして使う
 name: test
 
 on:
@@ -75,3 +77,27 @@ jobs:
       - name: 単体テスト
         working-directory: app
         run: pnpm test:unit
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # 版を上げるときは、公式 Release の gitleaks_<版>_checksums.txt の linux_x64 の行で SHA-256 も書き換える
+      GITLEAKS_VERSION: 8.30.1
+      GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # 全履歴を見る（PR の途中のコミットに入って後で消したものも見つける）
+          fetch-depth: 0
+          persist-credentials: false
+      - name: gitleaks を取得（公式 Release。SHA-256 を照らす）
+        run: |
+          archive="$RUNNER_TEMP/gitleaks.tar.gz"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$RUNNER_TEMP" gitleaks
+      - name: 秘密情報の検査（全履歴。見つけた値はログに出さない）
+        run: |
+          "$RUNNER_TEMP/gitleaks" git --no-banner --redact --exit-code 1 .
