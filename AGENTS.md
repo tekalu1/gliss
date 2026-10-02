@@ -34,6 +34,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 `app/`（Electron の画面。ビルド工程なし）・`engine/`（Python のエンジン `vocal_engine`。MCP サーバー）・`scripts/`（版・ビルド・スモーク・リリースの道具）・
 `releases/`（リリースノートの正本）・`docs/`・`assets/logo/`・`.github/workflows/`（`test.yml` と `release.yml`）。中身は `docs/development.md` の「構成」。
 内部の名前は旧称のまま（`vocal_engine`・`VOCAL_ENGINE_*`・`VOCAL_EDITOR_*`・`_ve.wav`。理由は `docs/development.md` の「内部の名前」）。環境変数は旧称と `GLISS_*` が混ざっている。
+文書とコードの issue 番号（「issue #33」など）は、公開前の非公開の旧リポジトリのもの。このリポジトリの issue とは番号が合わない。
 
 ## 環境変数
 
