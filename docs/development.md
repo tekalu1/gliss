@@ -1,5 +1,7 @@
 # 開発者向け
 
+変更作業の手順（ブランチと worktree・検証・公開リポジトリで書かないもの・コミットと PR）は [AGENTS.md](../AGENTS.md)。
+
 ## 構成
 
 Electron の画面（`app/`）が、Python のエンジン（`engine/`）を MCP（stdio）の別プロセスとして起動する。
