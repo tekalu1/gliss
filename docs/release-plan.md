@@ -132,10 +132,10 @@ node scripts/smoke-addon.mjs --models <重みのフォルダ>   # 展開版で�
 
 | 段階 | 中身 | 状態 |
 |---|---|---|
-| **1. 配布版を作る** | 配布版のエンジン起動・置き場、エンジン exe の再現ビルド、electron-builder（NSIS）、展開版での確認、本書 | 実装済み（`release-pipeline` ブランチ。報告は `scratchpad/release-step1-report.md`） |
-| **2. 自動更新** | electron-updater（§4）、publish 設定、更新の設定画面と「再起動して更新」、更新時のエンジン停止・保存、AI 側エンジン exe の扱い、リリースのワークフロー（§3） | 実装済み（`release-pipeline` ブランチ。報告は `scratchpad/release-step2-report.md`）。インストール・`quitAndInstall` は未実行（第 4 段階） |
-| **3. public リポジトリを作る** | §1 の掃除（素材・歌詞・個人パス・スクリーンショット）、公開向け README・SECURITY.md・About の法的告知（THIRD_PARTY_NOTICES とタグ起点の CI は第 2 段階で用意済み）、テスト素材を環境変数化、新リポジトリに 1 コミットで push | |
-| **4. 実地の更新確認** | **beta.1・beta.2 を実際に GitHub Releases に出し**、beta.1 を入れた実機で beta.2 への更新が通ることを確かめる（クリーンな Windows。日本語・空白を含むユーザー名のパスも）。ここまで済んでから 1.0 の議論 | |
+| **1. 配布版を作る** | 配布版のエンジン起動・置き場、エンジン exe の再現ビルド、electron-builder（NSIS）、展開版での確認、本書 | 済み |
+| **2. 自動更新** | electron-updater（§4）、publish 設定、更新の設定画面と「再起動して更新」、更新時のエンジン停止・保存、AI 側エンジン exe の扱い、リリースのワークフロー（§3） | 済み |
+| **3. public リポジトリを作る** | §1 の掃除（素材・歌詞・個人パス・スクリーンショット）、公開向け README・SECURITY.md・About の法的告知（THIRD_PARTY_NOTICES とタグ起点の CI は第 2 段階で用意済み）、テスト素材を環境変数化、新リポジトリに 1 コミットで push | 済み（2026-10-03） |
+| **4. 実地の更新確認** | **beta.1・beta.2 を実際に GitHub Releases に出し**、beta.1 を入れた実機で beta.2 への更新が通ることを確かめる（クリーンな Windows。日本語・空白を含むユーザー名のパスも）。ここまで済んでから 1.0 の議論 | beta.1 → beta.2 は通った（2026-10-03。GitHub Releases から差分で取得し、「再起動して更新」で約 30 秒）。日本語・空白を含むユーザー名・入れ先を変えたとき・AI クライアントのつなぎ直しは未確認 |
 
 順番の理由: 配布版が動かないと自動更新の確認ができない（1→2）。公開リポジトリが無いと、更新の配信元（GitHub Releases）で実地の確認ができない（3→4）。電子署名は 4 までは無署名のまま進め、並行して申請する。
 
@@ -162,7 +162,7 @@ node scripts/smoke-addon.mjs --models <重みのフォルダ>   # 展開版で�
 - `--dir` の展開版には `app-update.yml` が無い（自動更新は unavailable）。更新を試すときは nsis の出力の `win-unpacked` を使うか、`scripts/smoke-update.mjs` のように足す。
 - 画面が起動したエンジン（`console=True` の exe）はコンソールの窓を出さない（MCP SDK の `StdioClientTransport` が Windows で `windowsHide` を付ける。窓の無い conhost が付くだけ）。AI クライアントが起動するときの窓はクライアント次第。
 - 更新の適用は `/S`（画面なし）なので、入れ替えの間（数十秒）は何も見えずに Gliss が起動し直す。長いようなら Pleiad のように進捗だけ見せるインストーラの画面（`customFinishPage` など）を検討する（第 4 段階で時間を測る）。
-- 実機でしか確かめられないこと（インストール・`quitAndInstall`・AI クライアントがエンジンを掴んだ状態の更新）は第 4 段階で（手順案は第 2 段階の報告 §4）。
+- 実機でしか確かめられないこと（インストール・`quitAndInstall`・AI クライアントがエンジンを掴んだ状態の更新）は第 4 段階で。
 
 ## 11. 任意機能のアドオン（実装済み。漢字の歌詞の読み）
 
