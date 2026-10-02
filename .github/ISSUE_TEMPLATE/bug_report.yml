@@ -1,0 +1,67 @@
+name: 不具合の報告
+description: 動かない・落ちる・結果がおかしいとき
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **他人の歌声や、権利を持っていない音声を添付しないでください。** 再現に音声が要るときは、自分で録ったものか合成した音で。
+        脆弱性は公開の Issue ではなく [SECURITY.md](https://github.com/tekalu1/gliss/blob/main/SECURITY.md) の方法で報告してください。
+  - type: input
+    id: version
+    attributes:
+      label: Gliss の版
+      description: ヘルプ > Gliss について で確かめられます。ソースから動かしているときはコミット
+      placeholder: 0.1.0-beta.2
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows の版
+      description: "`winver` で確かめられます"
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: 動かし方
+      options:
+        - インストーラで入れた（配布版）
+        - ソースから動かしている（開発版）
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 起きたこと
+      description: 何が起きたか。エラーの文が出ていれば、そのまま貼ってください
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待したこと
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現の手順
+      description: 開いた音声の長さ・サンプルレート・チャンネル数、操作の順番など
+      placeholder: |
+        1. 48 kHz・モノラル・約 30 秒の WAV を開く
+        2. ノートを右クリック →「ガイドに合わせる…」
+        3. …
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログ（任意）
+      description: |
+        関係する部分だけを貼ってください。ログにはファイルのパス（ユーザー名・曲のファイル名）が入るので、見せたくない部分は伏せてください。
+        - 更新: `%APPDATA%\Gliss\updates.log`
+        - エンジン: 曲を開く前は `%USERPROFILE%\.vocal-editor\engine.log`、曲を開いた後はその曲の作業場所の `%LOCALAPPDATA%\Gliss\work\<…>\engine.log`
+      render: text

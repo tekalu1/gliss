@@ -6,7 +6,8 @@
 | 画面の単体テスト | `app/tests/unit`（Electron を起動しない） | `cd app` → `pnpm test:unit` | `pnpm install` |
 | 画面の通しのテスト | `app/tests/*.spec.js`（Playwright で Electron を起動） | `cd app` → `pnpm test`（ウィンドウを見るなら `pnpm test:headed`） | エンジンの `.venv` |
 
-CI（`.github/workflows/test.yml`）は、エンジンの pytest（ubuntu）と画面の単体テスト・版とリリースノートの検査（windows）を回す。
+CI（`.github/workflows/test.yml`）は、エンジンの pytest（ubuntu）と画面の単体テスト・版とリリースノートの検査（windows）、
+gitleaks による全履歴の秘密情報の検査（ubuntu）を回す。
 素材・重みが要るテストは CI では skip になる。
 
 ## 素材と重みが無くても回る範囲
