@@ -83,6 +83,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 - 調査のメモ・ログ・一回きりのスクリプトは、main の作業ディレクトリの `scratchpad/`（git 管理外）に置く。worktree の中に置くと worktree と一緒に消える
 
 PR の前に gitleaks（公式 Release のバイナリ）で `gitleaks git <wt>` をかける。CI の `test.yml` の `secrets` ジョブも全履歴を見る。
+`gitleaks dir` は git 管理外のテストの出力（`projects/` に残る Chromium の設定など）も拾うので、使うなら先にそれを消す。
 
 ## コミットと PR
 
