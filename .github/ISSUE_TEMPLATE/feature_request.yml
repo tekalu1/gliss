@@ -1,0 +1,31 @@
+name: 要望
+description: 欲しい機能・直してほしい使い勝手
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **他人の歌声や、権利を持っていない音声を添付しないでください。** 画面の画像を貼るときも、他人の曲の名前・歌詞が写っていないか確かめてください。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 困っていること
+      description: 何をしようとして、どこで困ったか
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: こうなってほしい
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 今の回避策・ほかの案（任意）
+  - type: input
+    id: version
+    attributes:
+      label: Gliss の版（任意）
+      description: ヘルプ > Gliss について
+      placeholder: 0.1.0-beta.2
