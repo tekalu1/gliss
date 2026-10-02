@@ -1,0 +1,7 @@
+# アドオン「漢字の歌詞の読み」（lyrics-ja）の直接の依存。版は開発の .venv で確かめているものに固定する。
+# エンジン exe の依存（../../requirements-exe.txt）を制約にして解決するので、numpy・pydantic などは exe と同じ版になり、
+# アドオンには入らない（exe に無いものだけが入る）。ここを変えたら作り直す:
+#   node scripts/build-addon.mjs lyrics-ja --lock
+pyopenjtalk-plus==0.4.1.post9
+sudachipy==0.6.11
+sudachidict-core==20260723

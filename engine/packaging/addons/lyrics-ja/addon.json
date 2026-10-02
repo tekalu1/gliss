@@ -1,0 +1,21 @@
+{
+  "id": "lyrics-ja",
+  "title": "漢字の歌詞の読み",
+  "description": "漢字まじりの歌詞を読みに開く（pyopenjtalk-plus と SudachiPy の辞書）。無くても、かなの歌詞は使える",
+  "modules": ["pyopenjtalk", "sudachipy", "sudachidict_core"],
+  "uses": ["onnxruntime"],
+  "licenses": [
+    { "name": "Open JTalk", "license": "BSD-3-Clause", "file": "licenses/open_jtalk-COPYING.txt",
+      "note": "pyopenjtalk の拡張モジュール（openjtalk.pyd）に組み込まれている" },
+    { "name": "hts_engine API", "license": "BSD-3-Clause", "file": "licenses/hts_engine_API-COPYING.txt",
+      "note": "pyopenjtalk の拡張モジュール（htsengine.pyd）に組み込まれている" },
+    { "name": "MeCab", "license": "BSD-3-Clause", "file": "licenses/mecab-COPYING.txt",
+      "note": "Open JTalk に含まれる形態素解析器（GPL / LGPL / BSD の三つから BSD を選ぶ）" },
+    { "name": "Open JTalk の辞書（NAIST Japanese Dictionary・UniDic）", "license": "BSD-3-Clause",
+      "site": "pyopenjtalk/dictionary/COPYING", "note": "pyopenjtalk/dictionary" },
+    { "name": "HTS Voice \"Mei\"", "license": "CC-BY-3.0", "site": "pyopenjtalk/htsvoice/LICENSE_mei_normal.htsvoice",
+      "note": "pyopenjtalk に同梱の音声合成用の声（Gliss は使わない）" },
+    { "name": "SudachiDict", "license": "Apache-2.0（UniDic: BSD-3-Clause・NEologd: Apache-2.0 を含む）",
+      "file": "licenses/sudachidict-LEGAL.txt", "note": "sudachidict_core の辞書（system.dic）" }
+  ]
+}

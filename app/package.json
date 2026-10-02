@@ -1,0 +1,37 @@
+{
+  "name": "gliss",
+  "productName": "Gliss",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "description": "Gliss（歌声のピッチ・タイミング編集ツール）の画面（Electron）。Python エンジンに MCP（stdio）でつなぐ。",
+  "license": "GPL-3.0-or-later",
+  "author": "tekalu",
+  "type": "module",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "build:engine": "node ../scripts/build-engine.mjs",
+    "dist:dir": "pnpm prepack:files && electron-builder --dir",
+    "dist": "pnpm build:engine && pnpm prepack:files && electron-builder",
+    "test:unit": "playwright test tests/unit",
+    "build:addons": "node ../scripts/build-addon.mjs --all",
+    "prepack:files": "node ../scripts/release-notes.mjs && node ../scripts/addon-catalog.mjs && node ../scripts/third-party-notices.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.0",
+    "electron-updater": "6.8.9",
+    "extract-zip": "^2.0.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.15.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  }
+}

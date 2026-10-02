@@ -1,0 +1,118 @@
+# Gliss の配布版（Windows の NSIS インストーラ）の設定。
+#   pnpm build:engine   エンジン exe（../engine/packaging/dist/vocal-engine/）を作る
+#   pnpm dist:dir       展開版（dist/win-unpacked/Gliss.exe。インストールせずに動かして確かめる）
+#   pnpm dist           インストーラ（dist/Gliss-<版>-win-x64.exe）・.blockmap・latest.yml。build:engine を先に走らせる
+# どちらも先に ../scripts/release-notes.mjs が release-info.json（アプリ内の「更新の内容」）を、
+# ../scripts/addon-catalog.mjs が addons-catalog.json（任意のアドオンの目録。pnpm build:addons で作ったもの）を、
+# ../scripts/third-party-notices.mjs が THIRD_PARTY_NOTICES.txt を作る。
+# 公開（GitHub Releases へのアップロード）は electron-builder にさせない（CI が --publish never で作り、
+# 成果物を確かめてから gh release create する。.github/workflows/release.yml）。
+# 版は package.json の version が正本（engine 側は ../scripts/sync-version.mjs で写す）。
+#
+# **一度公開したら変えない識別子**: appId・productName・executableName。変えると、自動更新が
+# 別のアプリとして扱われ、ショートカットのピン留め・通知・インストール先・userData（%APPDATA%\Gliss）が切れる。
+appId: io.github.tekalu1.gliss
+productName: Gliss
+executableName: Gliss
+artifactName: Gliss-${version}-${os}-${arch}.${ext}
+
+directories:
+  output: dist
+
+# renderer はビルド工程の無い素の JS なので、そのまま入れる。node_modules の dependencies
+# （@modelcontextprotocol/sdk・extract-zip）は electron-builder が自動で足す。
+files:
+  - main.mjs
+  - args.mjs
+  - paths.mjs
+  - ai-connect.mjs
+  - model-download.mjs
+  - addons.mjs
+  - unzip.mjs
+  - addons-catalog.json
+  - updates.mjs
+  - update-provider.mjs
+  - engine-processes.mjs
+  - release-info.json
+  - preload.cjs
+  - renderer/**/*
+  - package.json
+asar: true
+npmRebuild: false          # ネイティブの依存は無い
+electronLanguages:         # Chromium のロケールは使うものだけ（約 40 MB 減る）
+  - ja
+  - en-US
+
+# resources/ に置くもの。パスは main.mjs・ai-connect.mjs・paths.mjs の packagedEngineExe / assetsDir と合わせる。
+extraResources:
+  # エンジン（PyInstaller のフォルダ形式。重みは含まない。初回に %LOCALAPPDATA%\Gliss\models へ取得）
+  - from: ../engine/packaging/dist/vocal-engine
+    to: engine/vocal-engine
+  # ウィンドウ・About のアイコン
+  - from: ../assets/logo
+    to: assets/logo
+    filter:
+      - gliss.ico
+      - gliss-icon-256.png
+  # GPL-3.0-or-later の全文。Electron の LICENSE.electron.txt・LICENSES.chromium.html はインストール先の直下に自動で入る
+  - from: ../LICENSE
+    to: LICENSE
+  # 同梱した依存（エンジン exe の Python のパッケージ・app.asar の Node のパッケージ）のライセンス文。
+  # ../scripts/third-party-notices.mjs が作る（生成物。pnpm dist / dist:dir が先に作る）。
+  # copyleft のパッケージ（parselmouth・soxr・certifi）のソースは Release に添付する（../scripts/gpl-sources.mjs）
+  - from: THIRD_PARTY_NOTICES.txt
+    to: THIRD_PARTY_NOTICES.txt
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: ../assets/logo/gliss.ico
+  # 1.0 までは無署名（docs/release-plan.md）。署名を足すときは signtoolOptions / azureSignOptions をここへ
+  # 足し、発行元名（publisherName）は一度付けたら変えない
+  # 更新の署名の検証: 無署名の間は検証しない（app-update.yml に publisherName を書かない。electron-updater は
+  # publisherName が無いと検証を飛ばし、latest.yml の SHA-512 だけを見る）。署名を付ける版で true にして、
+  # signtoolOptions.publisherName（証明書の Common Name）を固定する（docs/release-plan.md §5）
+  verifyUpdateCodeSignature: false
+
+nsis:
+  oneClick: false
+  perMachine: false                         # ユーザー単位（%LOCALAPPDATA%\Programs\Gliss。管理者権限が要らない）
+  allowToChangeInstallationDirectory: true
+  allowElevation: false
+  license: ../LICENSE                       # インストーラのライセンス画面（GPL の全文）
+  language: "1041"                          # 日本語
+  installerIcon: ../assets/logo/gliss.ico
+  uninstallerIcon: ../assets/logo/gliss.ico
+  shortcutName: Gliss
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  runAfterFinish: true
+  deleteAppDataOnUninstall: false           # 重み・プロジェクト・設定は消さない
+  differentialPackage: true                 # .blockmap を作る（自動更新の差分取得）
+  # 更新・手動インストールの前に、動いている Gliss を止める処理（CHECK_APP_RUNNING）は electron-builder の既定に、
+  # build/installer.nsh の customCheckAppRunning で「エンジンを先に止める」一手だけ足している。
+  # 既定（26.15 の templates/nsis/include/allowOnlyOneInstallerInstance.nsh）は PowerShell が使えれば
+  # インストール先の下で動くプロセスを探して止めるが、`(Get-CimInstance … | ? {…}).Count -gt 0` は
+  # **該当が 1 つだけのとき** Windows PowerShell 5.1 では .Count が $null になり「動いていない」と判定する。
+  # AI クライアント 1 つのエンジン（resources/engine/vocal-engine/vocal-engine.exe）だけが動いている、
+  # いちばんある状態がこれに当たり、止められないまま上書きして、古い版のアンインストールが失敗する
+  # （「Glissが終了できません」→「古いアプリケーションファイルのアンインストールに失敗しました: 2」）。
+  # そこで resources/engine/ の下のプロセスは先に止める。Gliss の画面は複数のプロセスなので既定のままで見つかる。
+  # PowerShell が使えないときは Gliss.exe だけを名前で探す（エンジンは残り、上書きに失敗しうる）。
+  # app/tests/unit/release.spec.js（R6）がテンプレートの形と installer.nsh の前提を確かめる（electron-builder を上げたら見直す）。
+  # アプリからの更新は、その前に画面がエンジンを止める（main.mjs の installUpdate・engine-processes.mjs）。
+  # アンインストールは、同じ build/installer.nsh の customUnInstall で %LOCALAPPDATA%\gliss-updater（更新のキャッシュ）を消す
+  # （--updated が付かないとき＝利用者のアンインストールだけ。更新の上書きでは消さない。重み・設定は消さない）。
+
+# 自動更新の配信元（公開リポジトリの GitHub Releases。認証なし）。resources/app-update.yml に入り、
+# electron-updater（main.mjs・update-provider.mjs）が各 Release の latest.yml を読む。
+# 先行（beta）と安定の振り分けは、チャネル名ではなく GitHub Release の prerelease 印で行う（docs/release-plan.md §4）。
+# そのため channel は latest に固定する（既定だと版の -beta から beta.yml を作り、Release ごとに名前が変わる）。
+# releaseType は electron-builder にアップロードさせないので使わない（CI が gh release create で公開する）。
+publish:
+  provider: github
+  owner: tekalu1
+  repo: gliss
+  channel: latest

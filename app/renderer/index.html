@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob:">
+<link rel="icon" href="data:,">
+<title>Gliss</title>
+<style>
+:root{--bg:#151517;--bg2:#1c1c1f;--fg:#d6d6d6;--fg2:#8f8f94;--fg3:#5c5c62;--line:#2a2a2e;--take:#e6d24a;--guide:#4e4e54;--sel:#f2f2f2;--orig:#cf7a2e;--ai:#8fa8ff}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;overflow:hidden;background:#111113;color:var(--fg);font:14px/1.75 system-ui,"Segoe UI","Yu Gothic UI","Meiryo",sans-serif}
+body{display:flex;flex-direction:column}
+.mock{position:relative;background:#111113;user-select:none;-webkit-user-select:none;outline:none;font-size:12px;margin:0;flex:1 1 auto;min-height:0;display:flex;flex-direction:column}
+/* タイトルバー（titlebar.js）: ロゴ・メニューバー・中央に名前。右上の最小化・最大化・閉じるは OS が同じ色で重ねる
+   （main の titleBarOverlay。その幅は env(titlebar-area-*) から）。空いた所はドラッグでウィンドウを動かす・ダブルクリックで最大化 */
+.titlebar{--wco:calc(100vw - env(titlebar-area-x,0px) - env(titlebar-area-width,100vw));flex:none;height:env(titlebar-area-height,32px);display:grid;grid-template-columns:minmax(max-content,1fr) minmax(0,max-content) minmax(var(--wco),1fr);align-items:center;background:#111113;color:var(--fg2);font-size:12px;line-height:1.5;user-select:none;-webkit-user-select:none;-webkit-app-region:drag;app-region:drag;overflow:hidden}
+.titlebar .tl{display:flex;align-items:center;gap:8px;padding-left:12px;min-width:0}
+.titlebar .logo{display:flex;align-items:center;flex:none}
+.titlebar .logo svg{height:13px;width:auto;display:block}
+.menubar{display:flex;gap:1px;min-width:0}
+.menubar button{-webkit-app-region:no-drag;app-region:no-drag;background:none;border:0;color:var(--fg2);font:inherit;padding:3px 8px;border-radius:4px;cursor:default;outline:none;white-space:nowrap}
+.menubar button:hover,.menubar button.hot{background:#26262a;color:var(--fg)}
+.menubar button[aria-expanded="true"]{background:#2f2f34;color:var(--fg)}
+.titlebar .ttl{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;text-align:center;padding:0 16px;color:var(--fg2)}
+@media (max-width:560px){.titlebar .logo{display:none}}
+/* メニューバーの下に開く段（右クリックのメニューと同じ見た目） */
+.mbd{position:fixed;z-index:1000;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55);padding:4px 0;min-width:220px;outline:none;font-size:12px;-webkit-app-region:no-drag;app-region:no-drag;user-select:none;-webkit-user-select:none}
+.mbd button{display:flex;width:100%;text-align:left;background:none;border:0;color:var(--fg);padding:4px 14px 4px 6px;font:inherit;line-height:1.6;cursor:default;outline:none}
+.mbd button .c{width:16px;flex:none;text-align:center}
+.mbd button .l{flex:1;white-space:nowrap}
+.mbd button .k{color:var(--fg3);margin-left:24px;white-space:nowrap}
+.mbd button.sel{background:#2f2f34}
+.mbd button[aria-disabled="true"]{color:#5c5c62}
+.mbd button[aria-disabled="true"].sel{background:#28282c}
+.mbd .sep{border-top:1px solid #2f2f34;margin:4px 0}
+.mock:focus-visible{outline:none}
+.tb{display:flex;align-items:center;gap:2px;height:36px;padding:0 8px;color:var(--fg2);flex:0 0 auto}
+.busy-line{height:2px;position:absolute;top:35px;left:0;right:0;z-index:9;pointer-events:none;background:transparent;overflow:hidden}
+.busy-line[hidden],.busy-scrim[hidden],.busy-pop[hidden],.busy-clip[hidden]{display:none}
+.busy-line span,.busy-clip span{display:block;height:100%;background:#d6d6d6;transition:width .18s linear}
+.busy-line.unknown span,.busy-clip.unknown span,.busy-pop .rail.unknown span{animation:busy-slide 1.5s ease-in-out infinite}
+@keyframes busy-slide{from{transform:translateX(-110%)}to{transform:translateX(340%)}}
+.mock.is-busy{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><path d='M2 2L2 22L8 17L12 26L15 24L11 16L18 16Z' fill='%23f2f2f2' stroke='%23111' stroke-width='1.5'/><path d='M20 5H28M20 25H28M21 7C21 13 27 13 27 16C27 19 21 19 21 23M27 7C27 13 21 13 21 16C21 19 27 19 27 23' fill='none' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 2 2,progress}
+.busy-clip{position:absolute;height:2px;z-index:5;pointer-events:none;overflow:hidden}
+/* 止める処理（busy.js）: 画面全体の覆い（タイトルバーのメニューも止める）。始まった瞬間は透明で、ポップアップを出すときに
+   ほかのダイアログ（ショートカット・AI とつなぐ）と同じ濃さに暗くする（タイトルバーは暗くしない）。終わった後の残りは入力を通す */
+.busy-scrim{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:env(titlebar-area-height,32px) 20px 0;cursor:progress}
+.busy-scrim::before{content:"";position:absolute;inset:env(titlebar-area-height,32px) 0 0 0;background:rgba(0,0,0,.4);opacity:0;transition:opacity .15s}
+.busy-scrim.shown::before{opacity:1}
+.busy-scrim.passive{pointer-events:none}
+.busy-pop{position:relative;width:min(320px,100%);padding:14px 16px 12px;background:#232326;border-radius:4px;box-shadow:0 8px 28px #0009;color:var(--fg);font-size:12px;line-height:1.6;cursor:default;outline:none}
+.busy-pop .ph{display:flex;justify-content:space-between;gap:12px}
+.busy-pop .pt{font-weight:600;min-width:0;overflow-wrap:anywhere}
+.busy-pop .pp{flex:none;font-variant-numeric:tabular-nums;color:var(--fg2)}
+.busy-pop .pd{display:flex;gap:8px;color:var(--fg2);font-size:11px;margin-bottom:9px;min-width:0}
+.busy-pop .pd .tg{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.busy-pop .pd .tg:empty{display:none}
+.busy-pop .pd .sg{flex:none;margin-left:auto;font-variant-numeric:tabular-nums}
+.busy-pop .rail{height:2px;background:#45454a;overflow:hidden}
+.busy-pop .rail span{display:block;height:100%;background:#d6d6d6;transition:width .18s linear}
+.busy-pop .pf{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:10px;min-height:20px}
+.busy-pop .pn{color:var(--fg2);font-size:11px}
+.busy-pop .pn.done{color:#9fd49f}
+.busy-pop.nudge .pn{animation:busy-nudge .5s}
+@keyframes busy-nudge{from{color:var(--fg)}}
+.busy-pop button{border:0;background:none;color:var(--fg2);font:inherit;padding:0 2px;cursor:pointer;border-radius:2px}
+.busy-pop button[hidden]{display:none}
+.busy-pop button:hover,.busy-pop button:focus-visible{color:var(--fg)}
+.busy-pop button:focus-visible{outline:1px solid var(--fg2);outline-offset:2px}
+.busy-pop button:disabled{color:var(--fg3);cursor:default}
+.tb button{background:none;border:0;color:var(--fg2);padding:5px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;border-radius:2px}
+.tb button:hover{color:var(--fg)}
+.tb button[aria-pressed="true"]{color:var(--fg);background:#2a2a2e}
+.tb button:disabled{color:#3f3f44;cursor:default}
+.tb svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block}
+.tb svg[hidden]{display:none}
+.tb .grp{width:14px}
+.tb .clock{margin-left:auto;color:var(--fg);font-variant-numeric:tabular-nums;padding-right:4px}
+/* グリッドの細かさ（スナップのアイコンの隣。issue #18）: 枠は付けず、文字だけ */
+.tb select.div{background:none;border:0;color:var(--fg2);font:inherit;font-size:11.5px;padding:2px 2px;margin-left:2px;cursor:pointer;border-radius:2px;outline:none;font-variant-numeric:tabular-nums}
+.tb select.div:hover,.tb select.div:focus-visible{color:var(--fg);background:#2a2a2e}
+.tb select.div option{background:#1c1c1f;color:var(--fg)}
+/* テンポ（ヘッダーの時刻の右。v3 §8）: 文字だけ。数字はクリックで入力・上下ドラッグ／ホイールで増減 */
+.tempo{margin-left:12px;color:var(--fg);font-variant-numeric:tabular-nums;white-space:nowrap;position:relative}
+.tempo .v{cursor:ns-resize;padding:1px 2px;border-radius:2px}
+.tempo #tSig{cursor:pointer}
+.tempo .v:hover{background:#2a2a2e}
+.tempo .v.none{color:var(--fg3)}
+.tempo .u{color:var(--fg2);margin:0 8px 0 3px}
+.tempo .src{color:var(--fg3);font-size:10.5px;margin-right:6px}
+.tempo .src[hidden]{display:none}
+.tempo #tBpm{display:inline-block;min-width:3.4em;text-align:right}
+.tempo input{position:absolute;left:0;top:-2px;width:4.2em;text-align:right;background:#1c1c1f;border:1px solid #5c5c62;color:var(--fg);font:inherit;padding:0 3px;outline:none}
+.tempo input[hidden]{display:none}
+.pop input[type=number],.pop select{width:5.5em;background:#1c1c1f;border:1px solid #3a3a3e;color:var(--fg);font:inherit;padding:1px 4px;outline:none}
+.pop button.ok{margin-top:6px;background:#2f2f34;border:0;color:var(--fg);font:inherit;padding:3px 14px;cursor:pointer;float:right}
+.pop button.ok:hover{background:#3a3a40}
+#roll{display:block;width:100%;flex:1 1 auto;min-height:0}
+/* トラックビュー（上）。モック proposal/track-view.html と同じ。見出しは 名前・ガイド・M・S だけ */
+#tv{flex:none;overflow:hidden;display:flex;flex-direction:column}
+#tv[hidden],#split[hidden]{display:none}
+#tvBody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#2a2a2e transparent}
+.rr{display:flex;height:20px;position:sticky;top:0;z-index:1;background:#111113}
+.rhd{width:160px;flex:none}
+#tvRuler{flex:1;display:block;height:20px;min-width:0}
+.rows{display:flex}
+#heads{width:160px;flex:none}
+#lanes{flex:1;display:block;min-width:0}
+.th{height:var(--th,44px);display:flex;align-items:center;gap:1px;padding:0 6px 0 10px;border-top:1px solid #232326;color:var(--fg2)}
+.th.vocal{cursor:pointer}
+.th.cur{background:#1a1a1d;color:var(--sel)}
+.th.off .nm{color:var(--fg3)}
+.th .nm{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.th input.rn{flex:1;min-width:0;background:#0f0f11;border:1px solid #3a3a3e;color:var(--fg);font:inherit;padding:0 4px;height:20px;border-radius:2px}
+.th button{background:none;border:0;color:var(--fg3);width:20px;height:20px;padding:0;font:600 10.5px system-ui,"Segoe UI",sans-serif;cursor:pointer;border-radius:2px;display:inline-flex;align-items:center;justify-content:center}
+.th button:hover{color:var(--fg)}
+.th button[aria-pressed="true"]{background:#2a2a2e;color:var(--sel)}
+.th .g{visibility:hidden}
+.th:hover .g,.th .g[aria-pressed="true"]{visibility:visible}
+.th .g[aria-pressed="true"]{background:none;color:var(--sel)}
+.th svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block}
+.th .gx{width:20px;flex:none}
+/* 裏の準備の印（tracks.js の prepMark。issue #63）: 名前の右に小さく。準備中 = 進み具合の輪、待ち = 点線の輪、失敗 = !（対応付けの失敗 #32 は薄く） */
+.th .pp{flex:none;width:12px;height:12px;margin:0 3px 0 2px;display:inline-flex;align-items:center;justify-content:center;cursor:default}
+.th .pp:empty{display:none}
+.th .pp svg{width:11px;height:11px;fill:none;stroke-width:1.6;stroke-linecap:round}
+.th .pp .bg{stroke:#3a3a3e}
+.th .pp .fg{stroke:var(--fg2);transition:stroke-dasharray .4s}
+.th .pp .dot{stroke:var(--fg3);stroke-dasharray:1.3 2.3}
+.th .pp[data-state=fallback] svg{stroke:var(--fg3)}
+.th .pp[data-state=failed] svg{stroke:var(--orig);stroke-width:1.8}
+/* 見出しを上下にドラッグして並び替えている間（issue #38） */
+#heads.ordering,#heads.ordering *{cursor:grabbing!important}
+/* 上下の境界: 1 px の線。ドラッグで高さ、ダブルクリックで上を畳む／戻す */
+#split{height:5px;flex:none;cursor:row-resize;position:relative}
+#split::after{content:"";position:absolute;left:0;right:0;top:2px;height:1px;background:#2a2a2e}
+#split:hover::after,#split.on::after{background:#56565c}
+/* ノートの小さな波形（blob）: 枠は描かず、塗りの濃さだけで ふつう／ホバー／選択 を見せる */
+#roll .blob{fill-opacity:.3}
+#roll .nb:hover .blob,#roll .nb.hov .blob{fill-opacity:.45}
+#roll .nb.sel .blob{fill-opacity:.62}
+.status{flex:0 0 auto;height:18px;line-height:18px;padding:0 10px;color:var(--fg3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pop,.menu{position:absolute;z-index:2;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55)}
+.pop[hidden],.menu[hidden]{display:none}
+.pop{padding:10px 12px;width:260px}
+.pop-t{color:var(--fg);margin-bottom:6px}
+.pop-t span{color:var(--fg2)}
+.pop label{display:flex;align-items:center;gap:8px;color:var(--fg2);margin:4px 0}
+.pop label .l{width:4.5em}
+.pop input[type=range]{flex:1;accent-color:#d6d6d6;margin:0}
+.pop-v{font-variant-numeric:tabular-nums;width:3em;text-align:right;color:var(--fg)}
+/* 右クリックのメニュー（issue #17。モック v3 と同じ）: 左にチェックの列、右にキー、区切りは細い線 */
+.menu{padding:4px 0;min-width:210px}
+.menu button{display:flex;width:100%;text-align:left;background:none;border:0;color:var(--fg);padding:4px 14px 4px 6px;font:inherit;font-size:12px;line-height:1.6;cursor:pointer}
+.menu button .c{width:16px;flex:none;text-align:center}
+.menu button .l{flex:1;white-space:nowrap}
+.menu button .k{color:var(--fg3);margin-left:24px;white-space:nowrap}
+.menu button:hover,.menu button:focus-visible{background:#2f2f34;outline:none}
+.menu button:disabled{color:#5c5c62;cursor:default;background:none}
+.menu hr{border:0;border-top:1px solid #2f2f34;margin:4px 0}
+/* キーボードショートカットの設定（issue #22。モック v3 §10 と同じ） */
+.keys-bg{position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:7}
+.keys-bg[hidden],.keys[hidden]{display:none}
+.keys{position:absolute;left:50%;top:34px;transform:translateX(-50%);width:660px;max-width:calc(100% - 20px);max-height:calc(100% - 50px);display:flex;flex-direction:column;background:#1c1c1f;box-shadow:0 10px 40px rgba(0,0,0,.7);z-index:8;outline:none}
+.kh{display:flex;align-items:center;padding:10px 12px 6px;color:var(--fg);font-size:13px}
+.kh button,.kr button{background:none;border:0;color:var(--fg2);cursor:pointer;font:inherit;padding:0 5px}
+.kh button{margin-left:auto;font-size:15px}
+.kh button:hover,.kr button:hover{color:var(--fg)}
+.ks{margin:0 12px 6px;background:#151517;border:1px solid #3a3a3e;color:var(--fg);padding:5px 8px;font:inherit;outline:none}
+.ks:focus{border-color:#5c5c62}
+.kl{overflow-y:auto;flex:1;min-height:0;padding-bottom:6px;scrollbar-width:thin;scrollbar-color:#2a2a2e transparent}
+.kg{color:var(--fg3);font-size:11px;padding:8px 12px 2px}
+.kr{display:flex;align-items:center;height:25px;padding:0 12px;cursor:default}
+.kr:hover,.kr.cap{background:#26262a}
+.kr .n{flex:1;color:var(--fg)}
+.kr .k{width:200px;color:var(--fg2);font-variant-numeric:tabular-nums}
+.kr.mod .k{color:var(--fg)}
+.kr.cap .k{color:var(--take)}
+.kr .st{width:150px;color:var(--fg3);font-size:11px}
+.kr .ab{width:44px;text-align:right;visibility:hidden}
+.kr:hover .ab{visibility:visible}
+.kc{padding:3px 12px 6px 24px;color:var(--orig);font-size:11.5px;background:#26262a}
+.kc button{background:none;border:0;color:var(--fg);cursor:pointer;font:inherit;margin-left:10px;padding:0}
+.kf{display:flex;gap:14px;align-items:center;padding:7px 12px;border-top:1px solid #2a2a2e;color:var(--fg3);font-size:11px}
+.kf button{background:none;border:0;color:var(--fg2);cursor:pointer;font:inherit;padding:0}
+.kf button:hover{color:var(--fg)}
+.kf .kt{margin-left:auto}
+/* AI とつなぐ（ヘルプ > AI とつなぐ…）。見た目の手本は mcp-onboarding-v2 の「② AI とつなぐ」 */
+.ai-bg{position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:7}
+.ai-bg[hidden],.aid[hidden]{display:none}
+.aid{position:absolute;left:50%;top:60px;transform:translateX(-50%);width:420px;max-width:calc(100% - 20px);background:#1c1c1f;box-shadow:0 10px 40px rgba(0,0,0,.7);z-index:8;outline:none;font-size:13px}
+.aid .kh{padding:10px 12px}
+.aid .cl{display:flex;align-items:center;gap:10px;min-height:44px;padding:0 12px;border-top:1px solid #2a2a2e}
+.aid .cl .n{flex:1;color:var(--fg)}
+.aid .cl.off .n{color:var(--fg3)}
+.aid .cl .st{color:var(--fg2);font-size:12px;white-space:nowrap}
+.aid .cl .st.err{color:var(--orig)}
+.aid .cl button{display:inline-flex;align-items:center;gap:6px;background:#2f2f34;border:0;color:var(--fg);font:inherit;font-size:12px;padding:4px 12px;border-radius:3px;cursor:pointer;white-space:nowrap}
+.aid .cl button.pri{background:var(--take);color:#151517;font-weight:600}
+.aid .cl button:disabled{opacity:.45;cursor:default}
+.aid .cl button[hidden]{display:none}
+.aid .cl svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.aid .pm{display:flex;flex-wrap:wrap;gap:16px;align-items:center;padding:10px 12px;border-top:1px solid #2a2a2e;font-size:12px;color:var(--fg)}
+.aid .pm .h{color:var(--fg3)}
+.aid .sw{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.aid .sw input{appearance:none;width:28px;height:16px;border-radius:8px;background:#3a3a3e;position:relative;cursor:pointer;margin:0}
+.aid .sw input::after{content:"";position:absolute;left:2px;top:2px;width:12px;height:12px;border-radius:50%;background:#aaaab0;transition:left .15s}
+.aid .sw input:checked{background:var(--take)}
+.aid .sw input:checked::after{left:14px;background:#151517}
+.aid .sw input:focus-visible{outline:1px solid var(--fg2);outline-offset:2px}
+/* 更新（ヘルプ > 更新を確認…。updates.js）。見た目は「AI とつなぐ」と同じ。右下の知らせは操作を待つ間だけ出る */
+.upd .cl .n{flex:none}
+.upd .cl .st{flex:1;white-space:normal;line-height:1.5;padding:6px 0;text-align:right}
+.upd .bar{height:4px;margin:0 12px 10px;background:#343946;border-radius:2px;overflow:hidden}
+.upd .bar span{display:block;height:100%;background:var(--take);width:0}
+.upd .bar[hidden],.upd .nt[hidden],.upd .lk[hidden]{display:none}
+.upd .lk{display:block;background:none;border:0;color:var(--fg2);font:inherit;font-size:12px;padding:0 12px 10px;cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+.upd .lk:hover{color:var(--fg)}
+.upd{width:520px}
+.upd .nt{padding:0 12px 10px;font-size:12px;line-height:1.6;color:var(--fg);max-height:300px;overflow:auto;user-select:text;-webkit-user-select:text;scrollbar-width:thin;scrollbar-color:#2a2a2e transparent}
+.upd .nt .nh{color:var(--fg2)}
+.upd .nt .ns{color:var(--fg3);margin-top:6px}
+.upd .nt ul{margin:2px 0 0;padding-left:18px}
+/* 知らせはタイトルバーの右端（OS の最小化・最大化・閉じるの左。.wco の列は OS のボタンの幅を含む） */
+.titlebar .wco{display:flex;justify-content:flex-end;min-width:0;padding-right:calc(var(--wco) + 8px)}
+.upd-note{display:flex;align-items:center;gap:8px;min-width:0;height:24px;background:#232326;color:var(--fg);font-size:12px;padding:0 4px 0 10px;border-radius:4px;cursor:pointer;-webkit-app-region:no-drag;app-region:no-drag}
+.upd-note[hidden]{display:none}
+.upd-note .t{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.upd-note button{background:#2f2f34;border:0;color:var(--fg);font:inherit;padding:1px 10px;border-radius:3px;cursor:pointer;white-space:nowrap}
+.upd-note button.pri{background:var(--take);color:#151517;font-weight:600}
+.upd-note button[data-b="dismiss"]{background:none;color:var(--fg2);padding:2px 6px;font-size:14px;line-height:1}
+.upd-note button[data-b="dismiss"]:hover{color:var(--fg)}
+.upd-note button[hidden]{display:none}
+/* 短い知らせ（「3 ノートをコピー」）。下の中央に出て消える */
+.toast{position:absolute;left:50%;bottom:30px;transform:translate(-50%,6px);background:#2a2a2e;color:var(--fg);font-size:12px;padding:4px 12px;border-radius:4px;box-shadow:0 6px 20px rgba(0,0,0,.5);z-index:9;pointer-events:none;opacity:0;transition:opacity .2s,transform .2s;white-space:nowrap}
+.toast.on{opacity:1;transform:translate(-50%,0)}
+/* 子音・息（音程の無いノート）: 乗っている・つかんでいる間はやや濃く（issue #35） */
+#roll .npg:hover path[data-nopitch],#roll .npg.hov path[data-nopitch]{fill-opacity:.26}
+/* 無音にしたノート（Del）: 帯を薄く */
+#roll .nb.muted .blob{fill-opacity:.1}
+#roll .nb.muted:hover .blob,#roll .nb.muted.hov .blob{fill-opacity:.16}
+#roll .nb.muted.sel .blob{fill-opacity:.24}
+/* ツールのカーソル（鉛筆・はさみ）。blob の cursor:move などより優先 */
+#roll.tool-draw rect[data-note],#roll.tool-draw path,#roll.tool-draw{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z' stroke='%23111' stroke-width='3.2'/><path d='m15 5 4 4' stroke='%23111' stroke-width='3.2'/><path d='M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='m15 5 4 4' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 3 21,crosshair!important}
+#roll.tool-cut rect[data-note],#roll.tool-cut rect[data-join],#roll.tool-cut{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M20 4 8.12 15.88' stroke='%23111' stroke-width='3.2'/><path d='M14.47 14.48 20 20' stroke='%23111' stroke-width='3.2'/><path d='M8.12 8.12 12 12' stroke='%23111' stroke-width='3.2'/><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M20 4 8.12 15.88' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M14.47 14.48 20 20' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M8.12 8.12 12 12' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 12 12,crosshair!important}
+#roll.tool-draw rect[data-lane],#roll.tool-cut rect[data-lane]{cursor:text!important}
+/* 鍵盤とルーラー（タイムスケール）の上はどのツールでも矢印（issue #6） */
+#roll.tool-draw rect[data-scale],#roll.tool-cut rect[data-scale],#roll.tool-draw rect[data-keys],#roll.tool-cut rect[data-keys]{cursor:default!important}
+.lyr{position:absolute;z-index:3;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55);padding:0}
+.lyr[hidden]{display:none}
+.lyr input{width:100%;background:#1c1c1f;border:1px solid #3a3a3e;color:var(--fg);font:inherit;font-size:13px;padding:6px 8px;outline:none}
+.lyr input:focus{border-color:#5c5c62}
+/* Empty window / first run */
+#mock.first-run .tb,#mock.first-run #roll,#mock.first-run #tv,#mock.first-run #split{display:none}
+#firstRun[hidden],#modelLicense[hidden],#modelActions [hidden],.fr-actions [hidden],.fr-license[hidden]{display:none}
+#firstRun{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 24px 18px;gap:16px;color:#e6e8ee}
+.fr-model{border:1px solid #343946;background:#20232a;border-radius:7px;padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:56px;font-size:13px}
+.fr-model strong{font-size:13px}.fr-muted{color:#9aa1af}.fr-spacer{flex:1}
+.fr-model button,.fr-drop button,.fr-foot button{font:inherit;cursor:pointer;border-radius:5px;padding:6px 13px;border:1px solid #424755;background:#2b303a;color:#e6e8ee}
+.fr-model button:hover,.fr-drop button:hover{background:#3b414c}
+.fr-model .fr-primary{background:#f2c14e;border-color:#f2c14e;color:#1a1a1a;font-weight:600}
+.fr-model .fr-primary:hover{background:#ffd26a}
+.fr-model .fr-quiet,.fr-foot button{background:transparent;border-color:transparent;color:#9aa1af}
+.fr-model .fr-quiet:hover,.fr-foot button:hover{color:#e6e8ee}
+.fr-progress{width:clamp(120px,24vw,260px);height:5px;background:#343946;border-radius:3px;overflow:hidden}
+.fr-progress span{display:block;height:100%;background:#f2c14e;width:0}
+.fr-progress[hidden]{display:none}
+.fr-error{color:#ffb4a6;max-width:100%;overflow-wrap:anywhere}
+.fr-error:empty{display:none}
+#modelLicense{border:1px solid #343946;border-radius:7px;background:#1d2026;padding:12px 16px;font-size:12px;line-height:1.8}
+#modelLicense a{color:#a9baff}
+/* 任意機能のアドオン（addons.js）。行は解析モデルと同じ見た目 */
+#addonRows{display:flex;flex-direction:column;gap:16px}#addonRows:empty{display:none}
+.fr-actions{display:flex;gap:4px}.fr-model .fr-warn{color:#f2c14e}.fr-model button:disabled{opacity:.45;cursor:default}
+.fr-license{border:1px solid #343946;border-radius:7px;background:#1d2026;padding:12px 16px;font-size:12px;line-height:1.8;color:#e6e8ee}
+/* モデルと追加の機能（ヘルプ > モデルと追加の機能…）。初回画面の行をここへ移して出す */
+.addons-dlg{width:680px}.addons-dlg .fr-progress{width:150px}
+.addons-dlg .ad-body{display:flex;flex-direction:column;gap:12px;padding:12px;border-top:1px solid #2a2a2e;max-height:calc(100vh - 200px);overflow:auto}
+.addons-dlg .ad-foot{padding:0 12px 12px;font-size:12px;color:var(--fg3);line-height:1.6}
+.fr-drop{flex:1;min-height:220px;border:2px dashed #414755;border-radius:9px;display:grid;place-items:center;text-align:center;color:#9aa1af;transition:background .15s,border-color .15s}
+.fr-drop.dragging{border-color:#f2c14e;background:#26282c}
+.fr-drop svg{display:block;width:42px;height:42px;margin:0 auto 9px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.fr-drop button{display:block;margin:12px auto 0}
+.fr-foot{display:flex;justify-content:flex-end;min-height:24px}
+.fr-foot button{font-size:12px;padding:2px 6px}
+@media(max-width:560px){#firstRun{padding:0 12px 12px;gap:10px}.fr-model{gap:8px}.fr-progress{width:100%;order:3}}
+</style>
+</head>
+<body>
+<div class="titlebar" id="titlebar">
+  <div class="tl">
+    <span class="logo" role="img" aria-label="Gliss"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 402 151" aria-hidden="true"><g transform="translate(8 8)"><g fill="#f2f0e8"><path d="M124 26 C111 9 94 0 70 0 C31 0 0 28 0 67 C0 105 29 135 69 135 C106 135 132 109 132 73 V59 H68 V83 H103 C98 100 87 109 69 109 C44 109 27 91 27 67 C27 43 45 26 69 26 C84 26 96 31 105 42 Z"/><path d="M144 0H169V133H144Z"/><path d="M183 35H208V133H183Z"/><path d="M296 56 C288 44 276 38 260 38 C237 38 221 50 221 68 C221 85 234 91 255 96 L263 98 C269 100 272 102 272 107 C272 112 267 115 260 115 C250 115 243 110 239 103 L218 115 C227 130 241 135 258 135 C284 135 299 123 299 106 C299 87 284 81 264 76 L255 74 C248 72 247 70 247 67 C247 63 252 59 259 59 C267 59 274 63 278 69 Z"/><path d="M296 56 C288 44 276 38 260 38 C237 38 221 50 221 68 C221 85 234 91 255 96 L263 98 C269 100 272 102 272 107 C272 112 267 115 260 115 C250 115 243 110 239 103 L218 115 C227 130 241 135 258 135 C284 135 299 123 299 106 C299 87 284 81 264 76 L255 74 C248 72 247 70 247 67 C247 63 252 59 259 59 C267 59 274 63 278 69 Z" transform="translate(87 0)"/></g><path fill="#e6c84a" d="M183 0H208V25H183Z"/></g></svg></span>
+    <div class="menubar" id="menubar" role="menubar" aria-label="メニューバー"></div>
+  </div>
+  <div class="ttl" id="docTitle"></div>
+  <div class="wco"><div class="upd-note" id="updNote" hidden role="status" aria-live="polite"><span class="t"></span><button class="pri" data-b="act"></button><button data-b="dismiss" title="閉じる" aria-label="閉じる">×</button></div></div>
+</div>
+<div class="mock" id="mock" tabindex="0" aria-label="Gliss">
+  <div id="busyLine" class="busy-line" hidden role="progressbar" aria-valuemin="0" aria-valuemax="100"><span id="busyFill"></span></div>
+  <div id="busyClip" class="busy-clip" hidden aria-hidden="true"><span></span></div>
+  <div class="tb" role="toolbar" aria-label="ツールバー">
+    <button id="bPlay" aria-label="再生／停止（Space）" title="再生／停止（Space）"><svg id="icPlay" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14l11-7z"/></svg><svg id="icStop" viewBox="0 0 24 24" aria-hidden="true" hidden><rect x="6" y="6" width="12" height="12"/></svg></button>
+    <span class="grp"></span>
+    <button id="bToolMain" aria-label="メインツール（1）" title="メインツール（1）" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5 18.5 12l-6 1.5-3 5.5z"/></svg></button>
+    <button id="bToolDraw" aria-label="鉛筆（2）: ピッチを描く" title="鉛筆（2）: ピッチを描く" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z"/><path d="m15 5 4 4"/></svg></button>
+    <button id="bToolCut" aria-label="はさみ（3）: ノートを分ける" title="はさみ（3）: ノートを分ける（境目をダブルクリックで結合）" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg></button>
+    <span class="grp"></span>
+    <button id="bUndo" aria-label="元に戻す（Ctrl+Z）" title="元に戻す（Ctrl+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
+    <button id="bRedo" aria-label="やり直す（Ctrl+Shift+Z）" title="やり直す（Ctrl+Shift+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
+    <span class="grp"></span>
+    <button id="bGuide" aria-label="ガイドを重ねて表示" title="ガイドを重ねて表示" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg></button>
+    <span class="grp"></span>
+    <button id="bMacro" aria-label="ガイドに合わせる…" title="ガイドに合わせる…"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20 14 10"/><path d="m14 10 3-3 2 2-3 3z"/><path d="M19 3v2M21 4h-2M11 4v2M12 5h-2"/></svg></button>
+    <span class="grp"></span>
+    <button id="bFollow" aria-label="再生位置に追従（F）" title="再生位置に追従（F）" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12h12"/><path d="m12 8 4 4-4 4"/><path d="M19.5 5v14"/></svg></button>
+    <span class="grp"></span>
+    <button id="bSnapT" aria-label="時間スナップ（N）" title="時間スナップ（N）。ドラッグ中 Shift で解除" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14"/><path d="M7 12h12"/></svg></button>
+    <button id="bSnapP" aria-label="音程スナップ（Shift+N）" title="音程スナップ: 平均の音程を半音に（Shift+N）。ドラッグ中 Shift で解除" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h5M3 12h5M3 18h5"/><rect x="11" y="10" width="10" height="4" rx="2"/></svg></button>
+    <select id="gridDiv" class="div" aria-label="グリッドの細かさ" title="グリッドの細かさ（スナップの刻み）"></select>
+    <span class="clock" id="clock">0:00.000</span>
+    <span class="tempo" id="tempo"><span class="src" id="tSrc" hidden>iXML</span><span class="v none" id="tBpm">—</span><span class="u">BPM</span><span class="v none" id="tSig">4/4</span><input id="tIn" hidden aria-label="テンポ・拍子の入力"></span>
+  </div>
+  <section id="firstRun" hidden aria-label="初回起動">
+    <div class="fr-model" id="modelRow">
+      <strong>解析モデル</strong><span class="fr-muted" id="modelSummary">確認中…</span>
+      <div class="fr-spacer"></div>
+      <div class="fr-progress" id="modelProgress" hidden role="progressbar" aria-label="解析モデルのダウンロード" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="modelProgressFill"></span></div>
+      <span class="fr-muted" id="modelPercent" hidden></span>
+      <div id="modelActions"><button class="fr-quiet" id="modelLicenseButton" hidden>ライセンス</button><button class="fr-primary" id="modelDownloadButton" hidden>ダウンロード</button><button class="fr-quiet" id="modelCancelButton" hidden>取り消し</button></div>
+      <span class="fr-error" id="modelError" role="alert"></span>
+    </div>
+    <div id="modelLicense" hidden><div>RMVPE：記載なし · <a href="https://github.com/yxlllc/RMVPE/releases/download/230917/rmvpe-onnx.zip" target="_blank" rel="noopener">入手元</a></div><div>HubertFA：コードは Apache-2.0、重みは未確認 · <a href="https://github.com/wolfgitpr/HubertFA/releases/download/v0.0.7/1218_hfa_model_new_dict.zip" target="_blank" rel="noopener">入手元</a></div></div>
+    <div id="addonRows" aria-label="追加の機能"></div>
+    <div class="fr-drop" id="firstRunDrop"><div><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M3 25h5l4-11 5 23 6-30 6 32 5-18 4 7h7"/></svg>WAV をドロップ<button id="firstRunOpen">開く…</button></div></div>
+    <div class="fr-foot"><button id="firstRunAi" hidden>AI とつなぐ</button></div>
+  </section>
+  <div id="tv" aria-label="トラックビュー" hidden>
+    <div id="tvBody">
+      <div class="rr"><div class="rhd"></div><svg id="tvRuler" aria-hidden="true"></svg></div>
+      <div class="rows"><div id="heads"></div><svg id="lanes" role="img" aria-label="トラック"></svg></div>
+    </div>
+  </div>
+  <div id="split" role="separator" aria-orientation="horizontal" aria-label="トラックビューとエディタービューの境界" hidden></div>
+  <svg id="roll" role="img" aria-label="ピアノロール"></svg>
+  <div class="status" id="status"></div>
+  <div class="pop" id="pop" hidden role="dialog" aria-label="ガイドに合わせる">
+    <div class="pop-t">ガイドに合わせる <span id="popScope">全体</span></div>
+    <label><span class="l">ピッチ</span><input type="range" id="popPitch" min="0" max="100" value="0" aria-label="ピッチの強度"><span class="pop-v" id="popPitchV">0%</span></label>
+    <label><span class="l">タイミング</span><input type="range" id="popTime" min="0" max="100" value="0" aria-label="タイミングの強度"><span class="pop-v" id="popTimeV">0%</span></label>
+    <label><input type="checkbox" id="popPitchShape" checked>線の形もガイドに合わせる</label>
+  </div>
+  <div class="pop" id="popTr" hidden role="dialog" aria-label="つなぎのなだらかさ">
+    <div class="pop-t">つなぎのなだらかさ <span id="popTrScope">全体</span></div>
+    <label><input type="range" id="popTrV" min="0" max="100" value="50" aria-label="なだらかさ（0 = 段差、中央 = 自動）"><span class="pop-v" id="popTrVV">自動</span></label>
+  </div>
+  <div class="pop" id="popTempo" hidden role="dialog" aria-label="テンポと拍子">
+    <div class="pop-t">テンポと拍子</div>
+    <label><span class="l">テンポ</span><input type="number" id="tpB" min="20" max="400" step="0.01" aria-label="テンポ（BPM）"> BPM</label>
+    <label><span class="l">拍子</span><select id="tpN" aria-label="拍子の分子">
+      <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option>6</option><option>7</option><option>8</option><option>9</option><option>10</option><option>11</option><option>12</option><option>13</option><option>14</option><option>15</option><option>16</option>
+    </select> / <select id="tpD" aria-label="拍子の分母"><option>2</option><option>4</option><option>8</option><option>16</option></select></label>
+    <label><span class="l">1 小節目</span><input type="number" id="tpS" step="0.001" aria-label="1 小節目の位置（秒）"> 秒</label>
+    <button class="ok" id="tpOk">OK</button>
+  </div>
+  <div class="lyr" id="lyr" hidden>
+    <input type="text" id="lyrIn" placeholder="フレーズの歌詞（かな・カナ・漢字混じり可）。Enter で確定、Esc で取り消し" aria-label="歌詞">
+  </div>
+  <div class="menu" id="menu" hidden role="menu" aria-label="右クリックのメニュー"></div>
+  <div class="keys-bg" id="keysBg" hidden></div>
+  <div class="keys" id="keys" hidden role="dialog" aria-label="ショートカット（キー・ホイール）" tabindex="-1">
+    <div class="kh">ショートカット（キー・ホイール）<button data-b="close" title="閉じる（Esc）" aria-label="閉じる">×</button></div>
+    <input class="ks" type="search" placeholder="コマンドかキーで検索（例: 結合、Ctrl+J）" aria-label="検索">
+    <div class="kl" role="grid"></div>
+    <div class="kf"><button data-b="all">すべて既定に戻す</button><span class="kn"></span><span class="kt">行をダブルクリック → キーを押す（ホイールは修飾キーを押しながら回す）</span></div>
+  </div>
+  <div class="ai-bg" id="aiBg" hidden></div>
+  <div class="aid" id="ai" hidden role="dialog" aria-label="AI とつなぐ" tabindex="-1">
+    <div class="kh">AI とつなぐ<button data-b="close" title="閉じる（Esc）" aria-label="閉じる">×</button></div>
+    <div class="cl" data-cl="cc"><span class="n">Claude Code</span><span class="st"></span><button class="pri" data-b="cc">追加</button></div>
+    <div class="cl" data-cl="cd"><span class="n">Claude Desktop</span><span class="st"></span><button class="pri" data-b="cd">追加</button></div>
+    <div class="cl" data-cl="ot"><span class="n">その他</span><span class="st"></span><button data-b="copy"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M3 10.5V3.8A1.3 1.3 0 014.3 2.5H10.5"/></svg>設定をコピー</button></div>
+    <div class="pm"><span class="h">AI に許可</span>
+      <label class="sw"><input type="checkbox" data-allow="edit" checked> 編集</label>
+      <label class="sw"><input type="checkbox" data-allow="save"> 保存・書き出し</label>
+    </div>
+  </div>
+  <div class="ai-bg" id="updBg" hidden></div>
+  <div class="aid upd" id="upd" hidden role="dialog" aria-label="更新" tabindex="-1">
+    <div class="kh">更新<button data-b="close" title="閉じる（Esc）" aria-label="閉じる">×</button></div>
+    <div class="cl"><span class="n">Gliss <span id="updVer"></span></span><span class="st" id="updSt" aria-live="polite"></span><button class="pri" id="updAct" hidden></button></div>
+    <div class="bar" id="updBar" hidden role="progressbar" aria-label="更新のダウンロード" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+    <button class="lk" id="updNotesLink" hidden>この版の内容</button>
+    <div class="nt" id="updNotes" hidden></div>
+    <div class="pm"><span class="h">設定</span>
+      <label class="sw"><input type="checkbox" data-pref="autoCheck"> 自動で確認</label>
+      <label class="sw"><input type="checkbox" data-pref="autoDownload"> 自動でダウンロード</label>
+      <label class="sw"><input type="checkbox" data-pref="beta"> ベータ版を受け取る</label>
+    </div>
+  </div>
+  <div class="ai-bg" id="addonsBg" hidden></div>
+  <div class="aid addons-dlg" id="addonsDlg" hidden role="dialog" aria-label="モデルと追加の機能" tabindex="-1">
+    <div class="kh">モデルと追加の機能<button data-b="close" title="閉じる（Esc）" aria-label="閉じる">×</button></div>
+    <div class="ad-body" id="addonsBody"></div>
+    <div class="ad-foot">追加の機能は %LOCALAPPDATA%\Gliss\addons に入ります。入れるとすぐに使えます（AI クライアントから使っているエンジンは、つなぎ直すと使えます）。</div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</div>
+<div id="busyScrim" class="busy-scrim" hidden>
+  <div id="busyCenter" class="busy-pop" hidden role="dialog" aria-modal="true" aria-labelledby="busyLabel" aria-describedby="busyDetail busyNote" tabindex="-1">
+    <div class="ph"><span id="busyLabel" class="pt"></span><span id="busyPercent" class="pp"></span></div>
+    <div id="busyDetail" class="pd"><span id="busyTarget" class="tg"></span><span id="busyStage" class="sg"></span></div>
+    <div class="rail"><span></span></div>
+    <div class="pf"><span id="busyNote" class="pn" aria-live="polite"></span><button id="busyCancel" hidden>取り消し（Esc）</button></div>
+  </div>
+</div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

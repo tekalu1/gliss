@@ -1,0 +1,112 @@
+# テストの回し方
+
+| テスト | 場所 | 回し方 | 要るもの |
+|---|---|---|---|
+| エンジン | `engine/tests`（pytest） | `cd engine` → `..\.venv\Scripts\python.exe -m pytest -q` | `.venv`（[development.md](development.md)） |
+| 画面の単体テスト | `app/tests/unit`（Electron を起動しない） | `cd app` → `pnpm test:unit` | `pnpm install` |
+| 画面の通しのテスト | `app/tests/*.spec.js`（Playwright で Electron を起動） | `cd app` → `pnpm test`（ウィンドウを見るなら `pnpm test:headed`） | エンジンの `.venv` |
+
+CI（`.github/workflows/test.yml`）は、エンジンの pytest（ubuntu）と画面の単体テスト・版とリリースノートの検査（windows）を回す。
+素材・重みが要るテストは CI では skip になる。
+
+## 素材と重みが無くても回る範囲
+
+テストの素材（実際の歌声）は**リポジトリに入れていない**（第三者の収録を含むため）。解析モデルの重みも同梱しない。
+どちらも無いときは、それが要るテストは skip になる。
+
+- エンジン: 素材も重みも無い状態で 130 件ほどが通り、残りは skip（2026-10 時点）。
+- 画面: 素材を開くテストは、素材か重みが無いとファイルごと skip（`app/tests/materials.js` の `skipUnlessReady`）。
+  重みが無いまま素材を開くと、画面が初回の「モデルの準備」で止まり、解析を待つテストが時間切れになるため。
+  素材の要らないテスト（初回の画面・タイトルバー・更新の表示・忙しい表示など）はエンジンの `.venv` だけで回る。
+
+重みは画面の初回の「モデルの準備」で `%LOCALAPPDATA%\Gliss\models` に取得するか、`VOCAL_ENGINE_MODELS_DIR` で置き場を指す。
+
+## 手元の素材で全部を回す
+
+自分で録った（または権利を持っている）歌声を、環境変数 `GLISS_TEST_MATERIALS` で指したフォルダに置く。
+
+```
+<素材のフォルダ>\
+  materials.json            素材の一覧と、素材に結び付いたデータ（歌詞など）
+  *.wav                     materials.json の "clips" に書いたファイル
+  regression-baseline.json  再合成の回帰値（任意。engine/tests/regression_measure.py が作る）
+  praat-reference\          評価の段階の Praat の書き出し（任意。C_pitch+3.wav・A_pitch-2.wav）
+```
+
+```powershell
+$env:GLISS_TEST_MATERIALS = 'C:\path\to\materials'
+$env:VOCAL_ENGINE_MODELS_DIR = 'C:\path\to\models'    # 既定の %LOCALAPPDATA%\Gliss\models に入っていれば不要
+cd engine; ..\.venv\Scripts\python.exe -m pytest -q
+cd ..\app; pnpm test
+```
+
+テストのコードには素材のファイル名・歌詞を書かない。テストは記号（`C` など）とデータのキーで素材を引く
+（`engine/tests/materials.py`・`app/tests/materials.js`）。
+
+### materials.json
+
+```json
+{
+  "clips": { "A": "a.wav", "C": "c.wav", "C2": "c2.wav", "SONG": "D:\\music\\song.wav" },
+  "data": {
+    "C.part1": "前半のフレーズの歌詞",
+    "C.part2": "後半のフレーズの歌詞",
+    "C.lyrics": "前半のフレーズの歌詞 後半のフレーズの歌詞"
+  }
+}
+```
+
+`clips` の値は素材のフォルダからの相対パスか絶対パス。
+
+**素材の記号**（テストが前提にしている性質）:
+
+| 記号 | 性質 |
+|---|---|
+| `C` | テイク（約 4 秒、48 kHz・モノラル）。無音で 2 つのフレーズに割れ（0.30〜1.60 秒と 2.20〜3.52 秒）、間に息がある。多くのテストの既定の素材 |
+| `C2` | `C` と同じ歌詞の別テイク（ガイドに使う。数半音高い） |
+| `A` | 音程ノートの間に無声の子音が挟まるフレーズ（約 5 秒） |
+| `B` | `A` と同じ歌詞の別テイク |
+| `D` | 漢字混じりの歌詞のフレーズ（約 4 秒） |
+| `E` | 短い音節を繰り返す叫び（約 4 秒。音節の頭で F0 が約 1 オクターブ跳ぶ。0.83 秒付近に境目） |
+| `G` | `C` と別の歌（ガイドとの対応が取れない例） |
+| `H` | 短いせりふ（約 2 秒） |
+| `W`・`W0` | 囁き（ノイズ除去の後・前） |
+| `SONG` | 曲全体（約 158 秒。最後の 4 フレーズだけ歌う） |
+
+**データのキー**:
+
+| キー | 中身 |
+|---|---|
+| `C.part1` / `C.part2` | `C` の前半・後半のフレーズの歌詞（かな） |
+| `C.lyrics` | `C.part1` と `C.part2` を空白でつないだもの |
+| `C.lyrics_marked` | `C.lyrics` のフレーズの終わりに「！」を付けたもの |
+| `C.part1_phonemes` / `C.part2_phonemes` | 前半・後半の音素の並び（空白区切り。例 `s a k u r a`） |
+| `C.phonemes` / `C.syllables` | `C.lyrics` の音素の数・音節の数 |
+| `C.first_syllables` | 最初の 4 音節のかなの配列 |
+| `C.kana` | 聞き取り（Whisper）の正解のかな（空白なし） |
+| `C.lyrics_tsu` / `C.part1_tsu` / `C.part2_tsu` | 歌詞に促音「っ」を足したもの（issue #58。前半・後半は推定の読みとして使う） |
+| `E.lyrics` | `E` の歌詞 |
+| `SONG.duration_sec` | `SONG` の長さ（秒） |
+| `SONG.lyrics` | `SONG` の 4 区間の歌詞（`[{"start_sec", "end_sec", "text"}]`。2 番目と 4 番目の区間を編集する） |
+| `SONG.kana` | アラインの結果のかなに含まれるはずの文字列の配列 |
+
+回帰値（`regression-baseline.json`）は素材が変われば変わるので、素材を差し替えたら作り直す:
+`python engine/tests/regression_measure.py`（素材と重みが要る）。
+
+## テストの決まりごと
+
+- **テストは音を一切出さない**: `app/playwright.config.js` が `VOCAL_EDITOR_MUTE=1` を入れ、各テストも `--mute` で起動する
+  （Chromium の `--mute-audio`・`setAudioMuted`・出力の音量 0 の三重）。プレビュー音のテストは「鳴らそうとしたもの
+  （ノート・区間・高さ）」の記録で確かめる。
+- **テストのウィンドウは画面に出ず、前面も奪わない**: `VOCAL_EDITOR_HIDDEN=1` で、ウィンドウを透明（opacity 0）のまま
+  `showInactive` で出す（タスクバーにも出さず、人のマウスは素通し）。PC を操作しながら回せる。
+- テストが撮るスクリーンショットは `app/screenshots/`（git 管理外。素材が写るので入れない）。
+- エンジンのテストは、利用者の `%APPDATA%\Gliss\bridge.json` や `%LOCALAPPDATA%\Gliss\work` に触れない
+  （`engine/tests/conftest.py`）。
+
+## git worktree で回す
+
+worktree には `.venv` が無い。worktree の直下に、本体の `.venv` の python と worktree の `engine` を指す `.mcp.json`
+（git 管理外。例は `engine/.mcp.json.example`）を置けば、画面のテストは worktree のエンジンを起動する。
+エンジンのテストは本体の `.venv` の python で `engine` から回す（`python -m pytest` は作業ディレクトリのパッケージを読む）。
+重みは `%LOCALAPPDATA%\Gliss\models` を共有するか、`VOCAL_ENGINE_MODELS_DIR` で指す。

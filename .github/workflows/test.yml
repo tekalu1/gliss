@@ -1,0 +1,77 @@
+# PR と main への push で、素材・重みが無くても通るテストを回す。
+#
+# - engine: Python のエンジンの pytest（ubuntu）。テストの素材（GLISS_TEST_MATERIALS）と解析モデルの重み（RMVPE・HubertFA）は
+#   リポジトリに入れない（docs/release-plan.md §1）ので、それが要るテストは skip になる（engine/tests/conftest.py の
+#   needs_clips / needs_model）。素材・重みを使う通しのテストは開発機で回す
+# - app: 画面の単体テスト（app/tests/unit。Electron を起動しない）と、版・リリースノートの検査（windows）。
+#   Electron を起動する Playwright のテスト（app/tests/*.spec.js）はエンジンの venv と素材が要るので、ここでは回さない
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同じ枝に続けて押したときは古い実行を止める
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Install the engine
+        run: python -m pip install -e "./engine[dev]"
+      - name: pytest (素材・重みが要るものは skip)
+        working-directory: engine
+        env:
+          # 重みは空のフォルダを指す（ランナーの既定の置き場に何かあっても使わない）
+          VOCAL_ENGINE_MODELS_DIR: ${{ runner.temp }}/no-models
+          GLISS_ASR_MODELS_DIR: ${{ runner.temp }}/no-models
+        run: python -m pytest -q -rs
+
+  app:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # 単体テストは Electron を起動しないので、本体のダウンロードは省く
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: Install
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: 版とリリースノート
+        run: |
+          node scripts/sync-version.mjs --check
+          if ($LASTEXITCODE -ne 0) { throw 'engine 側の版がずれている（node scripts/sync-version.mjs）' }
+          node scripts/release-check.mjs
+          if ($LASTEXITCODE -ne 0) { throw '版・リリースノートの検査に通らない' }
+      - name: 単体テスト
+        working-directory: app
+        run: pnpm test:unit

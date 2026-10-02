@@ -1,0 +1,7 @@
+node_modules/
+test-results/
+playwright-report/
+dist/
+
+# テストが撮るスクリーンショット（素材が写るので入れない）
+screenshots/

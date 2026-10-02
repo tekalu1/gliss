@@ -1,0 +1,125 @@
+# タグ v<版> を push すると、Windows のインストーラを作って GitHub Releases に公開する（docs/release-plan.md §3）。
+# 既存のタグを指定して手で走らせることもできる（workflow_dispatch。main から）。
+#
+#   1. 確かめる: 所有者が走らせた・タグの形（v0.1.0 / v0.1.0-beta.N）・タグが main の上・
+#      タグと app/package.json の版と engine 側の版とリリースノート（releases/<版>.json）がそろう・同じ Release がまだ無い
+#   2. 作る: エンジン exe（scripts/build-engine.mjs）→ 任意のアドオン（scripts/build-addon.mjs。exe に無い依存の zip。
+#      作った exe に読ませて確かめる）→ 単体テスト → リリースノート・アドオンの目録（アプリに埋める）・THIRD_PARTY_NOTICES →
+#      electron-builder（--publish never。アップロードはさせない）→ 展開版のスモーク（重みなしで起動してエンジンにつながる）
+#   3. そろえる: インストーラ・.blockmap・latest.yml の SHA-512 を確かめ、THIRD_PARTY_NOTICES と copyleft のパッケージの
+#      ソース（sdist）、アドオンの zip（アプリに埋めた目録と大きさ・SHA-256 を照らす）を足し、SHA256SUMS.txt を作る
+#      （scripts/release-assets.mjs・gpl-sources.mjs）。アプリはこの版の Release からアドオンを取得する
+#   4. 公開する: 下書きで作って全部載せてから公開（beta は prerelease。scripts/release-publish.mjs）。既にあれば上書きしない
+# 無署名（docs/release-plan.md §5）。署名を足すときは、electron-builder の前に署名の設定を入れ、ここで署名を確かめる。
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 既存のタグ（v0.1.0-beta.1 など。main の上にあること）
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # 所有者だけ。手で走らせるときは main から（PR の枝のワークフローの定義で走らせない）
+    if: github.actor == github.repository_owner && (github.event_name == 'push' || github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+      GH_REPO: ${{ github.repository }}
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: タグの形
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(-beta\.\d+)?$') { throw "タグの形が違う（v0.1.0 か v0.1.0-beta.N）: $env:RELEASE_TAG" }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: タグが main の上にある
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) { throw 'タグが main の上に無い' }
+      - name: 同じ Release がまだ無い
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view $env:RELEASE_TAG --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) { throw "$env:RELEASE_TAG の Release は既にある（上書きしない。直すときは版を上げる）" }
+          # 見つからない（gh が 1 を返す）のが正常。公開の直前に release-publish.mjs がもう一度確かめる
+          exit 0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: app/pnpm-lock.yaml
+      - name: 版・タグ・リリースノート
+        run: |
+          node scripts/release-check.mjs --tag $env:RELEASE_TAG
+          if ($LASTEXITCODE -ne 0) { throw '版・タグ・リリースノートの検査に通らない' }
+      - name: Install
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - name: エンジン exe（依存はハッシュ付きの固定。torch なし）
+        run: |
+          node scripts/build-engine.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'エンジン exe を作れない' }
+      - name: 任意のアドオン（漢字の歌詞の読みなど。exe の固定を制約にした zip。作った exe で import を確かめる）
+        run: |
+          node scripts/build-addon.mjs --all
+          if ($LASTEXITCODE -ne 0) { throw 'アドオンを作れない' }
+      - name: 単体テスト
+        working-directory: app
+        run: pnpm test:unit
+      - name: リリースノート・アドオンの目録・THIRD_PARTY_NOTICES
+        run: |
+          node scripts/release-notes.mjs --markdown "$env:RUNNER_TEMP/release-notes.md"
+          if ($LASTEXITCODE -ne 0) { throw 'リリースノートを作れない' }
+          node scripts/addon-catalog.mjs --require
+          if ($LASTEXITCODE -ne 0) { throw 'アドオンの目録を作れない' }
+          node scripts/third-party-notices.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'THIRD_PARTY_NOTICES を作れない' }
+      - name: インストーラ（electron-builder。アップロードはしない）
+        working-directory: app
+        run: pnpm exec electron-builder --win nsis --publish never
+      - name: 展開版のスモーク（重みなしで起動し、同梱のエンジンにつながる）
+        run: |
+          node scripts/smoke-packaged.mjs --exe app/dist/win-unpacked/Gliss.exe --timeout 300000
+          if ($LASTEXITCODE -ne 0) { throw '展開版のスモークに通らない' }
+      - name: 成果物をそろえる
+        run: |
+          $version = $env:RELEASE_TAG.Substring(1)
+          $sources = Join-Path $env:RUNNER_TEMP 'sources'
+          node scripts/gpl-sources.mjs --out $sources
+          if ($LASTEXITCODE -ne 0) { throw 'copyleft のパッケージのソースを取れない' }
+          node scripts/release-assets.mjs --dist app/dist --out "$env:RUNNER_TEMP/assets" --version $version `
+            --extra app/THIRD_PARTY_NOTICES.txt --extra $sources --addons engine/packaging/dist-addons --catalog app/addons-catalog.json
+          if ($LASTEXITCODE -ne 0) { throw '成果物の検査に通らない' }
+      - name: 公開
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release-publish.mjs --tag $env:RELEASE_TAG --assets "$env:RUNNER_TEMP/assets" --notes "$env:RUNNER_TEMP/release-notes.md"
+          if ($LASTEXITCODE -ne 0) { throw '公開に失敗した' }

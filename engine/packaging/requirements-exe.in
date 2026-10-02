@@ -1,0 +1,21 @@
+# エンジン exe（PyInstaller のフォルダ形式。vocal-engine.spec）を作る venv に入れるものの**直接の**依存。
+# 版は開発で確かめているもの（engine/pyproject.toml の必須依存と同じ版）に固定する。
+# ここを変えたら requirements-exe.txt を作り直す（ハッシュ付きで全部の依存を固定する）:
+#   cd engine/packaging
+#   uv pip compile requirements-exe.in --python-version 3.13 --python-platform windows --generate-hashes -o requirements-exe.txt
+# exe の作り方は scripts/build-engine.mjs（`pnpm build:engine`）。
+#
+# **torch は入れない**（CUDA 版を含めて。エンジンで使うのは任意の FCPE だけで、spec で除外している）。
+# 任意の依存（pyworld・pyopenjtalk-plus・faster-whisper など）は入れない = この exe には含まれない。
+numpy==2.4.6
+scipy==1.18.1
+soundfile==0.14.0
+librosa==0.11.0
+numba==0.65.1
+llvmlite==0.47.0
+soxr==1.1.0
+matplotlib==3.11.2
+onnxruntime==1.30.0
+mcp==2.2.0
+praat-parselmouth==0.4.7
+pyinstaller==6.22.3

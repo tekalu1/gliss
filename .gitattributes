@@ -1,0 +1,7 @@
+* text=auto eol=lf
+*.wav binary
+*.png binary
+*.ico binary
+*.onnx binary
+# Windows のバッチは CRLF でないと動かないことがある（app/gliss.cmd）
+*.cmd text eol=crlf

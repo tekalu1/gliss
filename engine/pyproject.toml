@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vocal-engine"
+version = "0.1.0b1"
+description = "Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジン（解析・非破壊編集・レンダリング・MCP サーバー）"
+requires-python = ">=3.13"
+license = { text = "GPL-3.0-or-later" }
+# 依存は .venv に既に入っているものを前提にする（pip での解決はしない）。
+# このツールは GPLv3 で配布する（2026-09-23 決定。LICENSE）。依存は GPLv3 と両立するもの
+# （MIT / BSD / Apache-2.0 / ISC / LGPL / GPL-3.0）に限る。非商用（NC）の重み・データ、
+# ライセンス不明の重みは同梱しない（RMVPE・HubertFA の重みは利用者が各自ダウンロード）。
+dependencies = [
+    "numpy>=2.1,<3",      # BSD-3
+    "scipy",              # BSD-3
+    "soundfile",          # BSD-3
+    "librosa",            # ISC
+    "soxr",               # LGPL-2.1-or-later（python-soxr 1.1 のメタデータ）
+    "matplotlib",         # PSF/BSD 互換（matplotlib license）
+    "onnxruntime",        # MIT（RMVPE の F0 と HubertFA の音素アラインメント）
+    "mcp>=2",             # MIT
+    "praat-parselmouth>=0.4.7",  # GPL-3.0-or-later（Praat）。既定のレンダリング（render/praat.py）
+]
+
+[project.optional-dependencies]
+world = ["pyworld-prebuilt"]   # WORLD: Modified BSD-3 / ラッパは MIT
+fcpe = ["torchfcpe"]           # MIT（RMVPE の代替 F0）
+align = ["synctoolbox"]        # MIT（MrMsDTW。段階2 から既定は librosa の MFCC DTW）
+# 歌詞の漢字を読みに開く。ラッパ MIT + Open JTalk/hts_engine は修正 BSD、
+# 依存の sudachipy / sudachidict-core は Apache-2.0。無くてもかな歌詞なら動く。
+g2p = ["pyopenjtalk-plus"]
+# 区間の音声認識で歌詞を確かめる（issue #54）。faster-whisper: MIT（CTranslate2: MIT、torch 不要）。
+# 重み（Whisper large-v3: MIT）は同梱せず、初回に利用者が確かめてから %LOCALAPPDATA%\Gliss\models\asr へ落とす。
+# 無ければ「聞き取る」は無効になり、理由を出す。
+asr = ["faster-whisper>=1.1"]
+# GPU（CUDA）で聞き取るとき（Windows）。CTranslate2 が cuBLAS（CUDA 12）を読む。NVIDIA のライセンス。
+# 無ければ CPU で動く（遅い）。
+asr-cuda = ["nvidia-cublas-cu12"]
+dev = ["pytest", "pytest-asyncio"]
+
+[project.scripts]
+vocal-engine-mcp = "vocal_engine.mcp_server:main"
+
+[tool.setuptools.packages.find]
+include = ["vocal_engine*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

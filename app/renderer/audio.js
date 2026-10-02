@@ -1,0 +1,345 @@
+// 再生: **全トラックを混ぜて鳴らす**（issue #7。`docs/track-view.md` §2）。
+//
+//  - エンジンの `render_tracks` がトラックごとの音のファイルを返す（編集のあるボーカルは編集を当てた音、
+//    他は元のファイル）。main 経由で読み、Web Audio でタイムライン上の位置（start_sec）に置いて鳴らす。
+//  - **ミュート／ソロはトラックごとの GainNode**（再生中に押しても、その場で聞こえ方が変わる）。
+//    ガイドのトラックも他と同じく鳴る（テイクと重ねる・ソロで切り替える）。
+//  - 再生位置 S.head とループ S.loop はタイムラインの秒（上下で共通）。ループは区間の終わりの少し前に
+//    次の周回を AudioContext の時刻で予約する（どのトラックも同じ時刻に頭へ戻る）。
+//  - 再生ヘッドは AudioContext の時刻で動かす（requestAnimationFrame の誤差を持ち込まない）。
+//  - **つかんだノートのプレビュー音**（issue #27。Melodyne と同じ）: ノート（端）をつかんでいる間、そのノートを
+//    ループで鳴らす。ピッチのドラッグ中は今の高さで作り直して（エンジンの render_audition。1 ノート 10 ms 前後）、
+//    鳴っている位置のまま差し替える。作り直しは 1 本ずつ・間を置いて間引く。離したら止める。再生中は鳴らさない。
+//    設定（つかんだノートを鳴らす）で切り替え（既定は鳴らす）。
+//  - **テストの起動では音を一切出さない**（--mute。出力の音量 0）。プレビューは「鳴らそうとしたもの」を記録する。
+import { call, callJob, status } from './engine.js';
+import { S, audible, timelineRange } from './state.js';
+import { follow, movePlayhead, renderToolbar } from './draw.js';
+import { waitFor } from './edits.js';
+
+let ctx = null;
+let raf = null;
+let P = null;                 // 再生中: { list, gains, sources, a, b, loop, segs: [[ctx 時刻, タイムラインの秒], ...] }
+let loading = false;
+let sched = null;             // ループの次の周回の予約（requestAnimationFrame はウィンドウが隠れると止まるので使わない）
+const MIN_LOOP = 0.05;
+const buffers = new Map();    // ファイルのパス → AudioBuffer（編集を当てた音はパスに版が入るので、編集が変われば別のもの）
+const LOOKAHEAD = 0.4;        // ループの次の周回をこれだけ前に予約する
+
+let master = null;            // すべての音はここを通す（テストの起動では音量 0。issue #27）
+
+function audioCtx() {
+  ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+  return ctx;
+}
+
+/** 出力（音を出さない起動では音量 0。Chromium の --mute-audio・setAudioMuted と三重）。 */
+export function output() {
+  const c = audioCtx();
+  if (!master) {
+    master = c.createGain();
+    master.gain.value = window.api?.muted ? 0 : 1;
+    master.connect(c.destination);
+  }
+  return master;
+}
+
+/** 音を出さない起動か（テスト用）。出力の音量まで見る。 */
+export function audioMuted() {
+  return !!window.api?.muted && (!master || master.gain.value === 0);
+}
+
+/** 編集のたびに呼ばれる（音はパスで引き直すので、ここで捨てるものは無い）。 */
+export function invalidate() {}
+
+/** 読み込んだ音を捨てる（別のセッションを開いた。1 トラックで数十 MB あるので持ち越さない）。 */
+export function dropBuffers() { buffers.clear(); }
+
+/** トラックごとの音（AudioBuffer 付き）。読み込んでいないものだけ読む。 */
+async function stems() {
+  const r = await callJob('render_tracks', {}, (s) => status(`音を作っている… ${s} 秒`));
+  const out = [];
+  for (const st of r.tracks || []) {
+    if (st.error || !st.path) { status(`鳴らせないトラック: ${st.error || st.id}`); continue; }
+    let buf = buffers.get(st.path);
+    if (!buf) {
+      status('音を読み込んでいる…');
+      const bytes = await window.api.readFile(st.path);
+      buf = await audioCtx().decodeAudioData(bytes);
+      buffers.set(st.path, buf);
+    }
+    out.push({ ...st, buf });
+  }
+  const keep = new Set(out.map((s) => s.path));
+  for (const k of [...buffers.keys()]) if (!keep.has(k)) buffers.delete(k);
+  status('');
+  return out;
+}
+
+/** ミュート／ソロを今の音に当てる（再生中に押したときも呼ぶ）。 */
+export function setGains() {
+  if (!P) return;
+  for (const [id, g] of P.gains) {
+    const t = S.tracks.find((x) => x.id === id);
+    const v = t && audible(t) ? 1 : 0;
+    g.gain.cancelScheduledValues(ctx.currentTime);
+    g.gain.setTargetAtTime(v, ctx.currentTime, 0.004);   // 数 ms かけて（プチッと鳴らさない）
+    g.target = v;
+  }
+}
+
+/** いま鳴らしているもの（テスト用）。 */
+export function playState() {
+  if (!P) return null;
+  return {
+    loop: P.loop, range: [P.a, P.b],
+    tracks: P.list.map((s) => ({ id: s.id, path: s.path, start: s.start_sec, edited: s.edited,
+      duration: s.buf.duration, gain: P.gains.get(s.id)?.target ?? null })),
+  };
+}
+
+function schedule(when, from, to) {
+  for (const st of P.list) {
+    const s0 = st.start_sec;
+    const s1 = s0 + st.buf.duration;
+    const ov0 = Math.max(from, s0);
+    const ov1 = Math.min(to, s1);
+    if (ov1 - ov0 <= 1e-4) continue;
+    const src = ctx.createBufferSource();
+    src.buffer = st.buf;
+    src.connect(P.gains.get(st.id));
+    src.start(when + (ov0 - from), ov0 - s0, ov1 - ov0);
+    src.onended = () => { if (P) P.sources = P.sources.filter((x) => x !== src); };
+    P.sources.push(src);
+  }
+}
+
+export async function play() {
+  if (S.playing) { stop(); return; }
+  stopPreview();
+  if (!S.vd || loading) return;
+  loading = true;
+  let list;
+  try {
+    // 編集の確定・トラックの切り替えの途中は待つ（開き直し中のプロジェクトから音を作らない）
+    await waitFor(() => !S.busy && !S.opening);
+    list = await stems();
+  } catch (err) {
+    status(`再生できなかった: ${err.message}`);
+    return;
+  } finally {
+    loading = false;
+  }
+  const c = audioCtx();
+  if (c.state === 'suspended') await c.resume();
+  const loop = S.loop && S.loop[1] - S.loop[0] >= MIN_LOOP ? S.loop : null;
+  const [a, b] = loop || timelineRange();
+  const from = S.head >= a && S.head < b ? S.head : a;
+  P = { list, gains: new Map(), sources: [], a, b, loop: !!loop, segs: [] };
+  for (const st of list) {
+    const g = c.createGain();
+    g.connect(output());
+    P.gains.set(st.id, g);
+  }
+  setGains();
+  const t0 = c.currentTime + 0.03;
+  P.segs.push([t0, from]);
+  schedule(t0, from, b);
+  S.playing = true;
+  S.head = from;
+  renderToolbar();
+  if (P.loop) sched = setInterval(scheduleLoop, 50);
+  tick();
+}
+
+/** ループ: 区間の終わりの少し前に次の周回を予約する。止まっていた（隠れていた）ら、今より後の境界まで飛ばす。 */
+function scheduleLoop() {
+  if (!P || !P.loop) return;
+  const now = ctx.currentTime;
+  const L = P.b - P.a;
+  const last = P.segs[P.segs.length - 1];
+  let end = last[0] + (P.b - last[1]);
+  if (end < now) end += Math.ceil((now - end) / L) * L;
+  if (now > end - LOOKAHEAD && !(last[1] === P.a && Math.abs(last[0] - end) < 1e-6)) {
+    P.segs.push([end, P.a]);
+    schedule(end, P.a, P.b);
+  }
+  while (P.segs.length > 2 && P.segs[1][0] <= now) P.segs.shift();
+}
+
+function tick() {
+  if (!S.playing || !P) return;
+  const now = ctx.currentTime;
+  if (P.loop) scheduleLoop();
+  let seg = P.segs[0];
+  for (const sg of P.segs) if (sg[0] <= now) seg = sg;
+  S.head = Math.min(P.b, seg[1] + Math.max(0, now - seg[0]));
+  if (!P.loop && S.head >= P.b - 1e-3) { stop(); return; }
+  follow();
+  movePlayhead();
+  raf = requestAnimationFrame(tick);
+}
+
+export function stop() {
+  S.playing = false;
+  if (raf) cancelAnimationFrame(raf);
+  raf = null;
+  if (sched) clearInterval(sched);
+  sched = null;
+  if (P) {
+    for (const s of P.sources) { try { s.stop(); } catch { /* 既に止まっている */ } }
+    for (const g of P.gains.values()) { try { g.disconnect(); } catch { /* noop */ } }
+  }
+  P = null;
+  renderToolbar();
+}
+
+// ---------------------------------------------------------------- つかんだノートのプレビュー音（issue #27）
+const PREVIEW_GAP_MS = 45;    // 作り直しの間隔の下限（間引き）
+const PREVIEW_FADE = 0.006;   // ループのつなぎ目・差し替えのフェード（秒）
+let previewOn = true;
+const PV = { token: 0, note: null, range: null, want: 0, busy: 0, timer: 0, lastAt: 0,
+  src: null, gain: null, t0: 0, dur: 0, cents: null };
+const previewLog = [];        // 鳴らそうとしたもの（テスト用。音は出さずにこれで確かめる）
+
+export function previewEnabled() { return previewOn; }
+/** つかんだノートを鳴らす（設定）。save: ユーザー設定に残す（起動時に読むときは残さない）。 */
+export function setPreviewEnabled(on, { save = true } = {}) {
+  previewOn = !!on;
+  if (!previewOn) stopPreview();
+  if (save) {
+    window.api?.saveState?.({ preview: previewOn });
+    status(`つかんだノートを鳴らす: ${previewOn ? 'オン' : 'オフ'}`);
+  }
+  renderToolbar();            // メニューバーのチェックも付け直す
+}
+
+/** いまの高さ（確定した音からのずらし。セント）。ドラッグ中と、まだ当たっていない前のドラッグの分を含む。 */
+function wantCents(id) {
+  return Math.round((S.local.pitch.get(id) || 0) * 1000) / 10;
+}
+
+/** ノートをつかんだ（ピッチ・移動・端のドラッグの始め）。 */
+export function startPreview(noteId) {
+  stopPreview();
+  if (!previewOn || S.playing || !S.vd) return;
+  const n = S.byId.get(noteId);
+  if (!n || n.kind !== 'note') return;
+  const a = n.edited_start_sec ?? n.start_sec;
+  const b = n.edited_end_sec ?? n.end_sec;
+  if (!(b - a > 0.01)) return;
+  PV.note = noteId;
+  PV.range = [+a.toFixed(6), +b.toFixed(6)];
+  PV.want = wantCents(noteId);
+  requestPreview();
+}
+
+/** 高さが変わったかもしれない（ピッチのドラッグ中の pointermove）。変わっていれば作り直しを頼む（間引く）。 */
+export function updatePreview() {
+  if (!PV.note) return;
+  const c = wantCents(PV.note);
+  if (Math.abs(c - PV.want) < 0.5) return;
+  PV.want = c;
+  schedulePreview();
+}
+
+function schedulePreview() {
+  if (PV.busy || PV.timer || !PV.note) return;
+  const wait = Math.max(0, PV.lastAt + PREVIEW_GAP_MS - performance.now());
+  PV.timer = setTimeout(() => { PV.timer = 0; requestPreview(); }, wait);
+}
+
+async function requestPreview() {
+  if (!PV.note || PV.busy) return;
+  const tok = PV.token;
+  const note = PV.note;
+  const cents = PV.want;
+  const [a, b] = PV.range;
+  PV.busy = tok || -1;
+  PV.lastAt = performance.now();
+  previewLog.push({ note, cents, range: [a, b], at: Date.now() });
+  try {
+    const r = await call('render_audition', { note_id: note, cents, start_sec: a, end_sec: b });
+    if (tok !== PV.token) return;
+    const bytes = await window.api.readFile(r.path);
+    if (tok !== PV.token) return;
+    const buf = await audioCtx().decodeAudioData(bytes);
+    if (tok !== PV.token || S.playing) return;
+    swapPreview(buf, cents);
+  } catch (err) {
+    if (tok === PV.token) status(`プレビューの音を作れなかった: ${err.message}`);
+  } finally {
+    if (PV.busy === (tok || -1)) PV.busy = 0;
+    // 作っている間に高さが変わった: いまの高さでもう一度（最後の高さだけ）
+    if (tok === PV.token && PV.note && Math.abs(PV.want - cents) >= 0.5) schedulePreview();
+  }
+}
+
+/** 頭と尻を短くフェード（ループのつなぎ目でプチッと鳴らさない）。 */
+function fadeEdges(buf) {
+  const n = Math.min(Math.floor(buf.sampleRate * PREVIEW_FADE), Math.floor(buf.length / 2));
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const d = buf.getChannelData(ch);
+    for (let i = 0; i < n; i++) {
+      const g = i / n;
+      d[i] *= g;
+      d[d.length - 1 - i] *= g;
+    }
+  }
+}
+
+/** 鳴っている位置のまま、新しい高さの音に差し替える（前の音は数 ms でフェードアウト）。 */
+function swapPreview(buf, cents) {
+  const c = audioCtx();
+  if (c.state === 'suspended') c.resume();
+  fadeEdges(buf);
+  const now = c.currentTime;
+  let offset = 0;
+  if (PV.src && PV.dur > 0) offset = (((now - PV.t0) % PV.dur) + PV.dur) % PV.dur;
+  if (offset >= buf.duration) offset = 0;
+  releaseVoice(PV.src, PV.gain);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0, now);
+  g.gain.linearRampToValueAtTime(1, now + PREVIEW_FADE);
+  g.connect(output());
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  src.loop = true;
+  src.connect(g);
+  src.start(now, offset);
+  PV.src = src; PV.gain = g; PV.t0 = now - offset; PV.dur = buf.duration; PV.cents = cents;
+}
+
+function releaseVoice(src, g) {
+  if (!src || !ctx) return;
+  const now = ctx.currentTime;
+  try {
+    g.gain.cancelScheduledValues(now);
+    g.gain.setValueAtTime(g.gain.value, now);
+    g.gain.linearRampToValueAtTime(0, now + PREVIEW_FADE);
+    src.stop(now + PREVIEW_FADE + 0.01);
+  } catch { /* 既に止まっている */ }
+  src.onended = () => { try { g.disconnect(); } catch { /* noop */ } };
+}
+
+/** 離した（か再生を始めた・設定を切った）: 止める。作りかけの音は捨てる。 */
+export function stopPreview() {
+  PV.token += 1;
+  clearTimeout(PV.timer);
+  PV.timer = 0;
+  PV.busy = 0;
+  PV.note = null;
+  PV.range = null;
+  releaseVoice(PV.src, PV.gain);
+  PV.src = null; PV.gain = null; PV.dur = 0; PV.cents = null;
+}
+
+/** テスト用: いま鳴らしているもの（鳴っていなければ null）と、鳴らそうとしたものの記録。 */
+export function previewState() {
+  return {
+    enabled: previewOn, note: PV.note, range: PV.range ? [...PV.range] : null, want: PV.note ? PV.want : null,
+    sounding: PV.src ? { cents: PV.cents, duration: PV.dur } : null,
+  };
+}
+export function previewLogOf() { return previewLog.map((x) => ({ ...x, range: [...x.range] })); }
+export function clearPreviewLog() { previewLog.length = 0; }

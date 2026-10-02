@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "gliss": {
+      "command": "<repo>\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "vocal_engine.mcp"],
+      "cwd": "<repo>\\engine",
+      "env": { "PYTHONIOENCODING": "utf-8" }
+    }
+  }
+}

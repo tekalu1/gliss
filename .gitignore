@@ -1,0 +1,50 @@
+# Python
+.venv/
+.venv-*/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+*.npz
+*.npy
+
+# Node・Playwright
+node_modules/
+test-results/
+playwright-report/
+
+# 音声・画像（素材や生成物を入れない）
+*.wav
+*.png
+
+# 既定のプロジェクトの置き場（開発版）
+projects/
+
+# 開発機ごとのエンジンの起動設定（例は engine/.mcp.json.example）
+.mcp.json
+
+# 手元の作業・出力
+scratchpad/
+output/
+
+# engine のテスト・生成物
+engine/tests/_regression_out/
+engine/tests/_live_project/
+engine/**/views/
+engine/**/renders/
+
+# 単体 exe のビルド（engine/packaging。生成物は入れない）
+engine/packaging/build/
+engine/packaging/dist/
+
+# ドキュメントに載せる図は残す（*.png の除外の例外）
+!docs/images/*.png
+
+# ロゴの PNG は配布物に要るので追跡する（*.png の除外の例外）
+!assets/logo/*.png
+
+# 配布: 生成物（scripts/release-notes.mjs・third-party-notices.mjs。pnpm dist / dist:dir が作る）
+app/release-info.json
+app/THIRD_PARTY_NOTICES.txt
+# 任意のアドオン（scripts/build-addon.mjs・addon-catalog.mjs）
+engine/packaging/dist-addons/
+app/addons-catalog.json
