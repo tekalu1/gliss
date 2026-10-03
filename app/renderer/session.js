@@ -97,7 +97,8 @@ const docHooks = [];
 export function onDoc(fn) { docHooks.push(fn); }
 
 export function adoptDoc(d) {
-  const next = d ? { kind: d.kind, path: d.path || null, name: d.name || '無題', dirty: !!d.dirty,
+  // DAW のドキュメント（kind: 'ara'）を保存するのは DAW。未保存の * は付けない
+  const next = d ? { kind: d.kind, path: d.path || null, name: d.name || '無題', dirty: d.kind !== 'ara' && !!d.dirty,
     work_dir: d.work_dir || null, tracks: d.tracks || 0 } : null;
   const same = JSON.stringify(next) === JSON.stringify(S.doc || null);
   S.doc = next;

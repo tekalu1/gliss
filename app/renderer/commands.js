@@ -17,6 +17,7 @@ import { G, saveGrid } from './grid.js';
 import { openTempoInput } from './tempo.js';
 import { closePop, closeTr, openPop, openTr, setTool } from './interact.js';
 import { play, previewEnabled, setPreviewEnabled, stop } from './audio.js';
+import { ARA, araCompare, araFeatures, araTransport } from './ara.js';
 import { status } from './engine.js';
 import { startRename } from './tracks.js';
 import { guideShown, guideWhy } from './session.js';
@@ -125,15 +126,23 @@ const hasFades = () => selectedNotes().some((n) => (n.fade_in_sec || 0) > 0 || (
 
 // ---------------------------------------------------------------- 表
 // [id, 名前, グループ, 既定のキー, 実行, 有効の条件, チェック]
+// プラグイン（ARA）では、プロジェクトの開く・保存・書き出し・トラックの追加・名前（DAW が持つ）・AI・更新・アドオンは使えない。
+// キーも割り当てない（DAW に渡す）
+const ARA_OFF = new Set(['new-project', 'open-take', 'save', 'save-as', 'add-track', 'export', 'export-as', 'rename',
+  'ai-connect', 'check-updates', 'addons']);
 const GR = { play: '再生・ツール', edit: '編集', f0: 'ピッチ検出の方式', note: 'ノート', lyrics: '歌詞', view: '表示', track: 'トラック', file: 'ファイル', help: 'ヘルプ' };
 export const COMMANDS = [
-  ['play', '再生／停止', GR.play, ['Space'], () => (S.playing ? stop() : play())],
+  // プラグインでは再生は DAW のもの（ホストの再生の制御へ。audio.js の play/stop は使わない）
+  ['play', '再生／停止', GR.play, ['Space'], () => (ARA ? araTransport('toggle') : (S.playing ? stop() : play()))],
   ['tool-main', 'メインツール', GR.play, ['1'], () => setTool('main'), null, () => S.tool === 'main'],
   ['tool-draw', '鉛筆', GR.play, ['2'], () => setTool('draw'), null, () => S.tool === 'draw'],
   ['tool-cut', 'はさみ', GR.play, ['3'], () => setTool('cut'), null, () => S.tool === 'cut'],
   // つかんだノートを鳴らす（Melodyne と同じ。issue #27）。ユーザー設定（取り消しの履歴に入れない）
   ['preview-notes', 'つかんだノートを鳴らす', GR.play, [], () => setPreviewEnabled(!previewEnabled()), null,
     () => previewEnabled()],
+  // 原音と比べる（プラグインだけ。Melodyne の比較と同じ）: キャッシュを読まずに原音を返す
+  ...(ARA ? [['ara-compare', '原音と比べる', GR.play, [], () => araCompare(!araFeatures().compare), null,
+    () => araFeatures().compare]] : []),
 
   ['undo', '元に戻す', GR.edit, ['Ctrl+Z'], () => { closePop(); closeTr(); return undo(); }],
   ['redo', 'やり直す', GR.edit, ['Ctrl+Shift+Z', 'Ctrl+Y'], () => { closePop(); closeTr(); return redo(); }],
@@ -194,10 +203,12 @@ export const COMMANDS = [
   // 解析モデルと任意機能のアドオン（漢字の歌詞の読み。addons.js）。初回画面と同じ行をダイアログで出す
   ['addons', 'モデルと追加の機能…', GR.help, [], () => host.openAddons()],
 ].map(([id, label, group, keys, run, enabled, checked]) => ({
-  id, label, group, keys,
+  id, label, group, keys: ARA && ARA_OFF.has(id) ? [] : keys,
   // ファイルの操作はダイアログ・ファイルを開くので main.js（メニューバーと同じ処理）に任せる
   run: run || ((ctx) => host.menu({ cmd: id, arg: ctx })),
-  enabled: enabled || (() => true),
+  enabled: ARA && ARA_OFF.has(id) ? () => false
+    : ARA && id === 'open-guide' ? () => araFeatures().fileGuide      // ファイルのガイドは C++ が対応したときだけ
+      : (enabled || (() => true)),
   checked: checked || null,
 }));
 
@@ -301,6 +312,16 @@ const MENUBAR = [
   ['ヘルプ', ['ai-connect', 'addons', SEP, 'check-updates', { role: 'about', label: 'Gliss について' }]],
 ];
 
+// プラグインの並び: ファイルは「ガイドを開く…（C++ が対応したとき）・歌詞」だけ、ヘルプはキーボードショートカットだけ
+const MENUBAR_ARA = [
+  ['ファイル', ['open-guide', 'load-lyrics', 'import-lyrics']],
+  ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes',
+    { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }]],
+  MENUBAR[2],
+  ['表示', ['ara-compare', SEP, 'guide-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['ヘルプ', ['keys']],
+];
+
 /** 元に戻す／やり直すの名前（「元に戻す: ノートの長さ」。AI の操作は「元に戻す: AI · ピッチ」）。
  * ツールバーのツールチップ（draw.js）も同じもの。まだ当たっていない操作は画面の操作（人）。 */
 export function undoLabels() {
@@ -327,7 +348,8 @@ export function appMenuTemplate() {
     return { cmd: it, label: l, accelerator: accelerator(k), enabled: en,
       ...(c.checked ? { checked: !!c.checked() } : {}) };
   };
-  return MENUBAR.map(([label, items]) => ({ label, submenu: items.map(item) }));
+  const bar = ARA ? MENUBAR_ARA : MENUBAR;
+  return bar.map(([label, items]) => ({ label, submenu: items.filter((it) => !(ARA && it === 'open-guide' && !araFeatures().fileGuide)).map(item) }));
 }
 
 let lastMenu = '';

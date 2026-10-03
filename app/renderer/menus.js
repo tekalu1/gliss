@@ -22,6 +22,7 @@ import { boxOf, bandOf } from './state.js';
 import { G, tempo } from './grid.js';
 import { openTempoPop } from './tempo.js';
 import { renderTracks as redrawTracks } from './tracks.js';
+import { ARA, araLoop } from './ara.js';
 
 const SEP = { sep: true };
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -216,7 +217,8 @@ function rulerMenu(e) {
   const bars = !!t && G.fmt !== 'sec';
   const p = at(e);
   return [
-    { id: 'clear-loop', label: 'ループを解除', disabled: !S.loop, run: () => { S.loop = null; render(); } },
+    { id: 'clear-loop', label: 'ループを解除', disabled: !S.loop,
+      run: () => { S.loop = null; render(); if (ARA) araLoop(null); } },
     { id: 'tempo', label: 'テンポと拍子…', disabled: !S.tracks.length, run: () => openTempoPop(p.x, p.y) },
     SEP,
     { id: 'fmt-bars', label: '表示: 小節・拍', disabled: !t, checked: bars, run: () => setFmt('bars'),
@@ -288,6 +290,9 @@ export function editorMenu(e, svg) {
 /** トラック見出し（とクリップの外のレーン）。 */
 export function trackItems(t) {
   const vocals = S.tracks.filter((x) => x.kind === 'vocal').length;
+  // プラグイン: 名前・位置・種類・外す は DAW が決める。ガイドの指定だけ残す
+  if (ARA) return [{ id: 'guide', label: t.guide ? 'ガイドを外す' : 'このトラックをガイドにする', hidden: t.kind !== 'vocal',
+    run: () => setGuide(t.guide ? null : t.id) }];
   return [
     cmd('rename', { trackId: t.id }, { label: '名前を変える', disabled: false, run: () => startRename(t) }),
     { id: 'guide', label: t.guide ? 'ガイドを外す' : 'このトラックをガイドにする', hidden: t.kind !== 'vocal',
@@ -307,6 +312,8 @@ export function trackItems(t) {
 /** クリップ（tl: クリックしたタイムラインの秒）。 */
 export function clipItems(t, tl) {
   const vocals = S.tracks.filter((x) => x.kind === 'vocal').length;
+  if (ARA) return [{ id: 'show', label: 'ここを下に表示', disabled: t.kind !== 'vocal',
+    run: () => selectTrack(t.id, { view: soundRegion(t, tl) }) }];
   return [
     { id: 'show', label: 'ここを下に表示', disabled: t.kind !== 'vocal',
       run: () => selectTrack(t.id, { view: soundRegion(t, tl) }) },
