@@ -7,6 +7,7 @@
 //   - エンジン exe（PyInstaller）に入る Python のパッケージ: エンジン exe を作った venv（.venv-exe。scripts/build-engine.mjs）の
 //     *.dist-info（METADATA の License-Expression / License / 分類と、ライセンスのファイル）。Python 本体（PSF）も
 //   - 画面（app.asar）に入る Node のパッケージ: app/package.json の dependencies から辿れるもの（devDependencies は入らない）
+//   - エンジン exe に入る Gliss の F0 モデル（試作）の学習コード・学習データの出典（engine/vocal_engine/analysis/models/gliss-f0.NOTICE.txt）
 //   - 任意のアドオン（scripts/build-addon.mjs が作った engine/packaging/dist-addons/<id>.LICENSES.txt。作っていれば）
 // Electron・Chromium のライセンス文（LICENSE.electron.txt・LICENSES.chromium.html）は electron-builder がインストール先の直下に置く。
 // electron-builder.yml の extraResources が resources/THIRD_PARTY_NOTICES.txt に入れる。
@@ -151,7 +152,12 @@ export function addonLicenses(dir = path.join(ROOT, 'engine', 'packaging', 'dist
     .map((n) => ({ id: n.slice(0, -'.LICENSES.txt'.length), text: fs.readFileSync(path.join(dir, n), 'utf8') }));
 }
 
-export function notices({ version, python, node, addons = [] }) {
+/** Gliss の F0 モデル（試作）の出典の文書（モデルの隣に置いてある。CC BY・ODbL・CMU Arctic の表示を含む）。 */
+export function f0ModelNotice(file = path.join(ROOT, 'engine', 'vocal_engine', 'analysis', 'models', 'gliss-f0.NOTICE.txt')) {
+  return fs.readFileSync(file, 'utf8');
+}
+
+export function notices({ version, python, node, addons = [], f0Model = '' }) {
   const copyleft = [...python, ...node].filter((p) => p.copyleft).map((p) => `${p.name} ${p.version}（${p.license}）`);
   return [
     `Gliss ${version} に含まれるサードパーティのソフトウェアのライセンス`,
@@ -162,6 +168,8 @@ export function notices({ version, python, node, addons = [] }) {
     '',
     section('エンジン（resources/engine/vocal-engine。Python と、PyInstaller で同梱したパッケージ）', python),
     section('画面（resources/app.asar。Node.js のパッケージ）', node),
+    f0Model ? [`${'='.repeat(78)}`, 'エンジンに同梱した Gliss の F0 モデル（学習コードと学習データの出典）', `${'='.repeat(78)}`, '',
+      `${f0Model.replace(/\r\n/g, '\n').trimEnd()}\n`].join('\n') : '',
     addons.length ? [`${'='.repeat(78)}`,
       '任意のアドオン（インストーラには入っていない。画面から取得したときだけ %LOCALAPPDATA%\\Gliss\\addons に入る。',
       '中身は各アドオンの LICENSES.txt と同じ）', `${'='.repeat(78)}`, '',
@@ -176,7 +184,7 @@ function main() {
   const python = [pythonRuntime(), ...pythonPackages()];
   const node = nodePackages();
   const addons = addonLicenses();
-  fs.writeFileSync(out, notices({ version, python, node, addons }), 'utf8');
+  fs.writeFileSync(out, notices({ version, python, node, addons, f0Model: f0ModelNotice() }), 'utf8');
   const missing = [...python, ...node].filter((p) => !p.texts.length).map((p) => p.name);
   console.log(`書いた: ${path.relative(ROOT, out)}（Python ${python.length}・Node ${node.length} パッケージ・アドオン ${addons.map((a) => a.id).join(', ') || 'なし'}）`);
   if (missing.length) console.log(`  ライセンスのファイルが無いもの（名前だけ載せた）: ${missing.join(', ')}`);

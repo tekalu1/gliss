@@ -4,7 +4,7 @@
     vocal-engine.exe            MCP サーバー（stdio）。`python -m vocal_engine.mcp` と同じ
     vocal-engine.exe --check    依存が入っているか・torch を読み込んでいないか・アドオンを読めるかを JSON で出して終わる
 
-重みは同梱しない。環境変数 VOCAL_ENGINE_MODELS_DIR か、既定の %LOCALAPPDATA%\\Gliss\\models（`vocal_engine/config.py`）。
+重みは Gliss の F0 モデル（試作）のほかは同梱しない。環境変数 VOCAL_ENGINE_MODELS_DIR か、既定の %LOCALAPPDATA%\\Gliss\\models（`vocal_engine/config.py`）。
 """
 import json
 import os
@@ -32,6 +32,16 @@ def check():
     from vocal_engine.render.base import list_backends
     out["models_dir"] = config.models_dir()
     out["backends"] = {b["name"]: b["available"] for b in list_backends()}
+    # 同梱の Gliss の F0 モデル（試作）: 0.5 秒の 220 Hz の合成音で推論まで通るか
+    try:
+        import numpy as np
+        from vocal_engine.analysis import f0 as f0mod
+        y = 0.3 * np.sin(2 * np.pi * 220 * np.arange(24000) / 48000)
+        r = f0mod.estimate_f0(x=y, sr=48000, estimator="gliss")
+        hz = float(np.median(r.f0[r.voiced])) if r.voiced.any() else 0.0
+        out["f0_gliss"] = ("%.1f Hz" % hz) if abs(hz - 220.0) < 5.0 else "ERROR: 220 Hz を %.1f Hz と測った" % hz
+    except Exception as e:                               # noqa: BLE001
+        out["f0_gliss"] = "ERROR: %s: %s" % (type(e).__name__, e)
     # 任意機能のアドオン（vocal_engine/addons.py）。読めたものは import と、漢字の読みを 1 回試す
     from vocal_engine import addons
     out["addons_dir"] = addons.addons_dir()

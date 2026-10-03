@@ -1,0 +1,68 @@
+Gliss の F0 モデル（試作。gliss-f0.onnx）の出典
+==================================================
+
+gliss-f0.onnx は、SwiftF0（Lars Nieradzik 作。MIT）の学習コードと同じ構造のモデル（14 386 パラメータ）を、
+下のデータだけで Gliss が学習したもの。ピッチ（F0）の検出に使う。事前学習済みの F0 モデル（RMVPE・SwiftF0 など）の
+重みは、学習にもラベル作りにも使っていない。
+重みは試作で、ライセンスは Gliss 本体（GPL-3.0-or-later）に従う。学習データそのものは同梱していない。
+
+学習コード
+----------
+SwiftF0 training code (https://github.com/lars76/swift-f0)
+MIT License
+Copyright (c) 2025-2026 Lars Nieradzik
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+学習に使ったデータ（各データの一部を使った。録音そのものは重みに入っていない）
+--------------------------------------------------------------------------------
+- VocalSet: A Singing Voice Dataset. Julia Wilkins, Prem Seetharaman, Alison Wahl, Bryan Pardo.
+  https://doi.org/10.5281/zenodo.1193957 — Creative Commons Attribution 4.0 International (CC BY 4.0)
+  https://creativecommons.org/licenses/by/4.0/ 。録音の一部を F0 の合意ラベル付きでそのまま、一部を F0 を差し替えて
+  再合成した音として使った（改変あり）。
+- PTDB-TUG: Pitch Tracking Database from Graz University of Technology. Gregor Pirker, Michael Wohlmayr,
+  Stefan Petrik, Franz Pernkopf. Signal Processing and Speech Communication Laboratory, Graz University of Technology.
+  Open Database License (ODbL) 1.0 https://opendatacommons.org/licenses/odbl/1.0/ ・個々の内容は
+  Database Contents License 1.0 https://opendatacommons.org/licenses/dbcl/1.0/ 。
+  喉頭マイクから作られた参照 F0 を正解の確認に、録音の一部を再合成の元に使った。
+- CMU Arctic speech synthesis databases (bdl, slt). John Kominek, Alan W Black. CMU-LTI-03-177, 2003.
+  http://festvox.org/cmu_arctic/ 。配布元の条件（報告書の付録 A）:
+  "Carnegie Mellon University Copyright (c) 2003 All Rights Reserved. Permission to use, copy, modify, and license this
+  software and its documentation for any purpose, is hereby granted without fee, subject to the following conditions:
+  1. The code must retain the above copyright notice, this list of conditions and the following disclaimer.
+  2. Any modifications must be clearly marked as such. 3. Original authors' names are not deleted.
+  THE AUTHORS OF THIS WORK DISCLAIM ALL WARRANTIES WITH REGARD TO THIS SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF
+  MERCHANTABILITY AND FITNESS, IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY SPECIAL, INDIRECT OR CONSEQUENTIAL DAMAGES
+  OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
+  OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE."
+  改変（再合成・F0 の差し替え）を含む。
+- LibriSpeech (dev-clean, dev-other). Vassil Panayotov, Guoguo Chen, Daniel Povey, Sanjeev Khudanpur, 2015.
+  https://www.openslr.org/12/ — CC BY 4.0。話し声の再合成・背景のおしゃべりに使った。
+- NSynth (test). Jesse Engel et al., Google Magenta, 2017. https://magenta.tensorflow.org/datasets/nsynth —
+  CC BY 4.0。楽器の単音（公称音高つき）として使った。
+- DEMAND: a collection of multi-channel recordings of acoustic noise in diverse environments.
+  Joachim Thiemann, Nobutaka Ito, Emmanuel Vincent. https://doi.org/10.5281/zenodo.1227121 — CC BY 4.0。
+  背景の雑音として足した。
+- GuitarSet. Qingyang Xi, Rachel M. Bittner, Johan Pauwels, Xuzhou Ye, Juan P. Bello.
+  https://doi.org/10.5281/zenodo.3371780 — CC BY 4.0。背景の音楽として足した。
+
+評価にだけ使い、学習には入れていないもの: vocadito（Rachel Bittner et al. https://doi.org/10.5281/zenodo.5578807 。CC BY 4.0）。
+
+ラベルを作る道具（重みには入らない）: WORLD（pyworld。Modified BSD / MIT）・Praat（praat-parselmouth。GPL-3.0-or-later）・
+librosa（ISC）・pyroomacoustics（MIT。残響の生成）。

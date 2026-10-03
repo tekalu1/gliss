@@ -5,7 +5,7 @@ import numpy as np
 import soundfile as sf
 
 from vocal_engine.analysis.align import Alignment
-from vocal_engine.analysis.f0 import F0Result
+from vocal_engine.analysis.f0 import F0Result, estimator_version
 from vocal_engine.project import Project
 
 
@@ -30,7 +30,8 @@ def _fake_analysis(monkeypatch):
         return F0Result(np.full(n, freq), np.ones(n), np.ones(n, dtype=bool),
                         np.full(n, -20.0), sr=sr, estimator=estimator,
                         meta={"sweep": sweep, "threshold": 0.03,
-                              "vuv_rule": "%s f0>0 AND rms > -55.0 dBFS" % estimator})
+                              "vuv_rule": "%s f0>0 AND rms > -55.0 dBFS" % estimator,
+                              "version": estimator_version(estimator)})
 
     def align(project, method):
         calls["dtw"] += 1

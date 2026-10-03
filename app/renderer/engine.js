@@ -61,7 +61,7 @@ const LABELS = {
 const QUIET = new Set([
   'export_view_data', 'list_tracks', 'track_overview', 'prep_status', 'get_job', 'cancel_job', 'engine_info',
   'asr_status', 'project_status', 'plan_edit', 'render_audition', 'inspect_lyrics_score', 'close_project',
-  'open_project', 'new_project', 'load_project', 'analyze_take',
+  'open_project', 'new_project', 'load_project', 'analyze_take', 'set_f0_estimator',
 ]);
 
 /** ツールを 1 つ呼ぶ。エンジンは失敗も JSON で返すので、ここで例外に変える。

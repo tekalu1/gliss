@@ -639,11 +639,14 @@ def set_note_syllable(note_id: str, kana: str, syllable_index: int = None,
 
 
 @_tool
-def analyze_take(force: bool = False, estimator: str = "rmvpe",
+def analyze_take(force: bool = False, estimator: str = None,
                  confidence_sweep: bool = False, background: bool = None) -> dict:
     """F0 → 音符のかたまり →（ガイドがあれば）DTW。結果はキャッシュする。
 
-    estimator: "rmvpe"（正）/ "fcpe"（代替）/ "auto"
+    estimator: F0 の方式。省くと選んでいる方式（画面の「ピッチ検出の方式」・set_f0_estimator。既定 "rmvpe"。
+    RMVPE の重みが無ければ "gliss"）。"rmvpe"（既定・正）/ "gliss"（Gliss の F0 モデル。試作。同梱）/
+    "praat"（Praat を歌声向けに調整したもの。重み不要）/ "fcpe"（代替。開発版だけ）/ "auto"（rmvpe → gliss）。
+    保存した解析が別の方式のものなら、解析し直す
     confidence_sweep: 確信度を threshold 掃引で細かく出す（13 倍遅い）
     background: 省略時は長さから自動判断（20 秒を超えそうならジョブにする）。解析がキャッシュを読むだけで
     済むとき（準備済み・一度組んだガイド）は、True でもジョブにせずその場で結果を返す（issue #63）
@@ -660,6 +663,7 @@ def analyze_take(force: bool = False, estimator: str = "rmvpe",
     from . import prep
     from . import mcp_tracks
     from .project.store import CacheBroken
+    est = f0mod.resolve_estimator(estimator)      # 知らない名前はここで ValueError
     p = _project()
     p.reload_if_changed()
     est_sec = p.duration_sec * (0.45 * (13 if confidence_sweep else 1))
@@ -669,7 +673,7 @@ def analyze_take(force: bool = False, estimator: str = "rmvpe",
     if background is None:
         background = est_sec > JOB_THRESHOLD_SEC and not (
             os.path.exists(os.path.join(p.dir, "cache", "take-analysis.json")) and not force)
-    default = not force and estimator == "rmvpe" and not confidence_sweep
+    default = not force and est == f0mod.resolve_estimator() and not confidence_sweep
     # キャッシュを読むだけで済むなら、background を頼まれてもジョブにせず、裏の準備にも合流せずにすぐ返す
     # （issue #63。画面は常に background で呼ぶので、準備済みのトラックでも 200 ms の確認を待っていた）
     cached = default and p.analysis_cached()
@@ -706,7 +710,7 @@ def analyze_take(force: bool = False, estimator: str = "rmvpe",
                 else:
                     ctx = prep.exclusive(q.dir) if tgt is not None else contextlib.nullcontext()
                     with ctx:
-                        q.analyze(force=force, estimator=estimator, sweep=confidence_sweep,
+                        q.analyze(force=force, estimator=est, sweep=confidence_sweep,
                                   cancel=cancel, progress=report, commit=commit)
                 break
             except CacheBroken:
@@ -1886,7 +1890,7 @@ def remeasure(start_sec: float = None, end_sec: float = None, backend: str = "pr
         sr = p.take["sr"]
         out = os.path.join(p.sub("renders"), "remeasure-%s.wav" % uuid.uuid4().hex[:6])
         write_wav(out, y, sr)
-        f0new = f0mod.estimate_f0(x=y, sr=sr)
+        f0new = f0mod.estimate_f0(x=y, sr=sr, estimator=p.take_f0.estimator)   # 測ったときと同じ方式
         before = f0mod.summarize(p.take_f0.f0, p.take_f0.voiced, p.take_f0.confidence,
                                  int(t0 / p.take_f0.hop_s), int(t1 / p.take_f0.hop_s))
         after = f0mod.summarize(f0new.f0, f0new.voiced, f0new.confidence)
@@ -2040,6 +2044,10 @@ def engine_info(reload_addons: bool = False) -> dict:
     return _ok(version=__version__, backends=list_backends(),
                rmvpe_model=f0mod.RMVPE_PATH,
                rmvpe_model_found=os.path.exists(f0mod.RMVPE_PATH),
+               f0_estimator=f0mod.preferred_estimator(),
+               f0_estimator_effective=f0mod.resolve_estimator(),
+               f0_estimators=list(f0mod.ESTIMATORS),
+               gliss_f0_model_found=os.path.exists(f0mod.GLISS_F0_PATH),
                models_dir=f0mod.DEFAULT_MODELS_DIR,
                project=(p.dir if p else None), log=log.current_log_file(),
                phonemes_supported=True, phonemes=backend_info(),
@@ -2048,6 +2056,24 @@ def engine_info(reload_addons: bool = False) -> dict:
                limits={"job_threshold_sec": JOB_THRESHOLD_SEC,
                        "min_phoneme_ms": 20.0})
 
+
+
+@_tool
+def set_f0_estimator(estimator: str = "rmvpe") -> dict:
+    """ピッチ（F0）検出の方式を選ぶ（このエンジンの既定。画面の「ピッチ検出の方式」）。曲は変えない。
+
+    estimator: "rmvpe"（既定）/ "gliss"（Gliss の F0 モデル。試作）/ "praat"。
+    この後の analyze_take・裏の準備がこの方式で解析する（保存した解析が別の方式のものなら解析し直す）。
+    "rmvpe" を選んでいても重みが無ければ "gliss" で解析する（返り値の `effective`）。
+    """
+    before = f0mod.resolve_estimator()
+    effective = f0mod.set_preferred_estimator(estimator)
+    if effective != before:
+        _mcp_tracks.reschedule_prep()            # 裏の準備の組み合わせ（方式を含む）を入れ直す
+    return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
+               estimators=list(f0mod.ESTIMATORS),
+               rmvpe_model_found=f0mod.rmvpe_available(),
+               changed=effective != before)
 
 TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllable,
          inspect_lyrics_score, import_lyrics, analyze_take, get_pitch, list_notes, list_deviations,
@@ -2059,7 +2085,7 @@ TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllabl
          render_preview, render_region, render_audition, render_view, export_wav,
          export_view_data, remeasure,
          list_changes,
-         get_job, cancel_job, prep_status, pause_prep, engine_info]
+         get_job, cancel_job, prep_status, pause_prep, engine_info, set_f0_estimator]
 
 # トラック（セッション。issue #7）。mcp_tracks はこのモジュールの _tool などを使うので最後に読む
 from . import mcp_tracks as _mcp_tracks   # noqa: E402

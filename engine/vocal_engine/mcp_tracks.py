@@ -53,6 +53,13 @@ def _schedule(s):
         log.get().warning("裏の準備に入れられない: %s", e)
 
 
+def reschedule_prep():
+    """ピッチ検出の方式を替えた（`set_f0_estimator`）: 裏の準備を今の方式の組み合わせで入れ直す。"""
+    s = _srv._state.get("session")
+    if s is not None:
+        _schedule(s)
+
+
 def prep_target(p):
     """analyze_take の合流先: p が編集対象のトラックのもので、ガイドが今の指定どおりなら (セッション, トラック)。"""
     s, tid = _session_of(p)

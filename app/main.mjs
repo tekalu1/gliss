@@ -241,8 +241,12 @@ async function connectEngine() {
   if (!fs.existsSync(cfg.command)) {
     throw new Error(`${cfg.source === 'packaged' ? 'エンジン（vocal-engine.exe）' : 'エンジンの python'}が見つからない:\n${cfg.command}`);
   }
+  // ピッチ検出の方式（編集 > ピッチ検出の方式。ユーザー設定）はエンジンの既定として起動時に渡す
+  // （画面が set_f0_estimator を呼ぶ前に、前回のトラックの解析・裏の準備が始まるため）
+  const f0 = loadSettings().f0Estimator;
+  const env = f0 ? { ...cfg.env, GLISS_F0_ESTIMATOR: f0 } : cfg.env;
   state.transport = new StdioClientTransport({
-    command: cfg.command, args: cfg.args, cwd: cfg.cwd, env: cfg.env, stderr: 'pipe',
+    command: cfg.command, args: cfg.args, cwd: cfg.cwd, env, stderr: 'pipe',
   });
   state.client = new Client({ name: 'gliss-app', version: app.getVersion() }, { capabilities: {} });
   await state.client.connect(state.transport);
@@ -467,6 +471,7 @@ function recentItems() {
 function menuItem(it) {
   if (it.sep) return { type: 'separator' };
   if (it.recent) return { label: it.label, submenu: recentItems() };
+  if (it.submenu) return { label: it.label, submenu: it.submenu.map(menuItem) };
   if (it.role) return { role: it.role, label: it.label };
   const m = {
     label: it.label, enabled: it.enabled !== false, click: () => send(it.cmd),

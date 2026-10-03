@@ -456,6 +456,18 @@ export function setLyrics(text, range) {
   }, '歌詞の設定'), { label: '歌詞' });
 }
 
+/** ピッチ検出の方式を替えて、開いているトラックを解析し直す（f0.js。ユーザー設定なので取り消しの履歴には入れない）。
+ * onChanged: set_f0_estimator の結果を受け取る。失敗・取り消しのときは null を返す。 */
+export function setF0Estimator(estimator, onChanged) {
+  return enqueue(() => run(async () => {
+    onChanged?.(await call('set_f0_estimator', { estimator }));
+    status('ピッチを解析し直している…');
+    await analyzeTake({ label: 'ピッチを解析し直している', target: S.take?.name || '',
+      onProgress: (sec) => status(`ピッチを解析し直している… ${sec} 秒`) });
+    return true;
+  }, 'ピッチ検出の方式'));
+}
+
 /** 歌詞レーンの 1 音節を直す。エンジンの changeset なので Ctrl+Z で戻せる。 */
 export function setNoteSyllable(noteId, syllableIndex, kana) {
   return enqueue(() => run(async () => {

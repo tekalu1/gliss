@@ -24,6 +24,7 @@ from .. import log
 from ..analysis.align import DEFAULT_METHOD as ALIGN_METHOD
 from ..analysis.align import Alignment, boundary_deviations, deviations
 from ..analysis.f0 import ENERGY_FLOOR_DB, RMVPE_THRESHOLD, F0Result, estimate_f0
+from ..analysis import f0 as f0mod
 from ..analysis.notes import Note, segment_notes
 from ..audio import file_sig, sha256_file
 from .. import media as M
@@ -961,6 +962,8 @@ class Project:
         """F0・音符・発音の頭はガイドの切り出しと解析設定だけに依存する。"""
         key = [1, self._clip_cache_identity(self.guide), estimator, bool(sweep),
                RMVPE_THRESHOLD, ENERGY_FLOOR_DB]
+        if f0mod.estimator_version(estimator) is not None:
+            key.append(f0mod.estimator_version(estimator))   # 方式の中身を変えたら作り直す（RMVPE は前と同じ鍵）
         return self._guide_cache_dir("analysis", key)
 
     def _alignment_cache_dir(self):
@@ -968,6 +971,8 @@ class Project:
         key = [1, self._clip_cache_identity(self.take), self._clip_cache_identity(self.guide),
                self.align_method, self._take_f0.estimator,
                self._take_f0.meta.get("threshold"), bool(self._take_f0.meta.get("sweep"))]
+        if self._take_f0.meta.get("version") is not None:
+            key.append(self._take_f0.meta["version"])
         return self._guide_cache_dir("alignment", key)
 
     def _prune_guide_cache(self, kind):
@@ -999,8 +1004,7 @@ class Project:
                 result = F0Result.from_json(json.load(f)["f0"])
         except (OSError, ValueError, KeyError, TypeError):
             return None
-        same_estimator = result.estimator == estimator or (estimator == "auto" and
-                                                            result.estimator in ("rmvpe", "fcpe"))
+        same_estimator = f0mod.same_estimator(result.estimator, result.meta.get("version"), estimator)
         vuv_rule = "%s f0>0 AND rms > %.1f dBFS" % (result.estimator, ENERGY_FLOOR_DB)
         if not same_estimator or bool(result.meta.get("sweep")) != bool(sweep) or \
                 result.meta.get("threshold") != RMVPE_THRESHOLD or \
@@ -1082,9 +1086,12 @@ class Project:
         self._onset_sigs[role] = _src_sig(path)
         return t
 
-    def analyze(self, force=False, estimator="rmvpe", sweep=False, with_guide=True,
+    def analyze(self, force=False, estimator=None, sweep=False, with_guide=True,
                 cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None):
         """F0 → 音符 → （ガイドがあれば）DTW。結果は cache/ に保存する。
+
+        estimator: F0 の方式。省くと選んでいる方式（`f0.resolve_estimator`。画面の「ピッチ検出の方式」）。
+        保存した解析が別の方式のものなら、テイクの F0 から解析し直す（ガイドの解析は方式ごとの鍵付きの保存）。
 
         stage: 段の名前（"take_f0" / "lyrics" / "guide_f0" / "alignment" / "onsets" / "phonemes"）を
         段に入る前に受け取る関数（裏の準備の進み具合と、段の境目での取り消し。`prep.py`）。
@@ -1113,14 +1120,19 @@ class Project:
             else:
                 self._save_analysis()
 
+        estimator = f0mod.resolve_estimator(estimator)
         publish = not self.background   # 今の組み合わせを指す写しを書くか（裏の準備では書かない）
         advance(0.0)
         t0 = now_iso()
         take_cache = self._cache_path("take-analysis.json")
-        if not force and os.path.exists(take_cache):
+        reuse = not force and os.path.exists(take_cache)
+        if reuse:
             if self._take_f0 is None or self._srcs.get("take") != _src_sig(take_cache):
                 self._load_take_analysis(take_cache)     # 同じファイルをもう読んでいれば読み直さない
-        else:
+            # 方式を替えた（画面の「ピッチ検出の方式」・MCP の estimator）: 解析し直す
+            reuse = f0mod.same_estimator(self._take_f0.estimator, self._take_f0.meta.get("version"),
+                                         estimator)
+        if not reuse:
             enter("take_f0")
             x, sr = self.audio("take")
             f0r = estimate_f0(x=x, sr=sr, estimator=estimator, sweep=sweep)
@@ -1142,6 +1154,8 @@ class Project:
             "voiced_ratio": round(float(np.mean(self._take_f0.voiced)), 4),
             "cache": take_cache,
         }
+        if self._take_f0.meta.get("version") is not None:
+            self.analysis["take"]["estimator_version"] = self._take_f0.meta["version"]
         advance(0.45)
 
         # 歌詞が未設定の発声区間だけを推定する。初回解析のベース状態とし、
@@ -1324,15 +1338,21 @@ class Project:
         return json.dumps([_stable(self.analysis), self.lyrics], sort_keys=True, ensure_ascii=False,
                           default=str)
 
-    def analysis_cached(self, estimator="rmvpe", sweep=False):
+    def analysis_cached(self, estimator=None, sweep=False):
         """analyze（既定の設定）が**キャッシュを読むだけで済む**か（重い計算・読み込みが無い）。
+        estimator を省くと選んでいる方式。保存したテイクの解析が別の方式のものなら False。
 
         analyze_take はこのときジョブにせず、裏の準備にも合流せずにすぐ返す（issue #63）。見るもの:
         テイクの解析・歌詞の推定（済みか、推定できない）・ガイドの解析と対応付け（鍵付きの保存）・
         発音の頭・音素（今の歌詞の鍵付きの保存か、同じ入力で失敗したことを覚えているか）。"""
+        estimator = f0mod.resolve_estimator(estimator)
         take_cache = self._cache_path("take-analysis.json")
         if not os.path.exists(take_cache):
             return False
+        ta = self.analysis.get("take") or {}
+        if ta.get("estimator") is not None and not f0mod.same_estimator(
+                ta["estimator"], ta.get("estimator_version"), estimator):
+            return False                                 # 方式を替えた: テイクから解析し直す
         if "auto_lyrics" not in self.analysis and os.environ.get("VOCAL_ENGINE_AUTO_LYRICS", "1") != "0":
             from ..phoneme.hubertfa import model_found
             if model_found():
