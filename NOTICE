@@ -26,6 +26,9 @@ Third-party software:
   packages is attached to each GitHub Release (scripts/gpl-sources.mjs).
 - Electron's licenses (LICENSE.electron.txt, LICENSES.chromium.html) are placed
   in the installation directory.
-- The pretrained model weights (RMVPE, HubertFA, Whisper) are not included.
+- The Gliss F0 model (prototype; engine/vocal_engine/analysis/models/gliss-f0.onnx) is included. It was trained by
+  Gliss, using the SwiftF0 training code (MIT) and openly licensed datasets only (CC BY 4.0, ODbL, CMU Arctic terms);
+  the attributions are in gliss-f0.NOTICE.txt next to it and in THIRD_PARTY_NOTICES.txt.
+- Other pretrained model weights (RMVPE, HubertFA, Whisper) are not included.
   The app downloads them from their upstream publishers on first use; their
   license status is listed in README.md.

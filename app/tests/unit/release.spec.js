@@ -216,3 +216,15 @@ test('(R10) THIRD_PARTY_NOTICES: METADATA の読み方・ライセンス名・co
   expect(isCopyleft('pyinstaller', 'GPLv2-or-later with a special exception')).toBe(false);
   expect(isCopyleft('numpy', 'BSD-3-Clause AND 0BSD AND MIT')).toBe(false);
 });
+
+test('(R10b) THIRD_PARTY_NOTICES に Gliss の F0 モデルの学習データの出典（CC BY・ODbL・CMU Arctic）と学習コードの MIT が入る', async () => {
+  const { f0ModelNotice, notices } = await import('../../../scripts/third-party-notices.mjs');
+  const text = notices({ version: '0.1.0', python: [], node: [], f0Model: f0ModelNotice() });
+  for (const s of ['VocalSet', 'PTDB-TUG', 'CMU Arctic', 'LibriSpeech', 'NSynth', 'DEMAND', 'GuitarSet',
+    'Creative Commons Attribution 4.0', 'Open Database License', 'Lars Nieradzik', 'Permission is hereby granted']) {
+    expect(text, s).toContain(s);
+  }
+  // 公開リポジトリの衛生: 個人のパスは書かない
+  expect(text).not.toMatch(/[A-Z]:\\(Users|dev)\\/);
+  expect(notices({ version: '0.1.0', python: [], node: [] })).not.toContain('VocalSet');
+});
