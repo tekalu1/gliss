@@ -21,13 +21,14 @@ public:
     virtual juce::int64 getLengthInSamples() const noexcept = 0;
 
     /** 指定位置から原音サンプルを読み出し、destBuffer の destStartSample から格納する。
-        読めなかった（足りない、先読み未完了など）部分はゼロクリアする。
+        読めなかった（ソースの範囲の外、先読み未完了など）部分はゼロクリアする。
+        オーディオスレッドから呼ぶ。確保・ファイルの入出力をしない（先読みの待ちは timeoutMs まで）。
         @param destBuffer       読み出し先バッファ
         @param destStartSample  書き込み開始インデックス
         @param numSamples       読み出すサンプル数
         @param startInSource    ソースの時間軸（サンプル単位）での開始位置
         @param timeoutMs        先読みの待ち時間（ミリ秒、リアルタイム時は 0）
-        @return 完全に全サンプル読めたら true、一部でも欠けていれば false
+        @return 先読みが間に合わずに無音で埋めた区間があれば false（ソースの範囲の外は false にしない）
     */
     virtual bool readSourceSamples (juce::AudioBuffer<float>& destBuffer,
                                     int destStartSample,

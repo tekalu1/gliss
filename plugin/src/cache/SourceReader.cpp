@@ -34,7 +34,10 @@ bool FormatSourceReader::readSourceSamples (juce::AudioBuffer<float>& destBuffer
                                             juce::int64 startInSource,
                                             int timeoutMs) noexcept
 {
-    if (reader == nullptr || numSamples <= 0)
+    if (numSamples <= 0)
+        return true;
+
+    if (reader == nullptr)
     {
         for (int ch = 0; ch < destBuffer.getNumChannels(); ++ch)
             destBuffer.clear (ch, destStartSample, numSamples);
@@ -44,10 +47,10 @@ bool FormatSourceReader::readSourceSamples (juce::AudioBuffer<float>& destBuffer
     if (bufferingReader != nullptr)
         bufferingReader->setReadTimeout (timeoutMs);
 
-    // AudioFormatReader::read は destBuffer に指定サンプル数読み込む
-    // 未到達・不足部分は通常ゼロで埋められる
-    const auto complete = reader->read (&destBuffer, destStartSample, numSamples, startInSource, true, true);
-    return complete;
+    // ソースの範囲の外は AudioFormatReader が無音にして true を返す。
+    // BufferingAudioReader は先読みが間に合わない所を無音にして false を返す（timeoutMs だけ待つ）。
+    // BufferingAudioReader は中で CriticalSection を取るが、裏のスレッドが握るのはブロックの列の入れ替えの間だけ。
+    return reader->read (&destBuffer, destStartSample, numSamples, startInSource, true, true);
 }
 
 //==============================================================================
@@ -82,10 +85,10 @@ bool BufferSourceReader::readSourceSamples (juce::AudioBuffer<float>& destBuffer
 
     if (validStartInSource >= validEndInSource)
     {
-        // 全く重ならない
+        // 全く重ならない（ソースの範囲の外は無音。足りないのではないので true）
         for (int ch = 0; ch < destChans; ++ch)
             destBuffer.clear (ch, destStartSample, numSamples);
-        return false;
+        return true;
     }
 
     const auto offsetInDest = (int) (validStartInSource - startInSource);
@@ -119,7 +122,7 @@ bool BufferSourceReader::readSourceSamples (juce::AudioBuffer<float>& destBuffer
         destBuffer.clear (ch, destStartSample + offsetInDest, validCount);
     }
 
-    return (validCount == numSamples);
+    return true;
 }
 
 } // namespace gliss
