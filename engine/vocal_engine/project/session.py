@@ -113,6 +113,32 @@ def _same_clip_dict(a, b):
             and abs(float(a["length_sec"]) - float(b["length_sec"])) < 1e-6)
 
 
+GAIN_MIN_DB = -60.0     # これ以下は無音（−∞）
+GAIN_MAX_DB = 6.0
+
+
+def norm_gain_db(v):
+    """トラックの音量（dB）。0 を既定に、−60〜+6 に丸める（−60 は無音 = −∞）。"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v:
+        return 0.0
+    return round(max(GAIN_MIN_DB, min(GAIN_MAX_DB, v)), 3)
+
+
+def norm_pan(v):
+    """トラックのパン（−1 = 左いっぱい 〜 +1 = 右いっぱい。0 = 中央）。"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v:
+        return 0.0
+    return round(max(-1.0, min(1.0, v)), 4)
+
+
 def _norm_track(t):
     t = dict(t)
     t.setdefault("kind", "vocal")
@@ -121,6 +147,8 @@ def _norm_track(t):
     t["offset_sec"] = float(t.get("offset_sec") or 0.0)
     t["mute"] = bool(t.get("mute"))
     t["solo"] = bool(t.get("solo"))
+    t["gain_db"] = norm_gain_db(t.get("gain_db"))
+    t["pan"] = norm_pan(t.get("pan"))
     t.setdefault("clip", None)
     t.setdefault("source_id", None)
     t.setdefault("name", os.path.splitext(os.path.basename(t.get("path") or "track"))[0])
@@ -595,13 +623,13 @@ class Session:
 
     @staticmethod
     def structure(snap):
-        """スナップショットのうち、取り消しの対象になるところ（ミュート／ソロ・ガイドの歌詞の控えを除く）。"""
-        drop = ("mute", "solo", "guide_lyrics")
+        """スナップショットのうち、取り消しの対象になるところ（ミュート／ソロ・音量・パン・ガイドの歌詞の控えを除く）。"""
+        drop = ("mute", "solo", "gain_db", "pan", "guide_lyrics")
         return {"tracks": [{k: v for k, v in t.items() if k not in drop} for t in snap["tracks"]],
                 "guide": snap.get("guide"), "tempo": snap.get("tempo")}
 
     def restore(self, snap):
-        """スナップショットに戻す。ミュート／ソロとガイドの歌詞の控えは今のまま（取り消しの対象外）。"""
+        """スナップショットに戻す。ミュート／ソロ・音量・パン・ガイドの歌詞の控えは今のまま（取り消しの対象外）。"""
         cur = {t["id"]: t for t in self.tracks}
         tracks = copy.deepcopy(snap["tracks"])
         for t in tracks:
@@ -609,6 +637,7 @@ class Session:
             if c is None:
                 continue
             t["mute"], t["solo"] = c.get("mute", False), c.get("solo", False)
+            t["gain_db"], t["pan"] = c.get("gain_db", 0.0), c.get("pan", 0.0)
             if c.get("guide_lyrics") is not None:
                 t["guide_lyrics"] = copy.deepcopy(c["guide_lyrics"])
             else:
@@ -827,7 +856,7 @@ class Session:
         tracks = []
         for t in self.tracks:
             d = {k: t.get(k) for k in ("id", "name", "kind", "path", "offset_sec", "duration_sec",
-                                       "sr", "channels", "mute", "solo", "clip")}
+                                       "sr", "channels", "mute", "solo", "gain_db", "pan", "clip")}
             d["guide"] = t["id"] == self.guide
             d["current"] = t["id"] == current
             d["audible"] = self.audible(t)
@@ -979,8 +1008,8 @@ def open_session(take, guide=None, project_dir=None, reuse=True, lyrics=None, gu
         sha = sha256_file(tpath)
         if sha != prim.get("sha256"):
             what.append("テイクの差し替え")
-            # 別の素材になった: 前のテイクの位置・ミュート／ソロ・ガイドの歌詞の控えは引き継がない
-            prim.update(offset_sec=0.0, mute=False, solo=False)
+            # 別の素材になった: 前のテイクの位置・ミュート／ソロ・音量・パン・ガイドの歌詞の控えは引き継がない
+            prim.update(offset_sec=0.0, mute=False, solo=False, gain_db=0.0, pan=0.0)
             prim.pop("guide_lyrics", None)
         prim.update(path=tpath, sha256=sha, sr=int(info.samplerate),
                     channels=int(info.channels), source_frames=int(info.frames), clip=tc,
