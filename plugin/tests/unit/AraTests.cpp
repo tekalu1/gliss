@@ -195,6 +195,12 @@ public:
             expect (! r.isStretched());
             expectWithinAbsoluteError (r.modEnd, 6.0, 1.0e-12);
             expectWithinAbsoluteError (*regions::songToMod (r, 12.0), 4.0, 1.0e-12);
+
+            // 伸縮が有効でも、丸めの誤差ほどの長さの差（1 マイクロ秒未満）は伸縮しない（音を伸縮の処理に通さない）
+            auto nearly = region ("nearly", 10.0, 14.0, 2.0, 6.0 + 4.0e-7);
+            expect (! nearly.isStretched());
+            expectWithinAbsoluteError (*regions::songToMod (nearly, 12.0), 4.0, 1.0e-12);
+            expect (region ("tiny", 10.0, 14.0, 2.0, 6.0 + 2.0e-6).isStretched());
         }
 
         beginTest ("track offset uses the earliest region");

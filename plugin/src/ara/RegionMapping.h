@@ -19,7 +19,9 @@ struct RegionTimes
     double songLength() const noexcept { return songEnd - songStart; }
     double modLength() const noexcept { return modEnd - modStart; }
     double scale() const noexcept { return songLength() > 0.0 ? modLength() / songLength() : 0.0; }
-    bool isStretched() const noexcept { return std::abs (scale() - 1.0) > 1.0e-9; }
+    /** 伸縮しているか。伸縮を有効にしたホストが丸めの誤差ほどの長さの差を渡しても、伸縮の処理（音が変わる）に入らないよう、
+        長さの差が 1 マイクロ秒（192 kHz の 1 サンプルより短い）未満なら伸縮していないとみなす。 */
+    bool isStretched() const noexcept { return songLength() > 0.0 && std::abs (modLength() - songLength()) > 1.0e-6; }
     void normalize (bool timestretchEnabled) noexcept { if (! timestretchEnabled) modEnd = modStart + songLength(); }
 
     /** 画面に渡す形 { id, song_start, song_end, mod_start, mod_end }。 */
