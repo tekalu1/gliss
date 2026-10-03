@@ -1,51 +1,37 @@
 #include "RegionReader.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 
 namespace gliss
 {
 
-//==============================================================================
-ResampleState::ResampleState() = default;
-
-void ResampleState::reset() noexcept
-{
-    nextExpectedSourceSample = -1;
-    for (auto& interp : interpolators)
-        interp.reset();
-}
-
-juce::int64 ResampleState::checkContinuityAndGetStart (juce::int64 startInSource) noexcept
-{
-    if (nextExpectedSourceSample < 0 || std::abs (startInSource - nextExpectedSourceSample) > 1)
-    {
-        reset();
-        nextExpectedSourceSample = startInSource;
-        return startInSource;
-    }
-
-    return nextExpectedSourceSample;
-}
-
-void ResampleState::advanceSourceSamples (int numUsedSourceSamples) noexcept
-{
-    if (nextExpectedSourceSample >= 0)
-        nextExpectedSourceSample += numUsedSourceSamples;
-}
-
-juce::WindowedSincInterpolator& ResampleState::getInterpolator (int channel) noexcept
-{
-    if ((size_t) channel >= interpolators.size())
-        interpolators.resize ((size_t) channel + 1);
-
-    return interpolators[(size_t) channel];
-}
-
-//==============================================================================
 namespace
 {
+
+// WindowedSincInterpolator の遅れ（ソースのサンプル）。出力は「最後に入れたサンプル − 100」の時刻になる
+constexpr int interpolatorLatency = (int) juce::WindowedSincInterpolator::getBaseLatency();
+// シークの後に変換器を満たす長さ（新しい位置の前後 100 サンプルずつ）
+constexpr int primeLength = 2 * interpolatorLatency;
+// process() が n 個を書くのに読むソースは ceil (n * 比) + 1 個まで
+constexpr int interpolatorLookahead = 2;
+// startInSource がこれ以上ずれていたら続きのブロックではない（シーク・ループ）とみなす
+constexpr double continuityTolerance = 2.0;
+
+/** 作業用のバッファの先頭 numSamples を指す AudioBuffer（確保しない。チャンネル数は maxChannels まで）。 */
+juce::AudioBuffer<float> makeView (juce::AudioBuffer<float>& work, int numChannels, int numSamples) noexcept
+{
+    float* channels[RegionReader::maxChannels] = {};
+    for (int ch = 0; ch < numChannels; ++ch)
+        channels[ch] = work.getWritePointer (ch);
+    return juce::AudioBuffer<float> (channels, numChannels, numSamples);
+}
+
+void clearDest (juce::AudioBuffer<float>& dest, int destStart, int numSamples) noexcept
+{
+    for (int ch = 0; ch < dest.getNumChannels(); ++ch)
+        dest.clear (ch, destStart, numSamples);
+}
 
 void writeToDest (juce::AudioBuffer<float>& dest,
                   int destStart,
@@ -56,234 +42,275 @@ void writeToDest (juce::AudioBuffer<float>& dest,
     const auto srcChans = src.getNumChannels();
     const auto destChans = dest.getNumChannels();
 
-    if (srcChans == 1 && destChans >= 2)
+    if (destChans == 1 && srcChans > 1)
     {
-        // モノラル -> ステレオ以上（全出力チャンネルに複製）
-        const auto* s = src.getReadPointer (0);
-        for (int ch = 0; ch < destChans; ++ch)
-        {
-            if (add)
-                dest.addFrom (ch, destStart, s, numSamples);
-            else
-                dest.copyFrom (ch, destStart, s, numSamples);
-        }
-    }
-    else if (srcChans == 2 && destChans == 1)
-    {
-        // ステレオ -> モノラル（平均）
-        const auto* l = src.getReadPointer (0);
-        const auto* r = src.getReadPointer (1);
+        // 出力がモノラル: ソースの全チャンネルの平均（ステレオなら (L + R) / 2）
+        const auto gain = 1.0f / (float) srcChans;
         auto* d = dest.getWritePointer (0, destStart);
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const float val = 0.5f * (l[i] + r[i]);
-            if (add)
-                d[i] += val;
-            else
-                d[i] = val;
-        }
+        if (! add)
+            juce::FloatVectorOperations::clear (d, numSamples);
+        for (int ch = 0; ch < srcChans; ++ch)
+            juce::FloatVectorOperations::addWithMultiply (d, src.getReadPointer (ch), gain, numSamples);
+        return;
     }
-    else
+
+    for (int ch = 0; ch < destChans; ++ch)
     {
-        // 1:1 またはその他のチャンネルマッピング
-        for (int ch = 0; ch < destChans; ++ch)
+        // ソースがモノラルなら全出力へ。そのほかはチャンネルごと（ソースに無い出力のチャンネルは無音）
+        const auto srcCh = srcChans == 1 ? 0 : ch;
+        if (srcCh >= srcChans)
         {
-            const auto srcCh = std::min (ch, srcChans - 1);
-            const auto* s = src.getReadPointer (srcCh);
-            if (add)
-                dest.addFrom (ch, destStart, s, numSamples);
-            else
-                dest.copyFrom (ch, destStart, s, numSamples);
+            if (! add)
+                dest.clear (ch, destStart, numSamples);
+            continue;
         }
+
+        if (add)
+            dest.addFrom (ch, destStart, src, srcCh, 0, numSamples);
+        else
+            dest.copyFrom (ch, destStart, src, srcCh, 0, numSamples);
     }
 }
 
-void applyWindowsToBuffer (juce::AudioBuffer<float>& buffer,
-                           juce::int64 startInSource,
-                           int numSamples,
-                           const EditedPcmSnapshot& snapshot) noexcept
+/** buffer（ソースの位置 startInSource から numSamples）に、重なる窓の PCM を上書きする。窓の列を二分探索してたどる。 */
+void applyWindows (juce::AudioBuffer<float>& buffer,
+                   juce::int64 startInSource,
+                   int numSamples,
+                   const EditedPcmSnapshot& snapshot) noexcept
 {
-    std::vector<const EditedWindow*> overlapping;
-    snapshot.getOverlappingWindows (startInSource, numSamples, overlapping);
-
+    const auto& windows = snapshot.getWindows();
+    const auto endInSource = startInSource + numSamples;
     const auto bufferChannels = buffer.getNumChannels();
 
-    for (const auto* win : overlapping)
+    for (auto i = snapshot.findFirstWindowEndingAfter (startInSource);
+         i < windows.size() && windows[i].startFrame < endInSource;
+         ++i)
     {
-        const auto overlapStart = std::max (startInSource, win->startFrame);
-        const auto overlapEnd = std::min (startInSource + (juce::int64) numSamples, win->getEndFrame());
+        const auto& win = windows[i];
+        const auto overlapStart = std::max (startInSource, win.startFrame);
+        const auto overlapEnd = std::min (endInSource, win.getEndFrame());
+        const auto count = (int) (overlapEnd - overlapStart);
+        const auto winChannels = win.getNumChannels();
+        if (count <= 0 || winChannels <= 0)
+            continue;
 
-        if (overlapStart < overlapEnd)
+        const auto destOffset = (int) (overlapStart - startInSource);
+        const auto winOffset = (int) (overlapStart - win.startFrame);
+
+        // 窓がモノラルなら全チャンネルへ。窓に無いチャンネルは原音のまま
+        for (int ch = 0; ch < bufferChannels; ++ch)
         {
-            const auto count = (int) (overlapEnd - overlapStart);
-            const auto destOffset = (int) (overlapStart - startInSource);
-            const auto winOffset = (int) (overlapStart - win->startFrame);
-            const auto copyChans = std::min (bufferChannels, win->getNumChannels());
-
-            for (int ch = 0; ch < copyChans; ++ch)
-            {
-                buffer.copyFrom (ch, destOffset, win->buffer, ch, winOffset, count);
-            }
+            const auto winCh = winChannels == 1 ? 0 : ch;
+            if (winCh < winChannels)
+                juce::FloatVectorOperations::copy (buffer.getWritePointer (ch, destOffset),
+                                                   win.getReadPointer (winCh) + winOffset,
+                                                   count);
         }
     }
 }
 
 } // namespace
 
+//==============================================================================
+/** ソースの周波数の列（原音の上に窓を重ねたもの）の読み出し。 */
+struct RegionReader::Source
+{
+    SourceReader* reader = nullptr;
+    const EditedPcmSnapshot* snapshot = nullptr;   // 当てる窓（無ければ原音だけ）
+    int timeoutMs = 0;
+
+    bool fill (juce::AudioBuffer<float>& buffer, juce::int64 startInSource) const noexcept
+    {
+        bool complete = true;
+        if (reader != nullptr)
+            complete = reader->readSourceSamples (buffer, 0, buffer.getNumSamples(), startInSource, timeoutMs);
+        else
+            buffer.clear();
+
+        if (snapshot != nullptr)
+            applyWindows (buffer, startInSource, buffer.getNumSamples(), *snapshot);
+
+        return complete;
+    }
+};
+
+//==============================================================================
+RegionReader::RegionReader() = default;
+RegionReader::~RegionReader() = default;
+
+void RegionReader::prepare (double hostSampleRateIn, int maxBlockSize, int maxSourceChannels, double sourceSampleRate)
+{
+    hostSampleRate = hostSampleRateIn > 0.0 ? hostSampleRateIn : (sourceSampleRate > 0.0 ? sourceSampleRate : 48000.0);
+    blockCapacity = std::max (1, maxBlockSize);
+    channelCapacity = juce::jlimit (1, maxChannels, maxSourceChannels);
+
+    const auto ratio = sourceSampleRate > 0.0 ? std::max (1.0, sourceSampleRate / hostSampleRate) : 1.0;
+    sourceCapacity = std::max (primeLength, (int) std::ceil ((double) blockCapacity * ratio) + interpolatorLookahead);
+
+    sourceWork.setSize (channelCapacity, sourceCapacity);
+    outputWork.setSize (channelCapacity, std::max (blockCapacity, primeLength));
+    interpolators.reset (new juce::WindowedSincInterpolator[(size_t) channelCapacity]);
+    reset();
+}
+
+void RegionReader::releaseResources()
+{
+    sourceCapacity = 0;
+    blockCapacity = 0;
+    channelCapacity = 0;
+    sourceWork = juce::AudioBuffer<float>();
+    outputWork = juce::AudioBuffer<float>();
+    interpolators.reset();
+    reset();
+}
+
+void RegionReader::reset() noexcept
+{
+    primed = false;
+}
+
+bool RegionReader::prime (juce::int64 startInSource, int numChannels, const Source& source) noexcept
+{
+    // 新しい位置の前後 100 サンプルを比 1 で入れる（出力は捨てる）。次の出力が startInSource の時刻になる
+    auto in = makeView (sourceWork, numChannels, primeLength);
+    auto out = makeView (outputWork, numChannels, primeLength);
+    const auto complete = source.fill (in, startInSource - interpolatorLatency);
+
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        interpolators[ch].reset();
+        interpolators[ch].process (1.0, in.getReadPointer (ch), out.getWritePointer (ch), primeLength);
+    }
+
+    nextReadPosition = startInSource - interpolatorLatency + primeLength;
+    expectedStartInSource = (double) startInSource;
+    primed = true;
+    primedChannels = numChannels;
+    return complete;
+}
+
 bool RegionReader::readBlock (juce::AudioBuffer<float>& destBuffer,
-                             int destStartSample,
-                             int numDestSamples,
-                             juce::int64 startInSource,
-                             double hostSampleRate,
-                             SourceReader* sourceReader,
-                             const EditedPcm* editedPcm,
-                             ResampleState* resampleState,
-                             const RegionReadOptions& options) noexcept
+                              int destStartSample,
+                              int numDestSamples,
+                              juce::int64 startInSource,
+                              SourceReader* sourceReader,
+                              const EditedPcm* editedPcm,
+                              const RegionReadOptions& options) noexcept
 {
     if (numDestSamples <= 0)
         return true;
 
-    // ソースのフォーマットを取得
-    double sourceSampleRate = hostSampleRate;
-    int sourceChannels = destBuffer.getNumChannels();
+    if (destStartSample < 0 || destBuffer.getNumChannels() <= 0)
+        return false;
 
+    numDestSamples = std::min (numDestSamples, destBuffer.getNumSamples() - destStartSample);
+    if (numDestSamples <= 0)
+        return false;
+
+    if (! isPrepared())
+    {
+        if (! options.addToDestBuffer)
+            clearDest (destBuffer, destStartSample, numDestSamples);
+        return false;
+    }
+
+    // スナップショットを取得（tryLock。取れなければ原音）。写しと破棄は参照カウントの増減だけ
+    std::shared_ptr<const EditedPcmSnapshot> snapshot;
+    if (! options.compareMode && editedPcm != nullptr)
+        snapshot = editedPcm->tryGetSnapshot();
+
+    // ソースのフォーマット
+    double sourceSampleRate = 0.0;
+    int sourceChannels = 0;
     if (sourceReader != nullptr)
     {
         sourceSampleRate = sourceReader->getSampleRate();
         sourceChannels = sourceReader->getNumChannels();
     }
-    else if (editedPcm != nullptr)
+    else if (snapshot != nullptr)
     {
-        sourceSampleRate = editedPcm->getSampleRate();
-        sourceChannels = editedPcm->getNumChannels();
+        sourceSampleRate = snapshot->getSampleRate();
+        sourceChannels = snapshot->getNumChannels();
     }
 
     if (sourceSampleRate <= 0.0)
         sourceSampleRate = hostSampleRate;
     if (sourceChannels <= 0)
         sourceChannels = destBuffer.getNumChannels();
+    sourceChannels = std::min (sourceChannels, channelCapacity);
 
-    const bool sameSampleRate = std::abs (sourceSampleRate - hostSampleRate) < 1.0;
+    Source source;
+    source.reader = sourceReader;
+    source.timeoutMs = options.timeoutMs;
+    // 窓の位置はソースの周波数のサンプルなので、周波数の違うスナップショット（設定の食い違い）は当てない
+    if (snapshot != nullptr && snapshot->hasWindows() && std::abs (snapshot->getSampleRate() - sourceSampleRate) < 1.0)
+        source.snapshot = snapshot.get();
 
-    // スナップショットを取得（tryLock）
-    std::shared_ptr<const EditedPcmSnapshot> snapshot;
-    if (! options.compareMode && editedPcm != nullptr)
-        snapshot = editedPcm->tryGetSnapshot();
+    bool complete = true;
 
     //--------------------------------------------------------------------------
-    // ケース 1: サンプリング周波数が同じ場合（素通し）
+    // サンプリング周波数が同じ場合（素通し）
     //--------------------------------------------------------------------------
-    if (sameSampleRate)
+    if (std::abs (sourceSampleRate - hostSampleRate) < 1.0)
     {
-        constexpr int maxStackSamples = 4096;
-        constexpr int maxStackChannels = 2;
-        float stackMemory[maxStackChannels * maxStackSamples];
-        float* channelPointers[maxStackChannels];
+        primed = false;
 
-        auto runWithBuffer = [&] (juce::AudioBuffer<float>& sourceBuffer)
+        for (int done = 0; done < numDestSamples;)
         {
-            // 1. 原音を読み出し
-            bool complete = true;
-            if (sourceReader != nullptr)
-                complete = sourceReader->readSourceSamples (sourceBuffer, 0, numDestSamples, startInSource, options.timeoutMs);
-            else
-                sourceBuffer.clear();
-
-            // 2. 窓を上書き
-            if (snapshot != nullptr && snapshot->hasWindows())
-                applyWindowsToBuffer (sourceBuffer, startInSource, numDestSamples, *snapshot);
-
-            // 3. チャンネル変換して出力
-            writeToDest (destBuffer, destStartSample, numDestSamples, sourceBuffer, options.addToDestBuffer);
-
-            return complete;
-        };
-
-        if (sourceChannels <= maxStackChannels && numDestSamples <= maxStackSamples)
-        {
-            for (int ch = 0; ch < sourceChannels; ++ch)
-                channelPointers[ch] = stackMemory + ch * numDestSamples;
-
-            juce::AudioBuffer<float> stackBuffer (channelPointers, sourceChannels, numDestSamples);
-            return runWithBuffer (stackBuffer);
+            const auto chunk = std::min (numDestSamples - done, sourceCapacity);
+            auto in = makeView (sourceWork, sourceChannels, chunk);
+            complete = source.fill (in, startInSource + done) && complete;
+            writeToDest (destBuffer, destStartSample + done, chunk, in, options.addToDestBuffer);
+            done += chunk;
         }
-
-        juce::AudioBuffer<float> heapBuffer (sourceChannels, numDestSamples);
-        return runWithBuffer (heapBuffer);
-    }
-
-    //--------------------------------------------------------------------------
-    // ケース 2: サンプリング周波数が異なる場合（リサンプリング）
-    //--------------------------------------------------------------------------
-    const double speedRatio = sourceSampleRate / hostSampleRate;
-
-    juce::int64 actualStartInSource = startInSource;
-    if (resampleState != nullptr)
-        actualStartInSource = resampleState->checkContinuityAndGetStart (startInSource);
-
-    // 必要な入力サンプル数（マージン 64 サンプル）
-    const int numSourceSamples = (int) std::ceil (numDestSamples * speedRatio) + 64;
-
-    constexpr int maxStackSamples = 4096;
-    constexpr int maxStackChannels = 2;
-    float stackSourceMemory[maxStackChannels * maxStackSamples];
-    float* stackSourcePointers[maxStackChannels];
-
-    float stackResampledMemory[maxStackChannels * maxStackSamples];
-    float* stackResampledPointers[maxStackChannels];
-
-    auto runResampled = [&] (juce::AudioBuffer<float>& sourceBuffer,
-                             juce::AudioBuffer<float>& resampledBuffer)
-    {
-        // 1. 原音を読み出し
-        bool complete = true;
-        if (sourceReader != nullptr)
-            complete = sourceReader->readSourceSamples (sourceBuffer, 0, numSourceSamples, actualStartInSource, options.timeoutMs);
-        else
-            sourceBuffer.clear();
-
-        // 2. 窓を上書き（リサンプラーに入る前に結合するので継ぎ目に段差が出ない）
-        if (snapshot != nullptr && snapshot->hasWindows())
-            applyWindowsToBuffer (sourceBuffer, actualStartInSource, numSourceSamples, *snapshot);
-
-        // 3. リサンプリング
-        int usedSamples = 0;
-        for (int ch = 0; ch < sourceChannels; ++ch)
-        {
-            juce::WindowedSincInterpolator localInterp;
-            auto& interp = (resampleState != nullptr ? resampleState->getInterpolator (ch) : localInterp);
-
-            usedSamples = interp.process (speedRatio,
-                                          sourceBuffer.getReadPointer (ch),
-                                          resampledBuffer.getWritePointer (ch),
-                                          numDestSamples);
-        }
-
-        if (resampleState != nullptr)
-            resampleState->advanceSourceSamples (usedSamples);
-
-        // 4. チャンネル変換して出力
-        writeToDest (destBuffer, destStartSample, numDestSamples, resampledBuffer, options.addToDestBuffer);
 
         return complete;
-    };
-
-    if (sourceChannels <= maxStackChannels && numSourceSamples <= maxStackSamples && numDestSamples <= maxStackSamples)
-    {
-        for (int ch = 0; ch < sourceChannels; ++ch)
-        {
-            stackSourcePointers[ch] = stackSourceMemory + ch * numSourceSamples;
-            stackResampledPointers[ch] = stackResampledMemory + ch * numDestSamples;
-        }
-
-        juce::AudioBuffer<float> stackSourceBuffer (stackSourcePointers, sourceChannels, numSourceSamples);
-        juce::AudioBuffer<float> stackResampledBuffer (stackResampledPointers, sourceChannels, numDestSamples);
-        return runResampled (stackSourceBuffer, stackResampledBuffer);
     }
 
-    juce::AudioBuffer<float> heapSourceBuffer (sourceChannels, numSourceSamples);
-    juce::AudioBuffer<float> heapResampledBuffer (sourceChannels, numDestSamples);
-    return runResampled (heapSourceBuffer, heapResampledBuffer);
+    //--------------------------------------------------------------------------
+    // サンプリング周波数が異なる場合（流しの変換）
+    //--------------------------------------------------------------------------
+    const double ratio = sourceSampleRate / hostSampleRate;
+    const auto maxChunk = std::min (blockCapacity, (int) ((double) (sourceCapacity - interpolatorLookahead) / ratio));
+    if (maxChunk <= 0)
+    {
+        if (! options.addToDestBuffer)
+            clearDest (destBuffer, destStartSample, numDestSamples);
+        return false;
+    }
+
+    if (! primed
+        || ! juce::exactlyEqual (ratio, primedRatio)
+        || sourceChannels != primedChannels
+        || std::abs ((double) startInSource - expectedStartInSource) > continuityTolerance)
+    {
+        complete = prime (startInSource, sourceChannels, source);
+        primedRatio = ratio;
+    }
+
+    for (int done = 0; done < numDestSamples;)
+    {
+        const auto chunk = std::min (numDestSamples - done, maxChunk);
+        const auto needed = std::min (sourceCapacity, (int) std::ceil ((double) chunk * ratio) + interpolatorLookahead);
+
+        // 原音と窓を合わせてから変換するので、窓の継ぎ目に段差が出ない
+        auto in = makeView (sourceWork, sourceChannels, needed);
+        auto out = makeView (outputWork, sourceChannels, chunk);
+        complete = source.fill (in, nextReadPosition) && complete;
+
+        int used = 0;
+        for (int ch = 0; ch < sourceChannels; ++ch)
+            used = interpolators[ch].process (ratio, in.getReadPointer (ch), out.getWritePointer (ch), chunk);
+
+        // 変換器が読んだ分だけ進める（読み残しは次に読み直す）
+        nextReadPosition += used;
+        expectedStartInSource += (double) chunk * ratio;
+
+        writeToDest (destBuffer, destStartSample + done, chunk, out, options.addToDestBuffer);
+        done += chunk;
+    }
+
+    return complete;
 }
 
 } // namespace gliss

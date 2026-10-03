@@ -1,6 +1,8 @@
 #include "EditedPcm.h"
 
 #include <algorithm>
+#include <atomic>
+#include <limits>
 
 namespace gliss
 {
@@ -17,22 +19,12 @@ EditedPcmSnapshot::EditedPcmSnapshot (juce::String revIn,
 {
 }
 
-void EditedPcmSnapshot::getOverlappingWindows (juce::int64 startFrame,
-                                              int numFrames,
-                                              std::vector<const EditedWindow*>& result) const
+size_t EditedPcmSnapshot::findFirstWindowEndingAfter (juce::int64 frame) const noexcept
 {
-    result.clear();
-    if (numFrames <= 0 || windows.empty())
-        return;
-
-    const auto reqEnd = startFrame + numFrames;
-    for (const auto& w : windows)
-    {
-        if (w.startFrame >= reqEnd)
-            break;
-        if (w.getEndFrame() > startFrame)
-            result.push_back (&w);
-    }
+    // 窓は開始の順に並び重ならないので、終わりも昇順
+    const auto it = std::partition_point (windows.begin(), windows.end(),
+                                          [frame] (const EditedWindow& w) { return w.getEndFrame() <= frame; });
+    return (size_t) std::distance (windows.begin(), it);
 }
 
 //==============================================================================
@@ -59,22 +51,56 @@ std::shared_ptr<const EditedPcmSnapshot> EditedPcm::getSnapshot() const
 
 juce::String EditedPcm::getRev() const
 {
-    const juce::SpinLock::ScopedLockType lock (spinLock);
-    return currentSnapshot != nullptr ? currentSnapshot->getRev() : juce::String();
+    const auto snapshot = getSnapshot();
+    return snapshot != nullptr ? snapshot->getRev() : juce::String();
+}
+
+void EditedPcm::publish (std::shared_ptr<const EditedPcmSnapshot> next)
+{
+    {
+        // ロックの中ではポインタを入れ替えるだけ（確保も解放もしない）
+        const juce::SpinLock::ScopedLockType lock (spinLock);
+        std::swap (currentSnapshot, next);
+    }
+
+    // next は差し替える前のもの。オーディオスレッドがまだ読んでいるかもしれないので、ここでは解放しない
+    const std::lock_guard<std::mutex> guard (retiredLock);
+    if (next != nullptr)
+        retired.push_back (std::move (next));
+    releaseUnusedSnapshotsLocked();
+}
+
+size_t EditedPcm::releaseUnusedSnapshots()
+{
+    const std::lock_guard<std::mutex> guard (retiredLock);
+    return releaseUnusedSnapshotsLocked();
+}
+
+size_t EditedPcm::releaseUnusedSnapshotsLocked()
+{
+    // 解放待ちのものは currentSnapshot ではないので、オーディオスレッドが新たに参照を取ることはない。
+    // use_count が 1（この列だけ）になったら、それ以降も 1 のまま。
+    const auto unused = std::partition (retired.begin(), retired.end(),
+                                        [] (const std::shared_ptr<const EditedPcmSnapshot>& s) { return s.use_count() > 1; });
+    if (unused != retired.end())
+    {
+        // 読み手が参照を手放す前に読んだ内容より後に解放する
+        std::atomic_thread_fence (std::memory_order_acquire);
+        retired.erase (unused, retired.end());
+    }
+    return retired.size();
 }
 
 void EditedPcm::setFormat (double newSampleRate, int newNumChannels)
 {
-    const juce::SpinLock::ScopedLockType lock (spinLock);
     sampleRate = newSampleRate;
     numChannels = newNumChannels;
-    currentSnapshot = std::make_shared<EditedPcmSnapshot> (juce::String(), sampleRate, numChannels, std::vector<EditedWindow>());
+    publish (std::make_shared<EditedPcmSnapshot> (juce::String(), sampleRate, numChannels, std::vector<EditedWindow>()));
 }
 
 void EditedPcm::clear()
 {
-    const juce::SpinLock::ScopedLockType lock (spinLock);
-    currentSnapshot = std::make_shared<EditedPcmSnapshot> (juce::String(), sampleRate, numChannels, std::vector<EditedWindow>());
+    publish (std::make_shared<EditedPcmSnapshot> (juce::String(), sampleRate, numChannels, std::vector<EditedWindow>()));
 }
 
 void EditedPcm::removeOverlappingRanges (std::vector<EditedWindow>& list,
@@ -87,72 +113,34 @@ void EditedPcm::removeOverlappingRanges (std::vector<EditedWindow>& list,
     const auto rEnd = rangeToRemove.getEnd();
 
     std::vector<EditedWindow> result;
-    result.reserve (list.size() + 2);
+    result.reserve (list.size() + 1);
 
+    // 範囲の外の部分だけを残す（PCM は写さず、offset と numSamples を変える）
     for (auto& w : list)
     {
         const auto wStart = w.startFrame;
         const auto wEnd = w.getEndFrame();
 
-        // 重なりなし
         if (rEnd <= wStart || rStart >= wEnd)
         {
             result.push_back (std::move (w));
             continue;
         }
 
-        // 完全被覆（削除）
-        if (rStart <= wStart && rEnd >= wEnd)
+        if (rStart > wStart)
         {
-            continue;
+            auto head = w;
+            head.numSamples = (int) (rStart - wStart);
+            result.push_back (std::move (head));
         }
 
-        // 先頭側が削られる
-        if (rStart <= wStart && rEnd < wEnd)
+        if (rEnd < wEnd)
         {
-            const auto cut = (int) (rEnd - wStart);
-            const auto rem = w.getNumSamples() - cut;
-            EditedWindow newWin;
-            newWin.startFrame = rEnd;
-            newWin.buffer.setSize (w.getNumChannels(), rem);
-            for (int ch = 0; ch < w.getNumChannels(); ++ch)
-                newWin.buffer.copyFrom (ch, 0, w.buffer, ch, cut, rem);
-            result.push_back (std::move (newWin));
-            continue;
-        }
-
-        // 末尾側が削られる
-        if (rStart > wStart && rEnd >= wEnd)
-        {
-            const auto rem = (int) (rStart - wStart);
-            EditedWindow newWin;
-            newWin.startFrame = wStart;
-            newWin.buffer.setSize (w.getNumChannels(), rem);
-            for (int ch = 0; ch < w.getNumChannels(); ++ch)
-                newWin.buffer.copyFrom (ch, 0, w.buffer, ch, 0, rem);
-            result.push_back (std::move (newWin));
-            continue;
-        }
-
-        // 中間が削られる（2分割）
-        if (rStart > wStart && rEnd < wEnd)
-        {
-            const auto rem1 = (int) (rStart - wStart);
-            EditedWindow newWin1;
-            newWin1.startFrame = wStart;
-            newWin1.buffer.setSize (w.getNumChannels(), rem1);
-            for (int ch = 0; ch < w.getNumChannels(); ++ch)
-                newWin1.buffer.copyFrom (ch, 0, w.buffer, ch, 0, rem1);
-            result.push_back (std::move (newWin1));
-
-            const auto offset2 = (int) (rEnd - wStart);
-            const auto rem2 = (int) (wEnd - rEnd);
-            EditedWindow newWin2;
-            newWin2.startFrame = rEnd;
-            newWin2.buffer.setSize (w.getNumChannels(), rem2);
-            for (int ch = 0; ch < w.getNumChannels(); ++ch)
-                newWin2.buffer.copyFrom (ch, 0, w.buffer, ch, offset2, rem2);
-            result.push_back (std::move (newWin2));
+            auto tail = w;
+            tail.offset += (int) (rEnd - wStart);
+            tail.startFrame = rEnd;
+            tail.numSamples = (int) (wEnd - rEnd);
+            result.push_back (std::move (tail));
         }
     }
 
@@ -172,64 +160,63 @@ bool EditedPcm::applyDirty (const juce::String& rev,
                             const std::vector<WindowMeta>& windows,
                             juce::InputStream& f32Stream)
 {
+    if (numChannels <= 0)
+        return false;
+
+    // 窓の列を写す（PCM は共有するので、写すのは窓の数ぶんの小さな構造体だけ）。ロックはポインタを取る間だけ
     std::vector<EditedWindow> workingWindows;
     if (! reset)
-    {
-        const juce::SpinLock::ScopedLockType lock (spinLock);
-        if (currentSnapshot != nullptr)
-            workingWindows = currentSnapshot->getWindows();
-    }
+        if (const auto base = getSnapshot())
+            workingWindows = base->getWindows();
 
     // 1. restore 範囲を適用
     applyRestoreRanges (workingWindows, restore);
 
     // 2. windows を読み込んで追加
+    std::vector<float> interleaved;
     for (const auto& meta : windows)
     {
         if (meta.frames <= 0)
             continue;
 
+        const auto totalFloats = (size_t) meta.frames * (size_t) numChannels;
+        if (meta.byteOffset < 0 || totalFloats * sizeof (float) > (size_t) std::numeric_limits<int>::max())
+            return false;
+
         if (! f32Stream.setPosition (meta.byteOffset))
             return false;
 
-        const auto totalFloats = (size_t) meta.frames * (size_t) numChannels;
-        std::vector<float> interleaved (totalFloats);
+        interleaved.resize (totalFloats);
         const auto bytesToRead = (int) (totalFloats * sizeof (float));
-        const auto bytesRead = f32Stream.read (interleaved.data(), bytesToRead);
-        if (bytesRead != bytesToRead)
+        if (f32Stream.read (interleaved.data(), bytesToRead) != bytesToRead)
             return false;
 
-        // 重複部分を除去
-        juce::Range<juce::int64> winRange (meta.startFrame, meta.startFrame + meta.frames);
-        removeOverlappingRanges (workingWindows, winRange);
+        // 重なる古い窓を削る
+        removeOverlappingRanges (workingWindows, { meta.startFrame, meta.startFrame + meta.frames });
 
         // デインターリーブして格納
-        EditedWindow newWin;
-        newWin.startFrame = meta.startFrame;
-        newWin.buffer.setSize (numChannels, meta.frames);
-
-        for (int i = 0; i < meta.frames; ++i)
+        auto pcm = std::make_shared<juce::AudioBuffer<float>> (numChannels, meta.frames);
+        for (int ch = 0; ch < numChannels; ++ch)
         {
-            for (int ch = 0; ch < numChannels; ++ch)
-            {
-                newWin.buffer.setSample (ch, i, interleaved[(size_t) i * (size_t) numChannels + (size_t) ch]);
-            }
+            auto* dest = pcm->getWritePointer (ch);
+            const auto* src = interleaved.data() + ch;
+            for (int i = 0; i < meta.frames; ++i)
+                dest[i] = src[(size_t) i * (size_t) numChannels];
         }
 
+        EditedWindow newWin;
+        newWin.startFrame = meta.startFrame;
+        newWin.numSamples = meta.frames;
+        newWin.pcm = std::move (pcm);
         workingWindows.push_back (std::move (newWin));
     }
 
-    // 3. startFrame 順にソート
+    // 3. startFrame 順にソート（削った後なので重ならない）
     std::sort (workingWindows.begin(), workingWindows.end(),
                [] (const EditedWindow& a, const EditedWindow& b) { return a.startFrame < b.startFrame; });
 
     // 4. 新しいスナップショットを構築して差し替え
-    auto nextSnapshot = std::make_shared<EditedPcmSnapshot> (rev, sampleRate, numChannels, std::move (workingWindows));
-    {
-        const juce::SpinLock::ScopedLockType lock (spinLock);
-        currentSnapshot = std::move (nextSnapshot);
-    }
-
+    publish (std::make_shared<EditedPcmSnapshot> (rev, sampleRate, numChannels, std::move (workingWindows)));
     return true;
 }
 
