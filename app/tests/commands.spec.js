@@ -362,7 +362,7 @@ test('(K1) 設定画面: 検索・ダブルクリックしてキー・重なり�
   await expect(win.locator('#keys .ks')).toBeFocused();
   // グループごとの一覧
   const groups = await win.locator('#keys .kg').allTextContents();
-  expect(groups).toEqual(['再生・ツール', '編集', 'ノート', '歌詞', '表示', 'トラック', 'ファイル', 'ヘルプ', 'ホイール']);
+  expect(groups).toEqual(['再生・ツール', '編集', 'ピッチ検出の方式', 'ノート', '歌詞', '表示', 'トラック', 'ファイル', 'ヘルプ', 'ホイール']);
   // 検索（名前・キー）
   await win.locator('#keys .ks').fill('結合');
   await expect(win.locator('#keys .kr')).toHaveCount(1);
