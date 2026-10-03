@@ -60,23 +60,36 @@
 
 ```
 pnpm build:engine     # uv で Python 3.13 の .venv-exe を作り、requirements-exe.txt（ハッシュ付きの固定）で入れて PyInstaller → --check
-pnpm dist:dir         # 展開版 app/dist/win-unpacked/Gliss.exe（インストールせずに動かせる）
-pnpm dist             # NSIS のインストーラ app/dist/Gliss-<版>-win-x64.exe・.blockmap・latest.yml（build:engine を先に走らせる）
+pnpm build:plugin     # DAW のプラグイン plugin/build/dist/Gliss.vst3（CMake ＋ Visual Studio の MSVC。§3-1）
+pnpm dist:dir         # 展開版 app/dist/win-unpacked/Gliss.exe（インストールせずに動かせる。build:engine・build:plugin は先に手で）
+pnpm dist             # NSIS のインストーラ app/dist/Gliss-<版>-win-x64.exe・.blockmap・latest.yml（build:engine・build:plugin を先に走らせる）
 node scripts/smoke-packaged.mjs [--models <重みのフォルダ>]   # 展開版を起動して、同梱のエンジンへ MCP で接続し解析まで確かめる
 node scripts/smoke-update.mjs --old <古い版の win-unpacked> --new <新しい版の出力>   # 更新の通し（§4。インストールはしない）
 pnpm build:addons     # 任意のアドオンの zip（engine/packaging/dist-addons/。§11）。dist:dir / dist の前に作ると目録がアプリに入る
 node scripts/smoke-addon.mjs --models <重みのフォルダ>   # 展開版でアドオンの取得・読み込み・互換・削除の通し（ローカルの HTTP サーバー）
 ```
 
-`dist:dir` と `dist` は electron-builder の前に `app/release-info.json`（アプリ内の「更新の内容」）と `app/THIRD_PARTY_NOTICES.txt`（同梱した依存のライセンス文。`resources/` に入る）を作る（`pnpm prepack:files`。どちらも生成物で、コミットしない）。`--dir` の展開版には `resources/app-update.yml` が入らない（electron-builder は nsis のときだけ作る）ので、自動更新は「この版は自動で更新できません」になる。
+`dist:dir` と `dist` は electron-builder の前に `app/release-info.json`（アプリ内の「更新の内容」）と `app/THIRD_PARTY_NOTICES.txt`（同梱した依存のライセンス文。`resources/` に入る）を作る（`pnpm prepack:files`。どちらも生成物で、コミットしない）。`prepack:files` は先に `plugin/build/dist/Gliss.vst3` があるかを確かめ（`build-plugin.mjs --check`）、無ければ止まる。`--dir` の展開版には `resources/app-update.yml` が入らない（electron-builder は nsis のときだけ作る）ので、自動更新は「この版は自動で更新できません」になる。
 
 依存の固定: `engine/packaging/requirements-exe.in`（直接の依存。torch は入れない）→ `uv pip compile --generate-hashes` で `requirements-exe.txt`。GPL の「対応するソース」にはビルドの手順（スクリプト）も含まれるので、これらは公開リポジトリに入れる。
+
+### 3-1. DAW のプラグイン（VST3 + ARA 2。2026-10-03）
+
+インストーラに DAW のプラグイン `Gliss.vst3`（`plugin/`。詳しくは [ara-plugin.md](ara-plugin.md) の「配布」）を入れる。
+
+- 作る: `pnpm build:plugin`（`scripts/build-plugin.mjs`）。`plugin/build` を構成して（初回は JUCE・ARA SDK・WebView2 を CMake が版を固定して取る）Release をビルドし、`plugin/build/dist/Gliss.vst3` に写して、`Contents/Resources` にライセンスの文書（`NOTICE.txt`・`LICENSE-AGPL-3.0.txt`・`LICENSE-GPL-3.0.txt`・`THIRD_PARTY_NOTICES.txt`）を足す。`pnpm dist` の流れに入っていて、失敗すれば `dist` も止まる。手元で約 5 分（依存の取得を含む）、2 回目以降は数秒〜。
+- 置き場: electron-builder が `resources/plugin/Gliss.vst3` に同梱し、インストーラ（`app/build/installer.nsh` の `customInstall`）が**ユーザーごとの VST3 の置き場** `%LOCALAPPDATA%\Programs\Common\VST3\Gliss.vst3` に写す（管理者権限は要らない）。両方の `Contents/Resources/gliss-install.json` にインストール先を書き、プラグインはそれを読んでインストール先のエンジン exe を起動する（インストール先を変えても見つかる）。管理者の `C:\Program Files\Common Files\VST3` には入れない。
+- 更新: 上書き。DAW がプラグインを読み込んでいる（DLL を掴んでいる）ときは、古い DLL を `Gliss.vst3.<数>.old` に改名して隣に新しい版を置く（DAW は起動し直すまで古い版のまま。`.old` は次のインストールで消える）。画面のあるインストールでは「DAW を起動し直すと新しい版になる」と出す。
+- 更新の前に `customCheckAppRunning` が `resources\engine\` の下のエンジンを止める。DAW のプラグインが起動したエンジンも止まる（プラグインは次の呼び出しで起動し直す）。
+- アンインストール（`--updated` でないとき）: `gliss-install.json` のある `Gliss.vst3` だけを消す（手で置いたものは残す）。DAW が掴んでいれば「DAW を閉じて再試行」を出す（静かなモードでは残す）。`Gliss.vst3` がリンク（ジャンクション）ならリンクだけを外す。
+- ライセンス: JUCE（AGPLv3）と結合したプラグインは **AGPLv3 の条件で配る**（Gliss のソースは GPL-3.0-or-later のまま。GPLv3 §13・AGPLv3 §13）。依存（JUCE・ARA SDK・VST3 SDK・WebView2 のローダ・JUCE が同梱した第三者のコード）のライセンス文は `THIRD_PARTY_NOTICES.txt` の「DAW のプラグイン」の節と、`Gliss.vst3` の中の `THIRD_PARTY_NOTICES.txt`（`scripts/third-party-notices.mjs` が JUCE の SBOM `JUCE.spdx.json` をリンクするモジュールから辿って集める）。対応するソースは、このリポジトリのタグの `plugin/` と、`plugin/CMakeLists.txt` が版を固定して取る依存。
+- 確かめ方: `app/tests/unit/release.spec.js` の R11（同梱・置き場・プラグインが読むレジストリのキー）・R11b（ライセンス文の集め方）、`node scripts/smoke-packaged.mjs`（展開版にプラグインとライセンスの文書がある）、`GlissPluginTests` の「Engine discovery (distribution)」（[ara-plugin.md](ara-plugin.md)）。
 
 ### CI（実装済み。第 2 段階。実行はまだ）
 
 - **`.github/workflows/release.yml`**: タグ `v*` の push（と、既存のタグを指定した手動実行。main から）。工程:
   1. 確かめる: 所有者が走らせた（`github.actor == github.repository_owner`）・タグの形（`^v\d+\.\d+\.\d+(-beta\.\d+)?$`）・タグが `main` の上（`git merge-base --is-ancestor`）・同じ Release がまだ無い・`scripts/release-check.mjs --tag`（タグ＝`app/package.json` の版、engine 側の写し、`releases/<版>.json` があり直前の版と同じでない）
-  2. 作る: `scripts/build-engine.mjs`（uv）→ 任意のアドオン（`scripts/build-addon.mjs --all`。作った exe に読ませて確かめる。§11）→ 単体テスト（`pnpm test:unit`）→ リリースノートの Markdown・アドオンの目録（`scripts/addon-catalog.mjs --require`）・THIRD_PARTY_NOTICES → `electron-builder --win nsis --publish never` → 展開版のスモーク（重みなしで起動して同梱のエンジンにつながる）
+  2. 作る: `scripts/build-engine.mjs`（uv）→ DAW のプラグイン（`scripts/build-plugin.mjs`。ランナーの Visual Studio の MSVC と CMake。§3-1）→ 任意のアドオン（`scripts/build-addon.mjs --all`。作った exe に読ませて確かめる。§11）→ 単体テスト（`pnpm test:unit`）→ リリースノートの Markdown・アドオンの目録（`scripts/addon-catalog.mjs --require`）・THIRD_PARTY_NOTICES → `electron-builder --win nsis --publish never` → 展開版のスモーク（重みなしで起動して同梱のエンジンにつながる）
   3. そろえる（`scripts/release-assets.mjs`）: インストーラ・`.blockmap`・`latest.yml`（版と SHA-512・大きさを照らす）・`THIRD_PARTY_NOTICES.txt`・copyleft のパッケージの sdist（`scripts/gpl-sources.mjs`）・アドオンの zip（アプリに埋めた目録と大きさ・SHA-256 を照らす）・`SHA256SUMS.txt`
   4. 公開する（`scripts/release-publish.mjs`）: **下書きで作って全部載せてから公開**（載せている途中の Release を自動更新が見ないように）。beta は `--prerelease` で「Latest」にしない、正式版は「Latest」。既にあれば止める
 - **electron-builder 自身にはアップロードさせない**（Pleiad と同じ。成果物の検証を挟むため）。`permissions` は既定 `contents: read`、公開のジョブだけ `contents: write`。アクションはコミットの SHA で固定。

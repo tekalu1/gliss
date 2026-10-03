@@ -36,6 +36,8 @@
 2. 実行する。**電子署名をまだ付けていない**ので、Windows が「Windows によって PC が保護されました」（SmartScreen）を出す。
    「**詳細情報**」→「**実行**」で進める。
 3. インストール先は既定で `%LOCALAPPDATA%\Programs\Gliss`（ユーザーごと。管理者権限は要らない）。
+   DAW のプラグイン（VST3 + ARA 2。開発中）もユーザーごとの VST3 の置き場 `%LOCALAPPDATA%\Programs\Common\VST3\Gliss.vst3` に入る
+   （DAW がこの置き場を探さないときの手順は [docs/ara-plugin.md](docs/ara-plugin.md) の「配布」）。
 
 新しい版が出ると、アプリが自分で見つけてダウンロードし、タイトルバーに知らせる。「再起動して更新」で入れ替わる
 （ヘルプ > 更新を確認… で手動でも確かめられる。ベータ版を受け取るかは設定で選べる）。
@@ -118,6 +120,8 @@ Gliss は **GNU General Public License バージョン 3 以降（GPL-3.0-or-lat
 配布版に同梱した依存（Python・Node のパッケージ）のライセンス文は、インストール先の `resources\THIRD_PARTY_NOTICES.txt` にまとめてある。
 copyleft の依存（praat-parselmouth・soxr・certifi）のソースは各 Release に添付する。
 
+DAW のプラグイン（`Gliss.vst3`）は JUCE（AGPLv3 の側で使う）と結合しているので、**プラグインのバイナリは GNU Affero General Public License バージョン 3（AGPLv3）の条件で配る**（GPLv3 §13・AGPLv3 §13。Gliss のソースは GPL-3.0-or-later のまま）。ライセンスの文書は `Gliss.vst3\Contents\Resources` にもある。
+
 主な依存:
 
 | 依存 | 用途 | ライセンス |
@@ -134,6 +138,8 @@ copyleft の依存（praat-parselmouth・soxr・certifi）のソースは各 Rel
 | faster-whisper（任意） / CTranslate2 | 聞き取り（区間の音声認識） | MIT / MIT（依存の PyAV は BSD-3-Clause（FFmpeg は LGPL）、tokenizers・huggingface-hub は Apache-2.0） |
 | nvidia-cublas-cu12（任意） | 聞き取りを GPU で（Windows） | NVIDIA のライセンス（配布物には入れない。利用者が入れる） |
 | Electron | 画面 | MIT |
+| JUCE 9 | DAW のプラグイン | AGPL-3.0-only（か商用。Gliss は AGPLv3 の側で使う） |
+| ARA SDK / VST3 SDK / WebView2 のローダ | DAW のプラグイン | Apache-2.0 / MIT / BSD-3-Clause |
 
 **学習済みの重みは、Gliss の F0 モデル（下の表）以外は同梱しない。** 初回に画面から公開元のファイルを取得する（`%LOCALAPPDATA%\Gliss\models`）。重みのライセンスの状況:
 

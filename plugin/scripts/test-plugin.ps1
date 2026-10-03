@@ -6,7 +6,11 @@
 # Checks (each one has a timeout and its process tree is killed at the end):
 #   1. ARA SDK TestHost, all test cases, on Gliss.vst3
 #   2. ARA SDK TestHost, PlaybackRendering, with a render trace compared against the SDK test signal
-#   3. GlissHostCheck (JUCE host: description, ARA factory, passthrough, editor + WebView2 page, teardown)
+#   3. GlissHostCheck (JUCE host: description, ARA factory, passthrough, editor without ARA shows the notice, teardown)
+#   4. GlissPluginTests (unit tests, category "Gliss")
+#   5. GlissHostCheck --editor: the editor's page (app/renderer, embedded) on a fake DocumentBridge, in-process and off-screen:
+#      ui-ready, native functions, /fs/, events, keys, open/close 20 times with 2 editors
+#   6. the same with GLISS_PLUGIN_WEB_DIR pointing at a marked copy of app/renderer (the page is read from the folder)
 # Nothing is written outside plugin\build and the temp folder; the plug-in is never installed.
 param(
     [switch]$SkipBuild,
@@ -21,6 +25,13 @@ $build = Join-Path $plugin 'build'
 $deps = Join-Path $build '_deps'
 $exBuild = Join-Path $build 'ara-examples'
 $vst3Sdk = Join-Path $deps 'vst3sdk-3.7.11'
+# The ARA SDK is in _deps unless the build was configured with -DFETCHCONTENT_SOURCE_DIR_ARA_SDK=<existing copy>
+$araSdk = Join-Path $deps 'ara_sdk-src'
+$cache = Join-Path $build 'CMakeCache.txt'
+if (Test-Path $cache) {
+    $m = Select-String -Path $cache -Pattern '^FETCHCONTENT_SOURCE_DIR_ARA_SDK:[A-Z]+=(.+)$' | Select-Object -First 1
+    if ($m -and $m.Matches[0].Groups[1].Value.Trim()) { $araSdk = $m.Matches[0].Groups[1].Value.Trim() }
+}
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ('gliss-ara-test-' + [System.Diagnostics.Process]::GetCurrentProcess().Id)
 New-Item -ItemType Directory -Force $work | Out-Null
 
@@ -54,15 +65,15 @@ try {
     if (-not $SkipBuild) {
         cmake -S $plugin -B $build -G 'Visual Studio 17 2022' -A x64 -Wno-dev | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'cmake configure (plugin) failed' }
-        cmake --build $build --config $Config --target GlissARA_VST3 GlissHostCheck --parallel 8 | Out-Null
+        cmake --build $build --config $Config --target GlissARA_VST3 GlissHostCheck GlissPluginTests --parallel 8 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'cmake build (plugin) failed' }
 
         # ARA SDK examples (TestHost). They need the VST3 SDK that the ARA SDK installs with its own script.
         if (-not (Test-Path (Join-Path $vst3Sdk 'cmake'))) {
-            cmake "-DVST3_SDK_DIR=$vst3Sdk" -P (Join-Path $deps 'ara_sdk-src\install_vst3sdk.cmake') | Out-Null
+            cmake "-DVST3_SDK_DIR=$vst3Sdk" -P (Join-Path $araSdk 'install_vst3sdk.cmake') | Out-Null
             if ($LASTEXITCODE -ne 0) { throw 'installing the VST3 SDK for the ARA examples failed' }
         }
-        cmake -S (Join-Path $deps 'ara_sdk-src\ARA_Examples') -B $exBuild -G 'Visual Studio 17 2022' -A x64 -Wno-dev `
+        cmake -S (Join-Path $araSdk 'ARA_Examples') -B $exBuild -G 'Visual Studio 17 2022' -A x64 -Wno-dev `
             "-DARA_VST3_SDK_DIR=$vst3Sdk" -DARA_SETUP_DEBUGGING=OFF -DSMTG_CREATE_PLUGIN_LINK=OFF | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'cmake configure (ARA examples) failed' }
         cmake --build $exBuild --config $Config --target ARATestHost --parallel 8 | Out-Null
@@ -72,7 +83,8 @@ try {
     $testHost = Join-Path $exBuild "bin\$Config\ARATestHost.exe"
     $gliss = Join-Path $build "GlissARA_artefacts\$Config\VST3\Gliss.vst3\Contents\x86_64-win\Gliss.vst3"
     $hostCheck = Join-Path $build "tests\hostcheck\GlissHostCheck_artefacts\$Config\GlissHostCheck.exe"
-    foreach ($f in @($testHost, $gliss, $hostCheck)) { if (-not (Test-Path $f)) { throw "missing: $f" } }
+    $unitTests = Join-Path $build "tests\unit\GlissPluginTests_artefacts\$Config\GlissPluginTests.exe"
+    foreach ($f in @($testHost, $gliss, $hostCheck, $unitTests)) { if (-not (Test-Path $f)) { throw "missing: $f" } }
 
     # 1. TestHost, all test cases
     $code = Invoke-Checked $testHost @('-vst3', $gliss) 'testhost-all'
@@ -98,12 +110,49 @@ try {
     $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
     Report 'GlissHostCheck' ($code -eq 0) "exit=$code $summary"
     if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+    # 4. unit tests
+    $code = Invoke-Checked $unitTests @('Gliss') 'unit-tests'
+    $summary = (Get-Content (Join-Path $work 'unit-tests.log') -ErrorAction SilentlyContinue | Select-String 'GlissPluginTests:').Line
+    Report 'GlissPluginTests' ($code -eq 0) "exit=$code $summary"
+
+    # 5. editor bridge (embedded page)
+    $report = Join-Path $work 'editor-report.txt'
+    $code = Invoke-Checked $hostCheck @('--editor', $report) 'editor' @{ GLISS_ARA_TRACE_DIR = $hcTrace }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    Report 'GlissHostCheck --editor' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+    # 6. editor bridge, page read from GLISS_PLUGIN_WEB_DIR (a copy of app/renderer with a marker)
+    $webDir = Join-Path $work 'webdir'
+    Copy-Item -Recurse -Force (Join-Path (Split-Path -Parent $plugin) 'app\renderer') $webDir
+    $index = Join-Path $webDir 'index.html'
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    $html = [System.IO.File]::ReadAllText($index, $utf8).Replace('<head>', '<head><meta name="gliss-test-marker" content="1">')
+    [System.IO.File]::WriteAllText($index, $html, $utf8)
+    $report = Join-Path $work 'editor-webdir-report.txt'
+    $code = Invoke-Checked $hostCheck @('--editor', $report, '--expect-web-dir', '--cycles', '2') 'editor-webdir' `
+        @{ GLISS_ARA_TRACE_DIR = $hcTrace; GLISS_PLUGIN_WEB_DIR = $webDir }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    Report 'GlissHostCheck --editor (GLISS_PLUGIN_WEB_DIR)' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
 }
 finally {
     # nothing we started may remain
-    $left = Get-Process -Name ARATestHost, GlissHostCheck -ErrorAction SilentlyContinue
+    $left = Get-Process -Name ARATestHost, GlissHostCheck, GlissPluginTests -ErrorAction SilentlyContinue
     foreach ($p in $left) { & taskkill /T /F /PID $p.Id | Out-Null }
     Report 'no leftover test processes' (-not $left) ("killed=" + @($left).Count)
+
+    # WebView2 browser processes of the editor (user data folder %TEMP%\GlissARA-<pid>) end shortly after the host quits
+    $deadline = (Get-Date).AddSeconds(15)
+    do {
+        $webviews = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -match 'GlissARA-\d+' })
+        if ($webviews.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    foreach ($w in $webviews) { & taskkill /T /F /PID $w.ProcessId | Out-Null }
+    Report 'no leftover WebView2 processes' ($webviews.Count -eq 0) ("killed=" + $webviews.Count)
     Write-Host "logs: $work"
 }
 
