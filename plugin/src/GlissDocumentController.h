@@ -95,6 +95,24 @@ protected:
     bool doRestoreObjectsFromStream (juce::ARAInputStream& input, const juce::ARARestoreObjectsFilter* filter) noexcept override;
     bool doStoreObjectsToStream (juce::ARAOutputStream& output, const juce::ARAStoreObjectsFilter* filter) noexcept override;
 
+    // DAW に返すノート（kARAContentTypeNotes）。中身は同期のスレッドが取ったエンジンのノートの写し（エンジンを待たない）。
+    // AudioSource = 解析だけ（detected）、AudioModification = 編集を当てた後（ソースの秒）、PlaybackRegion = それをリージョンで切り
+    // ソングの秒に写したもの。編集があれば adjusted。
+    bool doIsAudioSourceContentAvailable (const ARA::PlugIn::AudioSource*, ARA::ARAContentType) override;
+    ARA::ARAContentGrade doGetAudioSourceContentGrade (const ARA::PlugIn::AudioSource*, ARA::ARAContentType) override;
+    ARA::PlugIn::ContentReader* doCreateAudioSourceContentReader (ARA::PlugIn::AudioSource*, ARA::ARAContentType,
+                                                                 const ARA::ARAContentTimeRange*) override;
+    bool doIsAudioModificationContentAvailable (const ARA::PlugIn::AudioModification*, ARA::ARAContentType) override;
+    ARA::ARAContentGrade doGetAudioModificationContentGrade (const ARA::PlugIn::AudioModification*, ARA::ARAContentType) override;
+    ARA::PlugIn::ContentReader* doCreateAudioModificationContentReader (ARA::PlugIn::AudioModification*, ARA::ARAContentType,
+                                                                       const ARA::ARAContentTimeRange*) override;
+    bool doIsPlaybackRegionContentAvailable (const ARA::PlugIn::PlaybackRegion*, ARA::ARAContentType) override;
+    ARA::ARAContentGrade doGetPlaybackRegionContentGrade (const ARA::PlugIn::PlaybackRegion*, ARA::ARAContentType) override;
+    ARA::PlugIn::ContentReader* doCreatePlaybackRegionContentReader (ARA::PlugIn::PlaybackRegion*, ARA::ARAContentType,
+                                                                    const ARA::ARAContentTimeRange*) override;
+    bool doIsAudioSourceContentAnalysisIncomplete (const ARA::PlugIn::AudioSource*, ARA::ARAContentType) override;
+    void doRequestAudioSourceContentAnalysis (ARA::PlugIn::AudioSource*, std::vector<ARA::ARAContentType> const&) override;
+
 private:
     class AraSourceSamples;
 
@@ -125,6 +143,9 @@ private:
     void ensureReader (juce::ARAAudioSource*, SourceEntry&);
     void dropSourceEntry (juce::ARAAudioSource*);
     void notifyContentChanged (const juce::StringArray& araIds);
+    void notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds);
+    std::shared_ptr<const ModificationNotes> notesOf (const ARA::PlugIn::AudioModification*) const;
+    std::shared_ptr<const ModificationNotes> sourceNotesOf (const ARA::PlugIn::AudioSource*) const;
     void postEvent (const juce::String& name, const juce::var& data);
     void sendEvent (const juce::String& name, const juce::var& data);
     void onSyncEvent (const juce::String& name, const juce::var& data);

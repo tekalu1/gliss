@@ -7,6 +7,7 @@ issue は [tekalu1/gliss#1](https://github.com/tekalu1/gliss/issues/1)。作業�
 DAW のイベントの音をエンジンに渡し、編集を当てた音を再生に乗せ、編集リストを DAW のソングに保存する（下の「エンジンとの同期」）。
 エディタは `app/renderer` の画面を WebView2 で出し、`DocumentBridge` を通してエンジンを呼ぶ（下の「エディタ」）。
 配布（インストーラがユーザーごとの VST3 の置き場に入れる・配布版のエンジンの見つけ方・ライセンスの表示）は段階 4 の一部として済み（下の「配布」）。
+DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）も段階 4 で足した（下の「DAW に返すもの」）。
 実物の DAW（Fender Studio Pro 8 など）での確認はまだ。
 
 ## 決まった形
@@ -17,10 +18,10 @@ DAW のイベントの音をエンジンに渡し、編集を当てた音を再�
 | 形式 | VST3 のみ（`Gliss.vst3`）。ARA 2（`IS_ARA_EFFECT`）。出力は `plugin/build/GlissARA_artefacts/<構成>/VST3/Gliss.vst3` |
 | 製品名・会社名 | `Gliss`・`Gliss`（ホストに見える名前） |
 | `BUNDLE_ID` | `io.github.tekalu1.gliss`（アプリの appId と同じ。変えない） |
-| `ARA_FACTORY_ID` | `io.github.tekalu1.gliss.arafactory.1`（能力＝解析の種類・再生の変形が変わったら末尾の版を上げる） |
+| `ARA_FACTORY_ID` | `io.github.tekalu1.gliss.arafactory.2`（能力＝解析の種類・再生の変形が変わったら末尾の版を上げる。ノートの解析を名乗ったので 2026-10-03 に `.1` から上げた） |
 | `ARA_DOCUMENT_ARCHIVE_ID` | `io.github.tekalu1.gliss.aradocumentarchive.1`（保存の形が下位互換でなくなったら上げ、古い ID は `ARA_COMPATIBLE_ARCHIVE_IDS` に残す） |
 | ARA の API の世代 | JUCE の既定（`kARAAPIGeneration_2_0_Final`）。部分的な保存（2.3）は使わない |
-| 解析・変形の能力 | まだ何も名乗らない（`ARA_ANALYSIS_TYPES`・`ARA_TRANSFORMATION_FLAGS` は既定。ノートを DAW へ返すのは段階 4） |
+| 解析・変形の能力 | 解析はノートだけ（`ARA_ANALYSIS_TYPES kARAContentTypeNotes`。ホストが解析を頼める）。再生の変形（時間の伸縮・内容に合わせたフェード）は名乗らない（`ARA_TRANSFORMATION_FLAGS` は既定） |
 | 実行時ライブラリ | 静的（`/MT`）。利用者の PC に VC++ 再頒布可能パッケージを要求しない |
 | WebView2 | ローダは静的リンク。ランタイムは Evergreen（Windows 11 に入っている）。無いときはエディタに文言を出す作り（ランタイムの無い環境では未確認） |
 | 依存の取得 | CMake の `FetchContent` が `plugin/build/_deps` にタグ固定で取る（リポジトリには入れない。`plugin/.gitignore`） |
@@ -61,10 +62,42 @@ DocumentController がエンジン（`McpClient`。`plugin/src/engine`）を **1
 1. エンジンの遅延起動（最初のソースの読み出しが許されたとき、または画面が開いたとき）→ `engine_info` → `ara_open(work_key)`。
 2. ソースの音をホストから読み（`ARAAudioSourceReader`。リーダーはメッセージスレッドで作り・壊す）、`<作業場所>\ara-src\<persistentID の FNV-1a 64 の 16 桁>.wav`（float32、ソースの周波数・チャンネルのまま）に書いて、**すぐ** `ara_set_modification`（保留のアーカイブがあれば続けて `ara_restore`）。音が変わったら読み直す。
 3. 外した修飾は `ara_remove_modification`、位置（代表のリージョン＝ソングで最初のものでソースの 0 秒が置かれる秒）・名前・DAW のトラック名の変化とアーカイブのガイドは `ara_sync`。
-4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty` → ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
+4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty` → ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`）→ ノートを取った版と違う修飾に `ara_notes`（下の「DAW に返すもの」）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
 5. 画面の `engineCall` が成功したら（読むだけのもの以外）同期を予約する。途中で次の予約が来たら、終わってからもう 1 回だけ回す。
 
 エンジンが落ちたら `engine` の知らせ（`failed`）を出し、最後のキャッシュのまま鳴らす。画面の［つなぎ直す］（`restartEngine`）で起動し直し、`ara_open` → 全修飾の `ara_set_modification` → 全部の窓を取り直す。ドキュメントを閉じるとエンジンの stdin を閉じ、2 秒待って Job Object を閉じる（作業場所は消さない）。
+
+### DAW に返すもの（ノート。`kARAContentTypeNotes`）
+
+DAW がイベントの上に音符を描く・MIDI に書き出す・ほかのプラグインに渡すための、ARA の content reader。中身はエンジンの今のノート
+（編集を当てた後の位置と音程）で、**同期のスレッドがエンジンから取ってメモリに写しを持ち、content reader はその写しを読むだけ**（エンジンを待たない。
+オーディオスレッドは関係しない）。写しは `plugin/src/ara/NoteContent.*`（ARA の型を使わない。単体テストにも入る）、ARA の口は `GlissDocumentController`。
+
+| ARA のオブジェクト | 返すノート | 時間 | 品質のラベル（content grade） |
+|---|---|---|---|
+| `AudioSource` | 解析だけ（エンジンの `ara_notes` の `source_notes`。同じソースの修飾のうち解析の済んだ最初のもの） | ソースの秒 | `detected`（ARA の名前。DAW の画面では analyzed と出ることが多い） |
+| `AudioModification` | 編集を当てた後（`notes`） | ソースの秒 | 解析だけなら `detected`、編集リストが空でなければ `adjusted` |
+| `PlaybackRegion` | 修飾のノートを、リージョンの修飾の範囲（頭・長さ。ソングと修飾の長さの短い方）で**切り**、ソングの秒に写したもの（Gliss は時間を伸ばさないので `ソングの秒 = ソースの秒 − 修飾の頭 + ソングの頭`） | ソングの秒 | 修飾と同じ |
+
+- 1 つのノート（`ARAContentNote`）: `frequency` = 中心の音程の Hz（画面の帯の中心 `edited_pitch_midi` と同じ定義）、`pitchNumber` = それを丸めた MIDI 番号、
+  `volume` = ノートの音量の山（-60 dB → 0、0 dB → 1）、`startPosition`・`noteDuration` = 編集後の頭と長さ（画面の `edited_start_sec`・`edited_end_sec`）、
+  `signalDuration` = `noteDuration`、`attackDuration` = 0。音程のあるノートだけで、無音にしたノート（`mute_notes`）は返さない。頭の順。
+- 解析がまだの間は「無い」（`isContentAvailable` が false、品質は `initial`）。ホストが渡す時間の範囲（`range`）は「少しでも重なるもの」で絞る。
+- 解析（`ARA_ANALYSIS_TYPES`）: ホストの `requestAudioSourceContentAnalysis` はエンジンの起動を促すだけ（解析はエンジンの裏の準備が全部の修飾に行う）。
+  `isAudioSourceContentAnalysisIncomplete` は「解析の済んだ修飾が無く、解析が進みうる」間だけ true。エンジンが無効・失敗、ホストが読ませない、
+  修飾が無い・失敗したときは false を返す（ホストが終わりを待ち続けないように）。
+- 取り直し: `ara_revs` の版（`<解析の署名>:<編集の署名>`）が、ノートを取った版と違う修飾だけ `ara_notes(ara_ids)` を呼ぶ（解析が済む・編集・取り消し・アーカイブから戻す、で版が変わる）。
+  中身が変わったら、メッセージスレッドで修飾と各リージョンに `notifyContentChanged(notesAreAffected)`、解析だけのノートが変わったらソースにも（ホストへは次の `notifyModelUpdates` で出る）。
+  TestHost ではメッセージが回らないのでこの知らせは届かないが、TestHost は `isAudioSourceContentAnalysisIncomplete` を回して待つので、読み出しは確かめられる。
+- アーカイブから戻した直後も、解析が済んで中身が変わったところで知らせる（ARA は「戻した状態と違うときだけ知らせる」としているが、解析はアーカイブに入れていないので、戻した時点ではノートが無い）。
+
+#### DAW ごとに確かめること（実物の DAW。人の許可を取って）
+
+| DAW | 確かめること |
+|---|---|
+| Fender Studio Pro 8 | **未確認**。イベントの上・ピアノロールに Gliss のノートが出るか（JUCE フォーラム 2023-10 に、Reaper では出るが Studio One では出ない・Melodyne を載せた後に出たという報告があり、条件が分かっていない）。「音声を MIDI に」のような操作で `adjusted` のノートが使われるか。編集の後に描き直されるか（`notifyContentChanged(notesAreAffected)` を受けるか）。プラグインのログ（`GLISS_ARA_TRACE_DIR`）の `notes: the host requested the analysis` で、DAW が解析を頼むかも分かる |
+| Cubase / Nuendo | 未確認。ARA の拡張の「音声を MIDI に」などでノートが取れるか、`detected` と `adjusted` で扱いが変わるか |
+| Reaper | 未確認（この PC に無い）。報告では ARA のノートを MIDI のアイテムに書き出せる |
 
 ### エディタ（`GlissEditor`・`plugin/src/editor`）
 
@@ -223,10 +256,10 @@ ARA SDK のホスト（`ARATestHost` と `GlissARATest`）は `plugin/tests/arat
 |---|---|
 | ARA SDK の **TestHost**（`-vst3 Gliss.vst3`、全 12 項目） | プロパティ更新・コンテンツ更新・読み出し・クローン・アーカイブ・分割アーカイブ・ドラッグ＆ドロップ・再生・EditorView・処理アルゴリズム・音声ファイルのチャンク。終了コード 0 |
 | TestHost の `PlaybackRendering` ＋ `verify_render_trace.py` | プラグインが返した音を、SDK の試験信号（5 秒・44.1 kHz のパルス状の正弦波）と、ブロックごとの総和・二乗和で突き合わせる（`tests/verify_render_trace.py`）。全ブロックが一致すること |
-| **GlissHostCheck**（`plugin/tests/hostcheck`、JUCE のホスト） | VST3 として見つかる・`hasARAExtension`・ARA ファクトリの ID が決めたとおり・ARA に結び付かない `processBlock` が入力を変えない・ARA に結び付かないエディタは画面を出さずに案内を出す・エディタとインスタンスを閉じて落ちない |
-| **GlissPluginTests**（`plugin/tests/unit`） | 単位ごとの単体テスト（カテゴリ `Gliss`）。エディタは `WebResources`（`/fs/` の decode と拒否・資源の振り分け・開発時のフォルダ）。ドキュメント（`AraTests.cpp`）はアーカイブの形と往復・作業場所の鍵・リージョンの時間の写し（周波数が同じときは段階 1 の計算と同じ・違うときは続きのブロックが途切れない）・再生位置・禁止のツールと同期を予約するツール・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方・float の WAV がホストの値をそのまま書く・`plugin-state.json`・エンジンの無いときの同期の待ち。JUCE の UnitTestRunner はこの console のアプリでは失敗の文を出さない（結果の数だけ）。失敗の中身を見たいテストは、`AraTests.cpp` の `ScopedStdoutLogger` のように間だけ stdout へ出すロガーを入れる |
+| **GlissHostCheck**（`plugin/tests/hostcheck`、JUCE のホスト） | VST3 として見つかる・`hasARAExtension`・ARA ファクトリの ID が決めたとおり・解析の種類がノートだけ・ARA に結び付かない `processBlock` が入力を変えない・ARA に結び付かないエディタは画面を出さずに案内を出す・エディタとインスタンスを閉じて落ちない |
+| **GlissPluginTests**（`plugin/tests/unit`） | 単位ごとの単体テスト（カテゴリ `Gliss`）。エディタは `WebResources`（`/fs/` の decode と拒否・資源の振り分け・開発時のフォルダ）。ドキュメント（`AraTests.cpp`）はアーカイブの形と往復・作業場所の鍵・リージョンの時間の写し（周波数が同じときは段階 1 の計算と同じ・違うときは続きのブロックが途切れない）・再生位置・禁止のツールと同期を予約するツール・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方・float の WAV がホストの値をそのまま書く・`plugin-state.json`・エンジンの無いときの同期の待ち。DAW に返すノート（`NoteTests.cpp`）は `ara_notes` の写し・品質のラベル・時間の範囲・ソングの秒への写し・リージョンでの切り取り・知らせるかどうかの比べ方。JUCE の UnitTestRunner はこの console のアプリでは失敗の文を出さない（結果の数だけ）。失敗の中身を見たいテストは、`AraTests.cpp` の `ScopedStdoutLogger` のように間だけ stdout へ出すロガーを入れる |
 | エンジン: TestHost（全 12 項目） | エンジンにつないだまま全項目が終了コード 0（ドキュメントを作ってすぐ壊す試験でエンジンが残らない） |
-| エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る |
+| エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る。ノート: 先に編集なしのドキュメント（リージョン 2 つ。2 つ目はソースの 1.5〜4.2 秒をソングの 10 秒）でホストとして解析を頼んで待ち、ソース・修飾・リージョンのノートがエンジンの `ara_notes` の解析だけのノートと一致して `detected`、2 つ目のリージョンは切って写したもの。編集の後は `adjusted` で、エンジンの編集後のノートと一致し、全部 1 半音上がる。アーカイブから戻した後も同じ |
 | エンジン: **GlissHostCheck `--ara-editor`**（`AraEditorCheck.h`） | JUCE の ARA ホスト（`juce_ARAHosting`）で Gliss.vst3 に本物のドキュメントを作り、インスタンスを全部の役で結び付けてエディタを開く。プラグインのログで、エディタがドキュメントの `DocumentBridge` を得る・画面の `ui-ready`・`bootstrap`・エンジンの起動と修飾の登録・画面の `engineCall`（`list_tracks`・`select_track`・`export_view_data`）の成功・`/fs/` を断っていないことを確かめる |
 | **GlissHostCheck `--editor`**（`EditorCheck.h`・`FakeDocumentBridge.h`） | Gliss.vst3 を読まず、エディタの画面の部品（`plugin/src/editor`）を**偽の DocumentBridge** につないでこのプロセスの中で画面の外に開く: `app/renderer` が読み込まれ `ui-ready` が来る（その前の知らせは捨てる）・`window.api` と `data-mode=ara`・user script から `/juce/index.js` の動的 import・`engineCall` の往復（`{ok:false}` も値で・別スレッドの completion も）・ほかのネイティブ関数・`/fs/`（空白・`%`・`+`・日本語の名前を読める／外・`..`・無い・フォルダ・知らない資源は拒否）・知らせ 6 種が画面の受け手に届く・F8 は窓へ渡り Space は渡らない・応答の前に閉じても落ちない・2 つ同時に 20 回開閉。`--expect-web-dir` で `GLISS_PLUGIN_WEB_DIR` から読むこと |
 
@@ -266,7 +299,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 | `plugin/src/GlissDocumentController.*` | ARA の `DocumentController`。ARA の出来事 → `DocumentSync`、アーカイブ、`DocumentBridge` の実装（`engineCall`・`bootstrap`・`saveState`・`transport`・`hostState`・`isReadableByEditor`・選択と再生位置の知らせ）、ホストの音のリーダー |
 | `plugin/src/GlissPlaybackRenderer.*` | 再生（リージョンごとの `RegionReader`・原音の先読み・バウンスでの同期の待ち・比べる・検証の記録） |
 | `plugin/src/GlissEditorRenderer.*` | 試聴の役（まだ何も足さない） |
-| `plugin/src/ara/` | ドキュメントの部品（ARA の型を使わず、単体テストにも入る）: `DocumentSync`（エンジンとの同期のスレッド）・`ArchiveIO`（アーカイブの形・作業場所の鍵）・`RegionMapping`（リージョンの時間）・`PlayheadState`・`EngineCalls`（禁止のツール・同期の予約・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方）・`FloatWavWriter`・`PluginState`。`sources.cmake` が ARA を使うファイル（`GlissEditorRenderer`）をプラグインだけに足す |
+| `plugin/src/ara/` | ドキュメントの部品（ARA の型を使わず、単体テストにも入る）: `DocumentSync`（エンジンとの同期のスレッド）・`NoteContent`（DAW に返すノートの写し・リージョンでの切り取り・品質のラベル）・`ArchiveIO`（アーカイブの形・作業場所の鍵）・`RegionMapping`（リージョンの時間）・`PlayheadState`・`EngineCalls`（禁止のツール・同期の予約・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方）・`FloatWavWriter`・`PluginState`。`sources.cmake` が ARA を使うファイル（`GlissEditorRenderer`）をプラグインだけに足す |
 | `plugin/src/engine/`・`plugin/src/cache/` | エンジンの子プロセスと MCP クライアント・編集した窓のキャッシュと再生の読み出し |
 | `plugin/src/GlissEditor.*` | プラグインのエディタ（`DocumentBridge` を得て画面を出す・選択を渡す・ARA でないときの案内） |
 | `plugin/src/editor/` | 画面の橋: `EditorWebView`（WebView2・ネイティブ関数・知らせ・ユーザーデータのフォルダ）・`WebResources`（resource provider）・`EmbeddedAssets`・`KeyForwarding`・`key-forward.js` |
@@ -275,7 +308,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 | `plugin/tests/hostcheck/` | GlissHostCheck（`--editor` の偽の DocumentBridge、`--ara-editor` の本物の ARA ドキュメントも） |
 | `plugin/tests/aratest/` | ARA SDK のホスト（`ARATestHost`）と、その部品で作った通し試験 `GlissARATest` を 1 つのツリーで作る CMake |
 | `plugin/tests/verify_render_trace.py` | 再生の記録を試験信号と突き合わせる（numpy が要る） |
-| `plugin/tests/verify_ara_engine.py` | `GlissARATest` の出力をエンジンの `render_region` と突き合わせる（エンジンの python・cwd は engine） |
+| `plugin/tests/verify_ara_engine.py` | `GlissARATest` の出力をエンジンの `render_region`・`ara_notes` と突き合わせる（エンジンの python・cwd は engine） |
 | `plugin/scripts/test-plugin.ps1` | ビルドと検証の一式 |
 
 ## 段階と残り
@@ -287,7 +320,8 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 2. エンジンとの接続（済。上の「エンジンとの同期」）: エンジンを子プロセスで 1 本、ホストの音を一時 WAV にして `ara_set_modification`、差分の再合成をキャッシュへ、再生はキャッシュを読む、周波数の変換、アーカイブに編集リスト。
 3. 編集と再生: 画面の橋（`window.api` を JUCE のネイティブ関数・知らせで。済）。画面からの編集 → エンジン → `ara_render_dirty` → キャッシュの差し替えは通る（GlissHostCheck `--ara-editor` で画面の `engineCall` まで）。残り: DAW のテンポ（`ara_sync` の `tempo`）・つかんだノートの試聴（EditorRenderer）・画面からの編集を自動で確かめる検証。
    残り（全段階で）: **Fender Studio Pro 8 で ARA の拡張として開き、鳴るか・編集が鳴るか・保存して開き直せるか・エディタが出るか**（人の許可を取って、親が行う）。
-4. DAW に返すもの・配布: content reader（ノート）。配布（インストーラ・エンジンの exe とモデルの場所・THIRD_PARTY_NOTICES）は済み（上の「配布」。Cubase 用の ARA フォルダは文書の手順だけ）。
+4. DAW に返すもの・配布: content reader（ノート。済、上の「DAW に返すもの」。実物の DAW で出るかは未確認）。配布（インストーラ・エンジンの exe とモデルの場所・THIRD_PARTY_NOTICES）は済み（上の「配布」。Cubase 用の ARA フォルダは文書の手順だけ）。
+   残り: DAW のテンポ・拍子・調をホストから読む（ホストの content reader）、ノート以外（テンポなど）を返すこと。
 
 ### 既知の制約・未解決
 

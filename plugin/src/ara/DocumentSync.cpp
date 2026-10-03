@@ -256,6 +256,13 @@ juce::String DocumentSync::getGuideForStore() const
     return guidePending ? pendingGuide : latestGuide;
 }
 
+std::shared_ptr<const ModificationNotes> DocumentSync::getNotes (const juce::String& araId) const
+{
+    std::lock_guard guard (mutex);
+    const auto found = notesByMod.find (araId);
+    return found != notesByMod.end() ? found->second : nullptr;
+}
+
 //==============================================================================
 void DocumentSync::emit (const juce::String& name, const juce::var& data)
 {
@@ -375,6 +382,7 @@ void DocumentSync::resetEngineSession()
     }
 
     localRev.clear();
+    notesRev.clear();   // ノートの写しは持ったまま（取り直して変わったときだけ知らせる）
 
     std::lock_guard guard (mutex);
 
@@ -711,6 +719,66 @@ bool DocumentSync::renderModification (const SyncModification& mod, juce::String
     return ! analysisPending;
 }
 
+void DocumentSync::refreshNotes (const SyncModel& m, const std::map<juce::String, juce::String>& targets)
+{
+    juce::Array<juce::var> ids;
+
+    for (const auto& [id, rev] : targets)
+        ids.add (id);
+
+    // ara_notes は解析を待たない（まだなら pending。裏の準備が済むと ara_revs の版が変わり、また取り直す）。
+    const auto r = call ("ara_notes", object ({ { "ara_ids", ids } }), 120000);
+
+    if (isFailure (r))
+    {
+        log ("sync: ara_notes failed: " + failureReason (r));
+        return;
+    }
+
+    auto parsed = notes::parse (r);
+    juce::StringArray changedMods, changedSources;
+    juce::StringArray summary;
+
+    for (const auto& [id, rev] : targets)
+    {
+        auto row = parsed.find (id);
+
+        if (row == parsed.end())
+            continue;
+
+        // 取った版を覚える（取っている間に編集が入っていれば、次の ara_revs で違って取り直す）。
+        notesRev[id] = rev;
+        auto fresh = std::make_shared<const ModificationNotes> (std::move (row->second));
+        std::shared_ptr<const ModificationNotes> old;
+
+        {
+            std::lock_guard guard (mutex);
+            auto& slot = notesByMod[id];
+            old = slot;
+            slot = fresh;
+        }
+
+        const bool modChanged = old != nullptr ? ! old->sameContent (*fresh) : fresh->ready;
+        const bool sourceChanged = old != nullptr ? ! old->sameSourceContent (*fresh) : fresh->ready;
+
+        if (modChanged)
+            changedMods.add (id);
+
+        if (sourceChanged)
+            for (const auto& mod : m.modifications)
+                if (mod.araId == id)
+                    changedSources.addIfNotAlreadyThere (mod.sourceId);
+
+        summary.add (id + " " + (fresh->ready ? juce::String ((int) fresh->notes.size()) + (fresh->edited ? " adjusted" : " detected")
+                                              : juce::String ("pending")));
+    }
+
+    log ("sync: ara_notes " + summary.joinIntoString (", ") + (changedMods.isEmpty() ? juce::String() : " (changed)"));
+
+    if ((! changedMods.isEmpty() || ! changedSources.isEmpty()) && callbacks.notesChanged)
+        callbacks.notesChanged (changedMods, changedSources);
+}
+
 void DocumentSync::applyTestEdit (const SyncModel& m)
 {
     if (! options.testEdit.has_value() || testEditDone || m.modifications.empty())
@@ -819,10 +887,12 @@ void DocumentSync::cycle()
         const auto r = call ("ara_remove_modification", object ({ { "ara_id", araId } }), 120000);
         log ("sync: ara_remove_modification " + araId + (isFailure (r) ? " failed: " + failureReason (r) : juce::String()));
         localRev.erase (araId);
+        notesRev.erase (araId);
 
         {
             std::lock_guard guard (mutex);
             modStatus.erase (araId);
+            notesByMod.erase (araId);
         }
 
         it = applied.erase (it);
@@ -956,8 +1026,9 @@ void DocumentSync::cycle()
     if (options.testEdit.has_value() && ! testEditDone)
         workLeft = true;
 
-    // 6. 版が変わった修飾の差分の再合成
+    // 6. 版が変わった修飾の差分の再合成と、DAW に返すノート
     juce::StringArray contentChanged;
+    std::map<juce::String, juce::String> notesTargets;   // ノートを取り直す修飾 → ara_revs の版
     const auto revs = call ("ara_revs", object ({}), 60000);
 
     if (isFailure (revs))
@@ -981,6 +1052,9 @@ void DocumentSync::cycle()
 
             if (target.isEmpty())
                 continue;
+
+            if (const auto n = notesRev.find (mod.araId); n == notesRev.end() || n->second != target)
+                notesTargets[mod.araId] = target;
 
             // 素材違いで当てていないアーカイブは、利用者がこの修飾を編集したら捨てる（エンジンの編集を保存する）。
             {
@@ -1016,6 +1090,9 @@ void DocumentSync::cycle()
 
     if (! contentChanged.isEmpty() && callbacks.contentChanged)
         callbacks.contentChanged (contentChanged);
+
+    if (! notesTargets.empty() && ! threadShouldExit() && ! engineDied)
+        refreshNotes (m, notesTargets);
 
     // 7. 保存用の写し
     juce::Array<juce::var> ids;

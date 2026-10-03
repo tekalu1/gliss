@@ -3,6 +3,7 @@
 #include "../cache/EditedPcm.h"
 #include "../engine/McpClient.h"
 #include "EngineCalls.h"
+#include "NoteContent.h"
 #include "RegionMapping.h"
 
 #include <juce_core/juce_core.h>
@@ -60,7 +61,8 @@ struct SyncModel
 
     同期のスレッドが 1 本: エンジンを遅延起動して ara_open → ソースの音を一時 WAV に書いて ara_set_modification
     （アーカイブから戻すものは ara_restore）→ 位置・名前の変化は ara_sync → 外したものは ara_remove_modification →
-    ara_revs で版の変わった修飾に ara_render_dirty（more の間は続ける）→ EditedPcm::applyDirty → ara_archive で保存用の写し。
+    ara_revs で版の変わった修飾に ara_render_dirty（more の間は続ける）→ EditedPcm::applyDirty → ara_notes で DAW に返すノートの写し
+    → ara_archive で保存用の写し。
     メッセージスレッドは setModel() で「あるべき形」を渡すだけで、エンジンを待たない（編集サイクルの後にまとめて渡す）。
 
     スレッド: setModel・setPending*・requestSync・requestEngine・restartEngine・get*・isSettled はどのスレッドからでもよい
@@ -81,6 +83,8 @@ public:
     {
         std::function<void (const juce::String& name, const juce::var& data)> event;   // engine・cache・session-changed・project-changed・test-edit
         std::function<void (const juce::StringArray& araIds)> contentChanged;           // 再生の音が変わった修飾
+        /** ノートが変わった修飾と、解析だけのノートが変わったソース（AudioSource の persistentID）。 */
+        std::function<void (const juce::StringArray& araIds, const juce::StringArray& sourceIds)> notesChanged;
         std::function<void (const juce::String& line)> log;
     };
 
@@ -143,6 +147,9 @@ public:
     /** 保存に書くガイドの修飾（無ければ空）。 */
     juce::String getGuideForStore() const;
 
+    /** DAW に返すノートの写し（まだ無ければ nullptr）。エンジンを待たない（ARA の content reader が呼ぶ）。 */
+    std::shared_ptr<const ModificationNotes> getNotes (const juce::String& araId) const;
+
 private:
     struct PendingRestore
     {
@@ -176,6 +183,7 @@ private:
     bool registerModification (const SyncModification&, const SyncSource&, juce::StringArray& changed);
     void restoreIfPending (const juce::String& araId, int generation, juce::StringArray& changed);
     bool renderModification (const SyncModification&, juce::StringArray& contentChanged);
+    void refreshNotes (const SyncModel&, const std::map<juce::String, juce::String>& targets);
     void applyTestEdit (const SyncModel&);
     void refreshArchivesLocked (const juce::var& args, int timeoutMs);
     juce::var call (const juce::String& tool, const juce::var& args, int timeoutMs);
@@ -200,6 +208,7 @@ private:
     juce::String latestGuide;
     EngineStatus engineStatus;
     std::map<juce::String, ModStatus> modStatus;
+    std::map<juce::String, std::shared_ptr<const ModificationNotes>> notesByMod;
     juce::File workDir;
     juce::String openedKey;
     int restoreSerial = 0;
@@ -212,6 +221,7 @@ private:
     std::map<juce::String, Captured> captured;              // ソースの persistentID
     std::map<juce::String, Applied> applied;                // ara_id
     std::map<juce::String, juce::String> localRev;          // ara_id → 手元のキャッシュの版
+    std::map<juce::String, juce::String> notesRev;          // ara_id → ノートの写しを取ったときの ara_revs の版
 
     McpClient mcp;   // 最後に置く（先に壊れて、終了の通知が上の原子変数より後に来ないように）
 };

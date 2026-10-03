@@ -15,6 +15,7 @@
 | `ara_revs()` | 全修飾の今の版（ロックを取らない） |
 | `ara_archive(ara_ids?)` | 保存用の編集リスト（ロックを取らない） |
 | `ara_restore(ara_id, archive)` | アーカイブから編集を戻す（素材が違えば当てない） |
+| `ara_notes(ara_ids?)` | DAW に返すノート（編集を当てた後と、解析だけのもの。ソースの秒） |
 
 共通: `author` を取らず、**取り消しの履歴に入れない**（DAW が決めたことを Gliss の Ctrl+Z で戻させない）。
 画面の編集（`shift_pitch` など）・`undo` / `redo`・`select_track`・`analyze_take` は今までのツールをそのまま使う。
@@ -54,6 +55,7 @@ KEEP_OUT = 4                    # 修飾ごとに残す .f32 の数（プラグ�
 RENDERERS_MAX = 4               # 下ごしらえ（RegionRenderer）を持っておく修飾の数（LRU）
 DEFAULT_MAX_SEC = 10.0          # ara_render_dirty が 1 回で再合成する窓の長さの上限（秒）
 EMPTY_REV = "empty"             # プロジェクト（project.json）がまだ無い修飾の版
+NOTE_FLOOR_DB = -60.0           # ara_notes の音量: この dB を 0、0 dB を 1 にする（ARA の volume は dB に近い尺度）
 # アーカイブの素材の参照に入れるキー（`Project.to_archive` の ref と同じ）
 _REF_KEYS = ("source_id", "source_kind", "source_name", "sha256", "sr", "channels",
              "subtype", "source_frames", "offset_frames", "frames", "path", "pad")
@@ -784,5 +786,86 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
                reopened=reopened, session=_mt.summary(s))
 
 
+def _note_row(n, start, end, midi):
+    hz = 440.0 * 2.0 ** ((midi - 69.0) / 12.0)
+    db = n.rms_peak_db if n.rms_peak_db is not None and np.isfinite(n.rms_peak_db) else NOTE_FLOOR_DB / 2
+    vol = min(1.0, max(0.0, (float(db) - NOTE_FLOOR_DB) / -NOTE_FLOOR_DB))
+    return {"id": n.id, "start_sec": round(float(start), 6), "end_sec": round(float(end), 6),
+            "hz": round(float(hz), 4), "midi": round(float(midi), 4), "volume": round(vol, 4)}
+
+
+def _notes_of(p):
+    """(編集を当てた後のノート, 解析だけのノート)。どちらもソースの秒で頭の順・音程のあるノートだけ。
+
+    編集後: 分割・結合を当て、位置は時間の写像（画面の `edited_start_sec` / `edited_end_sec` と同じ）、
+    音程はノートの中心（画面の `edited_pitch_midi` と同じ。つなぎ・鉛筆を除く基本の段）。無音にしたノートは除く。"""
+    from .project.pitch import pitch_model
+    from .view.export_data import _center, _map_time, build_time_map, cents_offset
+    p.ensure_analyzed()
+    f0r = p.take_f0
+    hop = f0r.hop_s
+    base = [n for n in (p._take_notes or []) if n.kind == "note" and n.pitch_midi is not None]
+    source = [_note_row(n, n.start_sec, n.end_sec, float(n.pitch_midi)) for n in base]
+    if not p.edits:
+        return [dict(r) for r in source], source
+    base_segs, _segs, _lay, _trs = pitch_model(p)
+    src_pts, out_pts = build_time_map(base_segs, 0.0, p.duration_sec)
+    off = cents_offset(base_segs, f0r.times)
+    mutes = [(float(e.target.start_sec), float(e.target.end_sec)) for e in p.edits if e.kind == "mute"]
+    edited = []
+    for n in p.take_notes:
+        if n.kind != "note" or n.pitch_midi is None:
+            continue
+        ln = n.end_sec - n.start_sec
+        cov = sum(max(0.0, min(b, n.end_sec) - max(a, n.start_sec)) for a, b in mutes)
+        if ln > 0 and cov >= 0.5 * ln:
+            continue
+        es = float(_map_time(src_pts, out_pts, n.start_sec))
+        ee = float(_map_time(src_pts, out_pts, n.end_sec, "left"))
+        if ee <= es:
+            continue
+        edited.append(_note_row(n, es, ee, _center(n, off, hop)))
+    edited.sort(key=lambda r: (r["start_sec"], r["end_sec"]))
+    return edited, source
+
+
+@_tool
+def ara_notes(ara_ids: list | None = None) -> dict:
+    """**DAW（ARA）のプラグイン向け**: DAW に返すノート（ARA の content reader の kARAContentTypeNotes）。
+
+    返り値: `notes: {ara_id: {track, rev, state, edited, notes, source_notes}}`。
+    state: "ready"（解析が済んだ）/ "pending"（解析がまだ。裏の準備が済むと ara_revs の版が変わる）/
+    "empty"（プロジェクトがまだ無い）。ready のときだけ notes・source_notes が入る（それ以外は空の配列）。
+    notes = 編集を当てた後、source_notes = 解析だけ（どちらもソースの秒。`[{id, start_sec, end_sec, hz, midi, volume}]`、
+    頭の順、音程のあるノートだけ。notes からは無音にしたノートを除く）。hz は中心の音程の Hz、volume は
+    ノートの音量の山（-60 dB → 0、0 dB → 1）。edited = 編集リストが空でない（DAW には adjusted と出す）。
+    rev は ara_revs と同じ版（プラグインは版が変わった修飾だけ取り直す）。解析は待たない・始めない
+    （編集対象でないトラックもディスクのプロジェクトから読む。編集対象は変えない）。ara_ids を省くと全部。"""
+    s = _session()
+    want = set(ara_ids) if ara_ids else None
+    out, errors = {}, {}
+    for t in list(s.tracks):
+        aid = t.get("ara_id")
+        if not aid or (want is not None and aid not in want):
+            continue
+        try:
+            p, _is_cur = _mt._track_project(s, t)
+            row = {"track": t["id"], "rev": EMPTY_REV, "state": "empty", "edited": False,
+                   "notes": [], "source_notes": []}
+            if p is not None:
+                row["rev"] = "%s:%s" % _rev_parts(p)
+                row["edited"] = bool(p.edits)
+                if _analysis_ready(p):
+                    row["notes"], row["source_notes"] = _notes_of(p)
+                    row["state"] = "ready"
+                else:
+                    row["state"] = "pending"
+            out[aid] = row
+        except Exception as e:                   # noqa: BLE001  その修飾だけ
+            errors[aid] = str(e)
+    missing = sorted(want - set(out) - set(errors)) if want is not None else []
+    return _ok(notes=out, errors=errors or None, missing=missing or None)
+
+
 TOOLS = [ara_open, ara_set_modification, ara_remove_modification, ara_sync, ara_render_dirty, ara_revs,
-         ara_archive, ara_restore]
+         ara_archive, ara_restore, ara_notes]

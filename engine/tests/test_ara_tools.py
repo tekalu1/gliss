@@ -573,6 +573,58 @@ def test_clone_of_copies_the_edits(ara, tmp_path):
     assert _add(a, "mod-X", other, clone_of="mod-A")["cloned"] is False   # 素材が違う
 
 
+# ================================================================ DAW に返すノート
+def test_notes_follow_the_analysis_and_the_edits(ara, tmp_path):
+    """ara_notes: 解析の前は notes が空、解析の後は解析のノート（edited=false）、編集の後は当てた後の位置・音程。
+    版は ara_revs と同じ。編集対象でないトラックも、編集対象を変えずに読める。"""
+    m, a = ara
+    from vocal_engine import mcp_tracks as mt
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    src2 = _wav(tmp_path / "src" / "b.wav", _voice(transpose=2, seed=1))
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    r = _ok(a.ara_notes())["notes"]["mod-A"]
+    if _prep_off():
+        assert r["state"] in ("empty", "pending") and r["notes"] == [] and r["edited"] is False
+
+    ids = _select_and_analyze(m, tid)
+    r = _ok(a.ara_notes(["mod-A"]))["notes"]["mod-A"]
+    assert r["state"] == "ready" and r["edited"] is False and r["track"] == tid
+    assert r["rev"] == _ok(a.ara_revs())["revs"]["mod-A"]
+    assert r["notes"] == r["source_notes"] and len(r["notes"]) == len(NOTES)
+    for got, (st, d, midi) in zip(r["notes"], NOTES):
+        assert abs(got["midi"] - midi) < 0.3 and abs(got["start_sec"] - st) < 0.08 and abs(got["end_sec"] - (st + d)) < 0.08
+        assert abs(got["hz"] - 440.0 * 2 ** ((got["midi"] - 69) / 12)) < 0.01 and 0.0 < got["volume"] <= 1.0
+    before = r["notes"]
+
+    _ok(m.shift_pitch(200, note_id=ids[1]))
+    _ok(m.move_note(100, note_id=ids[3]))
+    _ok(m.mute_notes(note_ids=[ids[4]]))
+    r = _ok(a.ara_notes())["notes"]["mod-A"]
+    assert r["edited"] is True and r["rev"] == _ok(a.ara_revs())["revs"]["mod-A"]
+    assert r["source_notes"] == before                       # 解析だけのノートは編集で変わらない
+    by = {n["id"]: n for n in r["notes"]}
+    assert ids[4] not in by and len(r["notes"]) == len(NOTES) - 1   # 無音にしたノートは返さない
+    assert abs(by[ids[1]]["midi"] - (before[1]["midi"] + 2.0)) < 0.05
+    assert abs(by[ids[3]]["start_sec"] - (before[3]["start_sec"] + 0.1)) < 0.005
+    assert abs(by[ids[0]]["midi"] - before[0]["midi"]) < 1e-6 and by[ids[0]]["start_sec"] == before[0]["start_sec"]
+    assert [n["start_sec"] for n in r["notes"]] == sorted(n["start_sec"] for n in r["notes"])
+
+    # 編集対象でないトラック: 編集対象を変えずに読む
+    t2 = _add(a, "mod-B", src2)["track"]["id"]
+    _select_and_analyze(m, t2)
+    r = _ok(a.ara_notes(["mod-A", "mod-X"]))
+    assert mt.current_track_id() == t2 and r["missing"] == ["mod-X"]
+    assert r["notes"]["mod-A"]["edited"] is True and len(r["notes"]["mod-A"]["notes"]) == len(NOTES) - 1
+    assert "mod-B" not in r["notes"]
+    # 取り消すと解析だけに戻る（版も解析だけの版に戻る）
+    _select_and_analyze(m, tid)
+    for _ in range(3):
+        _ok(m.undo())
+    r = _ok(a.ara_notes(["mod-A"]))["notes"]["mod-A"]
+    assert r["edited"] is False and r["notes"] == before
+
+
 # ================================================================ ロック
 def test_archive_and_revs_do_not_wait_for_the_engine_lock(ara, tmp_path):
     """解析のジョブなどがエンジンのロック（_lock）を握っている間も、保存（ara_archive）と版の確認は止まらない。"""
@@ -661,7 +713,7 @@ async def test_ara_over_stdio(tmp_path):
     async with Client(params, read_timeout_seconds=120) as c:
         names = [t.name for t in (await c.list_tools()).tools]
         for want in ("ara_open", "ara_set_modification", "ara_remove_modification", "ara_sync",
-                     "ara_render_dirty", "ara_revs", "ara_archive", "ara_restore"):
+                     "ara_render_dirty", "ara_revs", "ara_archive", "ara_restore", "ara_notes"):
             assert want in names
         r = await call(c, "ara_open", {"work_key": "stdio-doc", "name": "曲"})
         assert r["document"]["kind"] == "ara"

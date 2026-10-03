@@ -23,7 +23,7 @@
 
 namespace
 {
-constexpr auto expectedFactoryID = "io.github.tekalu1.gliss.arafactory.1";
+constexpr auto expectedFactoryID = "io.github.tekalu1.gliss.arafactory.2";
 constexpr auto expectedArchiveID = "io.github.tekalu1.gliss.aradocumentarchive.1";
 
 /** エディタを画面の外に置く窓。 */
@@ -197,6 +197,8 @@ private:
 
         check (juce::String (factory->factoryID) == expectedFactoryID, "factoryID = " + juce::String (factory->factoryID));
         check (juce::String (factory->documentArchiveID) == expectedArchiveID, "documentArchiveID = " + juce::String (factory->documentArchiveID));
+        check (factory->analyzeableContentTypesCount == 1 && factory->analyzeableContentTypes[0] == ARA::kARAContentTypeNotes,
+               "analyzeableContentTypes = notes only (count " + juce::String ((int) factory->analyzeableContentTypesCount) + ")");
         report ("plugInName=" + juce::String (factory->plugInName) + " apiGeneration=" + juce::String ((int) factory->lowestSupportedApiGeneration)
                 + ".." + juce::String ((int) factory->highestSupportedApiGeneration));
     }

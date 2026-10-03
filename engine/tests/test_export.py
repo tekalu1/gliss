@@ -153,5 +153,5 @@ def test_export_tool_is_registered():
     assert m._mcp_asr.transcribe in m.TOOLS and m._mcp_asr.asr_status in m.TOOLS    # 聞き取り（#54）
     assert m.prep_status in m.TOOLS and m.pause_prep in m.TOOLS    # 裏の準備（#63）
     assert m.set_f0_estimator in m.TOOLS
-    assert all(f in m.TOOLS for f in m._mcp_ara.TOOLS) and len(m._mcp_ara.TOOLS) == 8    # DAW（ARA）の ara_*
-    assert len(m.TOOLS) == 69
+    assert all(f in m.TOOLS for f in m._mcp_ara.TOOLS) and len(m._mcp_ara.TOOLS) == 9    # DAW（ARA）の ara_*
+    assert len(m.TOOLS) == 70
