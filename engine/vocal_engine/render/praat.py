@@ -25,7 +25,7 @@
   - 注意: Praat は新しいパルス列を PitchTier の始まりから周期を積分して作るので、**出力の周期の位相は
     窓の始まりに依存する**。同じ設定の区間を 2 つに割って別々に再合成すると、分割点の前後で位相が
     そろわない（つなぎ目は pipeline の 20 ms クロスフェード。自前 psola も同じ性質）。pipeline の `_join` が、
-    つなぎ目ごとに入ってくる区間を ±5 ms 動かして相互相関をそろえる（`pipeline.ALIGN_MAX_MS`）。
+    有効にしたときは、つなぎ目ごとに入ってくる区間を動かして相互相関をそろえる（`pipeline.ALIGN_MAX_MS`。既定は無効）。
 
 Praat が出せない区間は**自前の TD-PSOLA（psola）で合成**し、info の `fallback_reason` と
 `warnings` に理由を書く（Renderer が warnings に集める）:

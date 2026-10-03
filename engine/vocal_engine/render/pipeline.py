@@ -13,7 +13,8 @@
     （`bundle_short_segments`）。1 つの chunk の頭と尻のクロスフェードは chunk の中で重ならない（`_join`）。
     縮んだり重なったりすると、再合成の端と次の音が 1 サンプルの段差（クリック）でつながる。
   - 隣り合う区間は別々に再合成するので位相がそろわない（rho が 0 に近いと等パワーで混ざって痩せ、ピッチが細かく揺れる）。
-    入ってくる再合成の区間を ±ALIGN_MAX_MS 動かして、つなぎ目の相互相関をそろえる（`_join`）。原音のままの区間は動かさない。
+    有効にすると（ALIGN_MAX_MS > 0。既定は無効）、入ってくる再合成の区間を ±ALIGN_MAX_MS 動かして、
+    つなぎ目の相互相関をそろえる（`_join`）。原音のままの区間は動かさない。
   - フェードの形は、重ねる 2 つの音の相関 rho に合わせて振幅を補正する
     （rho=1 → 振幅の和が 1、rho=0 → 等パワー）。同じ原音どうしでも、ピッチの違う音どうしでも
     膨らまない・痩せない。
@@ -33,6 +34,7 @@
 （chunk ごとに丸めると誤差が積もり、編集の後ろの原音が 1〜2 サンプルずれて
 「範囲外はサンプル一致」が崩れるため）。
 """
+import os
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -42,7 +44,10 @@ from ..project.model import Edit
 from .base import get_backend, resolve_backend_name
 
 MIN_GAP_MS = 5.0
-ALIGN_MAX_MS = 5.0       # つなぎ目で再合成した区間の位相をそろえるために動かす最大（±ms。0 なら無効）
+# つなぎ目で再合成した区間の位相をそろえるために動かす最大（±ms。0 なら無効）。
+# 既定は無効: そろえると、ほぼ無編集の区間の尻の境界が原音どおりにならないことがあり、耳での確かめがまだ。
+# 試すときは環境変数 GLISS_RENDER_ALIGN_MS（例 5）で有効にする。
+ALIGN_MAX_MS = float(os.environ.get("GLISS_RENDER_ALIGN_MS", "0") or 0)
 ALIGN_MIN_GAIN = 0.05    # 相関がこれ以上よくならなければ動かさない
 ALIGN_RIGHT_WEIGHT = 0.5  # 尻の側（動かせない次の区間）との相関の重み。頭の側（前の区間）を優先する
 ALIGN_TIE = 0.01         # 相関の差がこれ以下の量どうしでは、動かす量の小さい方を選ぶ

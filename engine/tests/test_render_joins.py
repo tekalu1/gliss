@@ -261,8 +261,9 @@ def test_phase_alignment_raises_junction_correlation(voice, backend, monkeypatch
 
 
 @pytest.mark.parametrize("backend", _backends())
-def test_alignment_lags_can_be_shared_across_channels(voice, backend):
+def test_alignment_lags_can_be_shared_across_channels(voice, backend, monkeypatch):
     """モノラルで決めた rho・lags を渡すと、別のレンダラ（別のチャンネル）でも同じ動かし方・混ぜ方になる。"""
+    monkeypatch.setattr(P, "ALIGN_MAX_MS", 5.0)   # 位相をそろえる処理は既定では無効
     x, f0, v = voice
     segs = _chain(np.random.default_rng(13), _durs(), 0.7, 1.4)
     r = Renderer(x, SR, f0, v, HOP, backend=backend)
@@ -274,8 +275,9 @@ def test_alignment_lags_can_be_shared_across_channels(voice, backend):
 
 
 @pytest.mark.parametrize("backend", _backends())
-def test_alignment_never_moves_unedited_samples(voice, backend):
+def test_alignment_never_moves_unedited_samples(voice, backend, monkeypatch):
     """原音のままの区間は動かさない（位相をそろえるのは再合成した区間だけ）。範囲外はサンプル一致。"""
+    monkeypatch.setattr(P, "ALIGN_MAX_MS", 5.0)   # 位相をそろえる処理は既定では無効
     x = voice[0]
     edits = [(1.0, 1.06, 150.0), (1.5, 1.52, -200.0)]
     segs = [Segment(a, b, cents=c) for a, b, c in edits]
