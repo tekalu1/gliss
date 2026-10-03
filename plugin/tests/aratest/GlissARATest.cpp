@@ -3,14 +3,20 @@
 //
 //   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -workB <作業場所 B> [-rate <描画 C の周波数>]
 //
-//   A. 合成の歌声もどき（44.1 kHz・モノラル・6.2 秒）を 1 つの AudioSource にしたドキュメントを作り、ソースの周波数で描画 → render-a.f32
-//      （プラグインは環境変数 GLISS_TEST_EDIT の編集を当て、GLISS_ARA_SYNC_WAIT_MS の間、同期の完了を待ってから描く）
+//   N. 合成の歌声もどき（44.1 kHz・モノラル・6.2 秒）を 1 つの AudioSource にし、リージョンを 2 つ（ソース全体をソングの 0 秒、
+//      ソースの 1.5〜4.2 秒をソングの 10 秒）置いたドキュメントを、編集なし（GLISS_TEST_EDIT を消す）で作り、ホストとして解析を頼んで
+//      終わるまで待つ → ソース・修飾・リージョンのノート（kARAContentTypeNotes）と品質のラベル → notes-n.json
+//   A. 同じ音のドキュメントを作り、ソースの周波数で描画 → render-a.f32
+//      （プラグインは環境変数 GLISS_TEST_EDIT の編集を当て、GLISS_ARA_SYNC_WAIT_MS の間、同期の完了を待ってから描く）。
+//      その後、リージョンのノートが adjusted になるのを待つ → notes-a.json
 //   保存（storeObjectsToArchive）→ archive.json
 //   B. ドキュメントを閉じ（エンジンも止まる）、作業場所を -workB に替え、GLISS_TEST_EDIT を消して、同じ永続 ID でドキュメントを作り直し、
-//      アーカイブを戻して描画 → render-b.f32（アーカイブだけから同じ音になるか）
+//      アーカイブを戻して描画 → render-b.f32（アーカイブだけから同じ音になるか）。戻した編集のノート → notes-b.json
 //   C. 同じドキュメントを別の周波数（既定 48000 Hz）で描画 → render-c.f32（周波数の変換の経路）
 //   ソースの音 → source.f32、ID と長さ → summary.json。比べるのは plugin/tests/verify_ara_engine.py。
 //
+// notes-*.json は {sources: {id: 中身}, modifications: {id: 中身}, regions: [{song_start, mod_start, …, content: 中身}]}、
+// 中身 = {available, grade, notes: [[frequency, pitchNumber, volume, startPosition, attackDuration, noteDuration, signalDuration]]}。
 // 出力の .f32 はチャンネル 0 の float32（リトルエンディアン）。終了コード 0 = 最後まで流れた（音の正しさは verify が見る）。
 
 #include "TestCases.h"
@@ -23,6 +29,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <functional>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -189,6 +197,116 @@ std::string argument (const std::vector<std::string>& args, const std::string& n
             return args[i + 1];
     return fallback;
 }
+
+/** 1 つのオブジェクトのノート（kARAContentTypeNotes）を JSON に: {available, grade, notes: [[frequency, pitchNumber, volume,
+    startPosition, attackDuration, noteDuration, signalDuration], ...]}。 */
+std::string describeNotes (ARA::Host::DocumentController* hc, bool available, ARA::ARAContentGrade grade,
+                           const std::function<ARA::ARAContentReaderRef ()>& createReader)
+{
+    std::ostringstream o;
+    o.precision (17);
+    o << "{\"available\": " << (available ? "true" : "false") << ", \"grade\": " << static_cast<int> (grade) << ", \"notes\": [";
+
+    if (available)
+    {
+        const auto reader { createReader () };
+        const auto count { hc->getContentReaderEventCount (reader) };
+
+        for (ARA::ARAInt32 i { 0 }; i < count; ++i)
+        {
+            const auto* n { static_cast<const ARA::ARAContentNote*> (hc->getContentReaderDataForEvent (reader, i)) };
+            o << (i > 0 ? ", " : "") << "[" << static_cast<double> (n->frequency) << ", " << n->pitchNumber << ", "
+              << static_cast<double> (n->volume) << ", " << n->startPosition << ", " << n->attackDuration << ", "
+              << n->noteDuration << ", " << n->signalDuration << "]";
+        }
+
+        hc->destroyContentReader (reader);
+    }
+
+    o << "]}";
+    return o.str ();
+}
+
+/** ドキュメントの全部（ソース・修飾・リージョン）のノートを JSON に。 */
+std::string describeDocumentNotes (ARADocumentController* dc)
+{
+    constexpr auto notes { ARA::kARAContentTypeNotes };
+    auto* hc { dc->getDocumentController () };
+    std::ostringstream o;
+    o.precision (17);
+    o << "{\"sources\": {";
+    std::string mods, regions;
+    bool firstSource { true };
+
+    for (const auto& source : dc->getDocument ()->getAudioSources ())
+    {
+        const auto s { dc->getRef (source.get ()) };
+        o << (firstSource ? "" : ", ") << "\"" << source->getPersistentID () << "\": "
+          << describeNotes (hc, hc->isAudioSourceContentAvailable (s, notes), hc->getAudioSourceContentGrade (s, notes),
+                            [&] { return hc->createAudioSourceContentReader (s, notes, nullptr); });
+        firstSource = false;
+
+        for (const auto& modification : source->getAudioModifications ())
+        {
+            const auto m { dc->getRef (modification.get ()) };
+            mods += (mods.empty () ? "" : ", ") + ("\"" + modification->getPersistentID () + "\": ")
+                    + describeNotes (hc, hc->isAudioModificationContentAvailable (m, notes), hc->getAudioModificationContentGrade (m, notes),
+                                     [&] { return hc->createAudioModificationContentReader (m, notes, nullptr); });
+
+            for (const auto& region : modification->getPlaybackRegions ())
+            {
+                const auto r { dc->getRef (region.get ()) };
+                std::ostringstream ro;
+                ro.precision (17);
+                ro << "{\"modification\": \"" << modification->getPersistentID () << "\", \"song_start\": " << region->getStartInPlaybackTime ()
+                   << ", \"song_duration\": " << region->getDurationInPlaybackTime () << ", \"mod_start\": " << region->getStartInModificationTime ()
+                   << ", \"mod_duration\": " << region->getDurationInModificationTime () << ", \"content\": "
+                   << describeNotes (hc, hc->isPlaybackRegionContentAvailable (r, notes), hc->getPlaybackRegionContentGrade (r, notes),
+                                     [&] { return hc->createPlaybackRegionContentReader (r, notes, nullptr); })
+                   << "}";
+                regions += (regions.empty () ? "" : ", ") + ro.str ();
+            }
+        }
+    }
+
+    o << "}, \"modifications\": {" << mods << "}, \"regions\": [" << regions << "]}";
+    return o.str ();
+}
+
+/** 全部のリージョンのノートが読めて、品質のラベルが want になるまで待つ（同期のスレッドがエンジンから取る）。 */
+bool waitForRegionNotes (PlugInEntry* plugInEntry, ARADocumentController* dc, ARA::ARAContentGrade want, int timeoutMs)
+{
+    auto* hc { dc->getDocumentController () };
+
+    for (int waited { 0 }; waited < timeoutMs; waited += 50)
+    {
+        bool all { true };
+
+        for (const auto& source : dc->getDocument ()->getAudioSources ())
+            for (const auto& modification : source->getAudioModifications ())
+                for (const auto& region : modification->getPlaybackRegions ())
+                {
+                    const auto r { dc->getRef (region.get ()) };
+                    all = all && hc->isPlaybackRegionContentAvailable (r, ARA::kARAContentTypeNotes)
+                          && hc->getPlaybackRegionContentGrade (r, ARA::kARAContentTypeNotes) == want;
+                }
+
+        if (all)
+            return true;
+
+        plugInEntry->idleThreadForDuration (50);
+    }
+
+    ARA_LOG ("the notes did not reach grade %i in %i ms", static_cast<int> (want), timeoutMs);
+    return false;
+}
+
+bool writeText (const std::string& path, const std::string& text)
+{
+    std::ofstream out (path, std::ios::binary);
+    out << text << "\n";
+    return out.good ();
+}
 } // namespace
 
 int main (int argc, const char* argv[])
@@ -220,6 +338,42 @@ int main (int argc, const char* argv[])
     AudioFileList files { voice };
     writeFloats (outDir + "/source.f32", voice->samples ());
 
+    // ---- N: 編集なしで、ホストが解析を頼んで待つ → ノート（detected）。リージョンは 2 つ（2 つ目はソースの途中を別の位置に） ----
+    const std::string testEdit { std::getenv ("GLISS_TEST_EDIT") != nullptr ? std::getenv ("GLISS_TEST_EDIT") : "" };
+    setEnv ("GLISS_TEST_EDIT", nullptr);
+    {
+        if (factory->analyzeableContentTypesCount == 0)
+        {
+            ARA_LOG ("the plug-in names no analyzable content types");
+            return 1;
+        }
+
+        auto testHost { std::make_unique<TestHost> () };
+        auto document { testHost->addDocument ("GlissARATest N", plugInEntry.get ()) };
+        auto dc { testHost->getDocumentController (document) };
+
+        dc->beginEditing ();
+        auto musicalContext { testHost->addMusicalContext (document, "ARA Test Musical Context", { 1.0f, 0.0f, 0.0f }) };
+        auto regionSequence { testHost->addRegionSequence (document, "Track 1", musicalContext, { 0.0f, 1.0f, 0.0f }) };
+        auto audioSource { testHost->addAudioSource (document, voice.get (), sourceID) };
+        auto audioModification { testHost->addAudioModification (document, audioSource, "Test audio modification 0", modificationID) };
+        testHost->addPlaybackRegion (document, audioModification, ARA::kARAPlaybackTransformationNoChanges,
+                                     0.0, audioSource->getDuration (), 0.0, audioSource->getDuration (),
+                                     regionSequence, "Test playback region", { 0.0f, 0.0f, 1.0f });
+        testHost->addPlaybackRegion (document, audioModification, ARA::kARAPlaybackTransformationNoChanges,
+                                     1.5, 2.7, 10.0, 2.7, regionSequence, "Trimmed playback region", { 0.0f, 0.0f, 1.0f });
+        dc->endEditing ();
+        dc->enableAudioSourceSamplesAccess (audioSource, true);
+
+        // TestHost の requestAudioSourceContentAnalysis(…, true) は isAudioSourceContentAnalysisIncomplete が false になるまで待つ
+        dc->requestAudioSourceContentAnalysis (audioSource, factory->analyzeableContentTypesCount, factory->analyzeableContentTypes, true);
+        const auto incomplete { dc->getDocumentController ()->isAudioSourceContentAnalysisIncomplete (dc->getRef (audioSource), ARA::kARAContentTypeNotes) };
+        waitForRegionNotes (plugInEntry.get (), dc, ARA::kARAContentGradeDetected, 1000);
+        writeText (outDir + "/notes-n.json", describeDocumentNotes (dc));
+        ARA_LOG ("document N analyzed (incomplete afterwards: %s)", incomplete ? "yes" : "no");
+    }
+    setEnv ("GLISS_TEST_EDIT", testEdit.empty () ? nullptr : testEdit.c_str ());
+
     // ---- A: 作って、描いて、保存する ----
     MemoryArchive archive { factory->documentArchiveID };
     std::vector<float> renderA;
@@ -227,6 +381,10 @@ int main (int argc, const char* argv[])
         std::unique_ptr<TestHost> testHost;
         auto dc { createHostAndBasicDocument (plugInEntry.get (), testHost, "GlissARATest A", false, files) };
         renderA = renderDocument (plugInEntry.get (), dc, voice->getSampleRate ());
+
+        // 編集（GLISS_TEST_EDIT）の後のノート（adjusted）。ホストは解析を頼んでいない（エンジンの裏の準備と試験の編集で解析される）
+        waitForRegionNotes (plugInEntry.get (), dc, ARA::kARAContentGradeAdjusted, 60000);
+        writeText (outDir + "/notes-a.json", describeDocumentNotes (dc));
 
         if (! dc->supportsPartialPersistency () || ! dc->storeObjectsToArchive (&archive))
         {
@@ -272,6 +430,10 @@ int main (int argc, const char* argv[])
 
         renderB = renderDocument (plugInEntry.get (), dc, voice->getSampleRate ());
         renderC = renderDocument (plugInEntry.get (), dc, otherRate);
+
+        // アーカイブから戻した編集のノート（別の作業場所で解析し直した後）
+        waitForRegionNotes (plugInEntry.get (), dc, ARA::kARAContentGradeAdjusted, 60000);
+        writeText (outDir + "/notes-b.json", describeDocumentNotes (dc));
     }
 
     writeFloats (outDir + "/render-a.f32", renderA);
