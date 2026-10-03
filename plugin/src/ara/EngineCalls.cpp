@@ -78,6 +78,28 @@ std::optional<TestEdit> TestEdit::parse (const juce::String& text)
     return std::nullopt;
 }
 
+ExternalChanges::Result ExternalChanges::update (const juce::var& revsResult)
+{
+    Result r;
+    const auto ext = revsResult.getProperty ("external", {});
+
+    if (! ext.isObject())
+    {
+        reset();
+        return r;
+    }
+
+    const auto newSeq = (juce::int64) ext.getProperty ("seq", 0);
+    const auto newSessionSeq = (juce::int64) ext.getProperty ("session_seq", 0);
+    r.projectChanged = seq >= 0 && newSeq != seq;
+    r.sessionChanged = sessionSeq >= 0 && newSessionSeq != sessionSeq;
+    const auto track = ext.getProperty ("track_id", {});
+    r.trackId = track.isString() ? track.toString() : juce::String();
+    seq = newSeq;
+    sessionSeq = newSessionSeq;
+    return r;
+}
+
 bool isFailure (const juce::var& result)
 {
     if (! result.isObject())

@@ -222,6 +222,7 @@ private:
     std::map<juce::String, Applied> applied;                // ara_id
     std::map<juce::String, juce::String> localRev;          // ara_id → 手元のキャッシュの版
     std::map<juce::String, juce::String> notesRev;          // ara_id → ノートの写しを取ったときの ara_revs の版
+    ExternalChanges external;                               // 外部の AI の中継の番号（ara_revs の external）
 
     McpClient mcp;   // 最後に置く（先に壊れて、終了の通知が上の原子変数より後に来ないように）
 };

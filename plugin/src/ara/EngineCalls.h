@@ -49,6 +49,23 @@ struct DirtyUpdate
     static bool parse (const juce::var& result, DirtyUpdate& out, juce::String& error);
 };
 
+/** ara_revs の external（外部の AI の中継の番号。engine/vocal_engine/ara_relay.py）を見て、外部の AI が曲を変えたかを判断する。
+    同期のスレッドだけが使う。最初に見た番号は覚えるだけ（知らせない）。中継が無い（null）・エンジンを起動し直したら忘れる。 */
+struct ExternalChanges
+{
+    struct Result
+    {
+        bool projectChanged = false, sessionChanged = false;
+        juce::String trackId;   // 最後に外部が変えたトラック
+    };
+
+    Result update (const juce::var& revsResult);
+    void reset() noexcept { seq = sessionSeq = -1; }
+
+private:
+    juce::int64 seq = -1, sessionSeq = -1;
+};
+
 /** エンジンの結果が失敗か（{ok:false}）。 */
 bool isFailure (const juce::var& result);
 

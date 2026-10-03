@@ -107,6 +107,8 @@ bool EngineProcess::start (const EngineConfig& config, juce::String& error)
         command += L" " + quote (arg);
     auto childEnvironment = config.environment;
     childEnvironment.set ("GLISS_CLIENT", "ara");
+    // 外部の AI の中継の記録（%APPDATA%\Gliss\ara-sessions）に DAW のプロセスを書くため（.venv の python は間に起動役が入る）
+    childEnvironment.set ("GLISS_ARA_HOST_PID", juce::String ((juce::int64) ::GetCurrentProcessId()));
     childEnvironment.set ("PYTHONIOENCODING", "utf-8");
     auto block = environmentBlock (childEnvironment);
     STARTUPINFOW startup { sizeof (STARTUPINFOW) };

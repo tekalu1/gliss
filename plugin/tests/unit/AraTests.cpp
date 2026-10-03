@@ -424,6 +424,28 @@ public:
                     "windows need a path");
             expect (! DirtyUpdate::parse (parseJson (R"({"ok":true,"rev":"r","sr":48000,"channels":1,"restore":[[1]]})"), u, error));
         }
+
+        beginTest ("external AI changes (ara_revs external)");
+        {
+            ExternalChanges ext;
+            auto r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":{"seq":3,"session_seq":1,"track_id":null}})"));
+            expect (! r.projectChanged && ! r.sessionChanged, "the first numbers are only remembered");
+            r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":{"seq":3,"session_seq":1,"track_id":null}})"));
+            expect (! r.projectChanged && ! r.sessionChanged);
+            r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":{"seq":4,"session_seq":1,"track_id":"t2"}})"));
+            expect (r.projectChanged && ! r.sessionChanged && r.trackId == "t2");
+            r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":{"seq":5,"session_seq":2,"track_id":"t1"}})"));
+            expect (r.projectChanged && r.sessionChanged && r.trackId == "t1");
+            r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":null})"));
+            expect (! r.projectChanged && ! r.sessionChanged, "no relay");
+            r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":{"seq":0,"session_seq":0,"track_id":null}})"));
+            expect (! r.projectChanged, "a restarted engine starts from 0 without a notice");
+            r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":{"seq":1,"session_seq":0,"track_id":"t1"}})"));
+            expect (r.projectChanged && ! r.sessionChanged);
+            ext.reset();
+            r = ext.update (parseJson (R"({"ok":true,"revs":{},"external":{"seq":9,"session_seq":9,"track_id":"t1"}})"));
+            expect (! r.projectChanged && ! r.sessionChanged, "after reset the numbers are only remembered");
+        }
     }
 };
 

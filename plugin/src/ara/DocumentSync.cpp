@@ -383,6 +383,7 @@ void DocumentSync::resetEngineSession()
 
     localRev.clear();
     notesRev.clear();   // ノートの写しは持ったまま（取り直して変わったときだけ知らせる）
+    external.reset();   // 新しいエンジンの番号は 0 から
 
     std::lock_guard guard (mutex);
 
@@ -1030,6 +1031,7 @@ void DocumentSync::cycle()
     juce::StringArray contentChanged;
     std::map<juce::String, juce::String> notesTargets;   // ノートを取り直す修飾 → ara_revs の版
     const auto revs = call ("ara_revs", object ({}), 60000);
+    ExternalChanges::Result externalChange;
 
     if (isFailure (revs))
     {
@@ -1038,6 +1040,9 @@ void DocumentSync::cycle()
     }
     else
     {
+        // 外部の AI（中継。engine/vocal_engine/ara_relay.py）が曲を変えた: 版の変わった修飾は下で取り直し、画面には後で知らせる
+        externalChange = external.update (revs);
+
         for (const auto& mod : m.modifications)
         {
             if (threadShouldExit() || engineDied)
@@ -1091,6 +1096,20 @@ void DocumentSync::cycle()
     if (! contentChanged.isEmpty() && callbacks.contentChanged)
         callbacks.contentChanged (contentChanged);
 
+    if (externalChange.projectChanged || externalChange.sessionChanged)
+    {
+        log ("sync: external edit (track " + externalChange.trackId + (externalChange.sessionChanged ? ", session" : "") + ")");
+
+        // 画面は project-changed で描き直し、session-changed でトラックの一覧・ガイドを読み直す
+        auto* o = new juce::DynamicObject();
+        o->setProperty ("track_id", externalChange.trackId.isNotEmpty() ? juce::var (externalChange.trackId) : juce::var());
+        o->setProperty ("external", true);
+        emit ("project-changed", juce::var (o));
+
+        if (externalChange.sessionChanged)
+            sessionChanged = true;
+    }
+
     if (! notesTargets.empty() && ! threadShouldExit() && ! engineDied)
         refreshNotes (m, notesTargets);
 
@@ -1100,7 +1119,9 @@ void DocumentSync::cycle()
     for (const auto& id : changed)
         ids.add (id);
 
-    if (! ids.isEmpty())
+    if (externalChange.sessionChanged)
+        refreshArchivesLocked (object ({}), 60000);   // 外部がガイドを変えたかもしれない（保存に書くガイド）
+    else if (! ids.isEmpty())
         refreshArchivesLocked (object ({ { "ara_ids", ids } }), 60000);
 
     for (const auto& mod : m.modifications)
