@@ -4,6 +4,8 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "GlissDocumentController.h"
+#include "cache/RegionReader.h"
+#include "cache/SourceReader.h"
 
 #include <atomic>
 #include <map>
@@ -13,20 +15,21 @@
 namespace gliss
 {
 
-/** ホストの音を先読みして返す、素通しの PlaybackRenderer。
+/** 編集を当てた音を返す PlaybackRenderer（design-stage23 §4-3）。
 
-    - ホストの音（ARAAudioSourceReader）は裏のスレッド（全インスタンスで 1 本）が先読みしてバッファに溜める
-      （BufferingAudioReader）。オーディオスレッドはそのバッファを写すだけで、ホストの音の読み出しをしない。
-      取るのは、先読みスレッドがバッファを入れ替える瞬間だけ持つ短いロックだけ。
-    - 先読みが間に合っていない範囲は、読めたところまでを返し、残りだけを無音にする（全部を無音にしない）。
-    - ホストが「リアルタイムでない」と言っている描画（バウンスなど）のときだけ、先読みの完了を短く待つ。
-      常にリアルタイムでないインスタンス（alwaysNonRealtime）は、先読みせず直に読む。
-    - ソースとホストのサンプリング周波数が違うものは、まだ鳴らさない（段階 2 でエンジンの soxr に任せる）。
-*/
+    - オーディオスレッドはキャッシュ（AudioModification ごとの EditedPcm のスナップショット）を読むだけ。
+      IPC・再合成・ホストの音の読み出し・確保・ロック待ちをしない。キャッシュの無い区間は原音。
+    - 原音は段階 1 と同じく裏のスレッド（全インスタンスで 1 本）がホストの音を先読みしたもの（BufferingAudioReader）。
+      先読みが間に合っていない範囲だけ無音。
+    - リージョンごとに RegionReader（窓＋原音＋周波数の変換＋チャンネル数の変換）を prepareToPlay で用意する。
+      ソースとホストの周波数が違っても鳴らす（流しの変換）。
+    - 非リアルタイムの描画（バウンス）のときだけ、同期（ソースの読み込み・エンジン・差分の再合成）の完了を最大 10 秒待つ
+      （prepareToPlay ごとの持ち時間。待っても済まなければ原音のまま描いてログに書く）。
+    - 原音と比べる（setCompare）間は窓を当てない。 */
 class GlissPlaybackRenderer final : public juce::ARAPlaybackRenderer
 {
 public:
-    GlissPlaybackRenderer (ARA::PlugIn::DocumentController* documentController, ProcessingLockInterface& lockInterface);
+    GlissPlaybackRenderer (ARA::PlugIn::DocumentController* documentController, RenderContext& context);
     ~GlissPlaybackRenderer() override;
 
     void prepareToPlay (double sampleRate,
@@ -43,13 +46,14 @@ public:
     using ARAPlaybackRenderer::processBlock;
 
 private:
-    /** 1 つの AudioSource を読む窓口。リージョンの追加・削除は prepareToPlay の外でしか起きない（ARA の規則）ので、
-        この表は prepareToPlay / releaseResources でだけ作り替える。 */
-    struct SourceReader
+    /** リージョンごとの読み出し。リージョンの追加・削除は prepareToPlay の外でしか起きない（ARA の規則）ので、
+        表は prepareToPlay / releaseResources でだけ作り替える。 */
+    struct RegionEntry
     {
-        std::unique_ptr<juce::AudioFormatReader> reader;           // 先読みつき（BufferingAudioReader）か、直に読む ARAAudioSourceReader
-        juce::BufferingAudioReader* buffered = nullptr;            // reader が先読みつきのとき、待ち時間を変えるための別名
-        bool supported = false;                                    // サンプリング周波数が合っている
+        RegionReader reader;
+        FormatSourceReader* source = nullptr;      // sourceReaders が持つ
+        std::shared_ptr<EditedPcm> pcm;            // 修飾と持ち合う（オーディオスレッドでは参照の数を変えない）
+        double sourceRate = 0.0;
     };
 
     /** 検証用の記録（GLISS_ARA_TRACE_DIR のときだけ使う）。1 回の region の読みごとに 1 件。 */
@@ -71,9 +75,10 @@ private:
         ~PrefetchThread() override { stopThread (2000); }
     };
 
+    void waitForSync (bool offline) noexcept;
     void dumpTrace();
 
-    ProcessingLockInterface& lockInterface;
+    RenderContext& context;
     juce::SharedResourcePointer<PrefetchThread> prefetchThread;   // sourceReaders より先に作り、後に壊す
 
     double sampleRate = 48000.0;
@@ -81,13 +86,17 @@ private:
     int numChannels = 2;
     bool prepared = false;
     int forcedTimeoutMs = -1;            // GLISS_ARA_READ_TIMEOUT_MS（検証用）
+    int forcedSyncWaitMs = -1;           // GLISS_ARA_SYNC_WAIT_MS（検証用。リアルタイムでも同期を待つ）
     bool tracing = false;                // prepareToPlay で GLISS_ARA_TRACE_DIR を見て決める
 
-    std::map<juce::ARAAudioSource*, SourceReader> sourceReaders;
-    juce::AudioBuffer<float> scratch;
+    std::map<juce::ARAAudioSource*, std::unique_ptr<FormatSourceReader>> sourceReaders;
+    std::map<const juce::ARAPlaybackRegion*, std::unique_ptr<RegionEntry>> regionEntries;
+
+    double syncWaitBudgetMs = 0.0;       // この prepareToPlay の間に同期を待ってよい残り（オーディオスレッドだけが書く）
 
     // 統計（オーディオスレッドが書く。読むのは releaseResources だけ）
-    std::atomic<juce::int64> blocksRendered { 0 }, samplesRendered { 0 }, incompleteReads { 0 }, unsupportedRegions { 0 }, lockMisses { 0 };
+    std::atomic<juce::int64> blocksRendered { 0 }, samplesRendered { 0 }, incompleteReads { 0 }, lockMisses { 0 },
+                             syncWaitMs { 0 }, syncWaitTimeouts { 0 };
 
     std::vector<TraceEntry> trace;
     std::atomic<size_t> traceCount { 0 };
