@@ -417,6 +417,11 @@ def ara_open(work_key: str, name: str | None = None) -> dict:
         p, why = None, str(e)
     log.get().info("DAW のドキュメントを開いた: %s（%s・トラック %d）", wd, "新規" if created else "前の作業場所",
                    len(s.tracks))
+    from . import ara_relay
+    try:
+        ara_relay.start(work_key, title, wd)        # 外部の AI の中継（ara_relay.py。プラグインのエンジンだけ）
+    except Exception as e:                       # noqa: BLE001  中継が開けなくても文書は開く
+        log.get().warning("外部の AI の中継を開けない: %s", e)
     return _ok(dir=wd, opened=True, created=created, document=doc.info(), session=_mt.summary(s),
                project_dir=p.dir if p else None, analyzed=_mt.analyzed(s, p) if p else False,
                guide_note=why)
@@ -713,7 +718,9 @@ def ara_revs() -> dict:
     """**DAW（ARA）のプラグイン向け**: 全修飾の今の版 `{revs: {ara_id: rev}, track_ids: {ara_id: track_id}}`。
     エンジンのロックを取らずにディスクの project.json から読む（解析のジョブの最中でもすぐ返る）。
     プラグインは手元の版と違う修飾だけ ara_render_dirty を呼ぶ（取り消しで別のトラックが変わったときも拾える）。
-    プロジェクトがまだ無い修飾は "empty"。"""
+    プロジェクトがまだ無い修飾は "empty"。
+    external: 外部の AI の中継（ara_relay.py）が開いていれば `{seq, session_seq, track_id}`。外部の AI が曲を変えるたびに
+    seq が進み（セッションを変えうるものは session_seq も）、プラグインは画面に project-changed（・session-changed）を知らせる。"""
     s = _srv._state.get("session")
     if _doc() is None or s is None:
         raise ProjectError("DAW のドキュメントが開かれていない（先に ara_open を呼ぶ）")
@@ -728,7 +735,8 @@ def ara_revs() -> dict:
         except Exception as e:                   # noqa: BLE001  書きかけ・壊れている: その修飾だけ
             revs[aid] = None
             errors[aid] = str(e)
-    return _ok(revs=revs, track_ids=ids, errors=errors or None)
+    from . import ara_relay
+    return _ok(revs=revs, track_ids=ids, errors=errors or None, external=ara_relay.external())
 
 
 @_tool(lock=False)
@@ -867,5 +875,57 @@ def ara_notes(ara_ids: list | None = None) -> dict:
     return _ok(notes=out, errors=errors or None, missing=missing or None)
 
 
+# ---------------------------------------------------------------- 外部の AI から DAW の文書を操作する（ara_relay.py）
+def _relay_local():
+    from . import bridge
+    if bridge.is_app():
+        raise ProjectError("画面・DAW のプラグインが起動したエンジンでは使えない（外部の AI のエンジン用）")
+
+
+@_tool(lock=False)
+def ara_documents() -> dict:
+    """DAW（Fender Studio Pro など）の中で開いている Gliss（ARA プラグイン）の文書の一覧。
+
+    文書ごとに document（DAW の文書名）・work_key・daw（DAW の実行ファイル）・allow（DAW の Gliss が AI に許すこと）・
+    tracks（修飾ごとに track_id・ara_id（persistentID）・name（修飾の名前）・daw_track（DAW のトラック名）・
+    duration_sec（ソースの長さ）・analyzed（解析済みか）・prep（裏の準備の状態）・editing_in_plugin（プラグインの画面で
+    開いているか））。attached: 今 ara_attach で選んでいる修飾（無ければ null）。
+    次に ara_attach(ara_id) で選ぶと、以後のツール（analyze_take・list_notes・shift_pitch…）はその修飾に効く。
+    """
+    from . import ara_relay
+    _relay_local()
+    docs = ara_relay.documents()
+    return _ok(documents=docs, attached=ara_relay.selection(), sessions_dir=ara_relay.sessions_dir(),
+               next=("ara_attach(ara_id) で修飾を選ぶ" if docs else
+                     "DAW で Gliss を挿したイベントを開くと出る（DAW の Gliss が %s=off なら出ない）" % ara_relay.ALLOW_ENV))
+
+
+@_tool(lock=False)
+def ara_attach(ara_id: str = None, track_id: str = None, document: str = None) -> dict:
+    """DAW の Gliss の文書の修飾（オーディオのイベントの編集の単位）を選び、以後のツールをそこへ転送する。
+
+    ara_id / track_id: ara_documents の修飾（省くと、修飾が 1 つならそれ、ほかはプラグインの画面で開いているもの）。
+    document: 文書が複数あるとき、その work_key（または文書名・engine_pid）。
+    選んだ後は analyze_take（解析済みならすぐ返る）→ list_notes / list_deviations → shift_pitch などの編集を
+    単体のときと同じ名前・引数で呼ぶ。編集は DAW の再生・プラグインの画面に反映され、DAW のソングに保存される。
+    別の修飾へは select_track(track_id) か ara_attach をもう一度。単体の Gliss に戻るときは ara_detach。
+    DAW の文書の作り・トラックの増減・保存（load_project・add_track・save_project など）は使えない。
+    """
+    from . import ara_relay
+    _relay_local()
+    d, row = ara_relay.attach(ara_id=ara_id, track_id=track_id, document=document)
+    return _ok(attached=ara_relay.selection(), track=row, document=d.get("document"), work_key=d.get("work_key"),
+               daw=d.get("daw"), allow=d.get("allow"),
+               next="analyze_take → list_notes（以後のツールはこの修飾に効く）")
+
+
+@_tool(lock=False)
+def ara_detach() -> dict:
+    """ara_attach をやめる（以後のツールはこのエンジン＝単体の Gliss の曲に戻る）。"""
+    from . import ara_relay
+    _relay_local()
+    return _ok(detached=ara_relay.detach())
+
+
 TOOLS = [ara_open, ara_set_modification, ara_remove_modification, ara_sync, ara_render_dirty, ara_revs,
-         ara_archive, ara_restore, ara_notes]
+         ara_archive, ara_restore, ara_notes, ara_documents, ara_attach, ara_detach]

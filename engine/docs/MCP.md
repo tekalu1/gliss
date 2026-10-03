@@ -2,8 +2,9 @@
 
 Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジンを MCP（stdio）で公開する。サーバーの名前は `gliss`（Python のパッケージは内部名の `vocal_engine` のまま）。
 Claude Code などの MCP クライアントから
-「測る／直す／確かめる」ができる。ツールは 74 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
-プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、DAW（ARA プラグイン）専用の 9 個は §3-4、区間の聞き取り（音声認識）の 3 個は §1-1）。
+「測る／直す／確かめる」ができる。ツールは 77 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
+プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、DAW（ARA プラグイン）専用の 9 個は §3-4、DAW の中の Gliss の文書を
+外部の AI から操作する 3 個は §3-5、区間の聞き取り（音声認識）の 3 個は §1-1）。
 
 起動:
 
@@ -987,7 +988,7 @@ Claude Code から: `load_project("D:/…/曲.gliss")` → `list_tracks` → `se
 ## 3-4. DAW（VST3 + ARA 2 のプラグイン。`engine/vocal_engine/mcp_ara.py`）
 
 DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動し（`GLISS_CLIENT=ara`。§4-1 の許可に従わない）、次の対応で使う。
-**AI のプロセスからは呼べない**（許可に関係なく `permission: "ara"` で断る）。
+**AI のプロセスからは呼べない**（許可に関係なく `permission: "ara"` で断る）。AI から DAW の文書を編集するときは §3-5 の中継を通す。
 
 | DAW（ARA） | エンジン |
 |---|---|
@@ -1019,7 +1020,7 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 | `ara_remove_modification` | `ara_id` | `{removed, track, switched_to, reopened, session}`。外す（ボーカルが 0 本でもよい。プロジェクトのディレクトリは残す）。無ければ `removed: false` |
 | `ara_sync` | `tracks: [{ara_id, offset_sec?, name?, group?}]`, `tempo?: {bpm, numerator, denominator, start_sec}`, `guide?`（ガイドにする修飾の `ara_id`。`""` で外す。アーカイブのガイドを戻すとき用） | `{changed: [track_id], unknown: [ara_id], tempo, tempo_changed, guide, guide_changed, reopened, session}`。位置は 1 サンプル未満の差なら変えない。ガイドの指定も履歴に入れない（画面の `set_guide_track` は入る）。編集対象のガイドの重ね方が変われば開き直す（`reopened: true` → 画面は `analyze_take` から描き直す） |
 | `ara_render_dirty` | `ara_id`, `since?`（前に受け取った `rev`）, `backend?`（`praat`）, `channels?`（`all` / `mono`）, `max_sec?`（1 回で再合成する窓の長さの上限。既定 10） | `{track, rev, reset, more, analysis_pending, sr, channels, source_frames, restore: [[start_frame, frames]], windows: [{start_frame, frames, byte_offset}], path, rendered_sec, backend, timing_sec}`。下の「差分の再合成」 |
-| `ara_revs` | なし | `{revs: {ara_id: rev}, track_ids: {ara_id: track_id}, errors}`。**ロックを取らない**（ディスクの project.json から）。プロジェクトがまだ無い修飾は `"empty"` |
+| `ara_revs` | なし | `{revs: {ara_id: rev}, track_ids: {ara_id: track_id}, errors, external}`。**ロックを取らない**（ディスクの project.json から）。プロジェクトがまだ無い修飾は `"empty"`。`external`: §3-5 の中継が開いていれば `{seq, session_seq, track_id}`（外部の AI が曲を変えるたびに `seq`、セッションを変えうるもの（`set_track`・`set_guide_track`・`set_tempo`・`undo`・`redo`）は `session_seq` も進む。`track_id` は最後に変えたトラック）、無ければ `null` |
 | `ara_archive` | `ara_ids?`（省けば全部） | `{archives: {ara_id: {name, track, archive}}, guide: <ガイドの ara_id> \| null, tempo, errors, missing}`。`archive` は `Project.to_archive()` の形（素材の参照・歌詞・changeset の列。ガイドは入れない）。**ロックを取らない**（解析のジョブの最中も保存を止めない）。素材の照合のハッシュはトラックを作ったときに覚えた値を使う。プロジェクトがまだ無い修飾は `archive: null` |
 | `ara_restore` | `ara_id`, `archive` | `{track, mismatch, reason?, edits, changesets, reopened, session}`。編集を戻す（履歴に入れず、戻した changeset も Ctrl+Z の列に入れない）。素材の長さ・音の中身が違えば**戻さずに** `mismatch: true`（`ok` は true。プラグインはアーカイブを持ち続ける）。編集対象なら開き直す |
 | `ara_notes` | `ara_ids?`（省けば全部） | `{notes: {ara_id: {track, rev, state, edited, notes, source_notes}}, errors, missing}`。DAW に返すノート（ARA の content reader の `kARAContentTypeNotes`）。`state`: `ready`（解析が済んだ）/ `pending`（解析がまだ）/ `empty`（プロジェクトがまだ無い）。`ready` のときだけ `notes`（編集を当てた後。無音にしたノートは除く）と `source_notes`（解析だけ）が入る。どちらもソースの秒・頭の順・音程のあるノートだけで `[{id, start_sec, end_sec, hz, midi, volume}]`（位置・音程は `export_view_data` の `edited_start_sec`・`edited_end_sec`・`edited_pitch_midi` と同じ定義、`hz` はその Hz、`volume` はノートの音量の山を -60 dB → 0・0 dB → 1）。`edited` = 編集リストが空でない（プラグインは DAW に adjusted と出す）。`rev` は `ara_revs` と同じ。解析は待たない・始めない（裏の準備が済むと版が変わる）。編集対象は変えない |
@@ -1047,6 +1048,62 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 DAW の操作は `ara_sync` / `ara_set_modification` / `ara_remove_modification`。画面の編集の後は `ara_revs` → 違う修飾に
 `ara_render_dirty(since=<手元の rev>)`（`more` の間は続ける）→ `ara_archive(変わった ara_id)` で保存用の写しを取り直す。
 ノート（DAW に返す）は、`ara_revs` の版がノートを取った版と違う修飾に `ara_notes(ara_ids)`。
+
+## 3-5. 外部の AI から DAW の中の Gliss を操作する（`engine/vocal_engine/ara_relay.py`）
+
+DAW（Fender Studio Pro など）で Gliss（ARA プラグイン）を挿したイベントを開いている間、Claude Code などが起動したエンジン（§4。
+`GLISS_CLIENT` なし）から、その文書の修飾を普段のツールで編集できる。DAW の文書を持つのはプラグインのエンジン 1 本だけなので、
+AI のエンジンは**呼び出しをプラグインのエンジンへ転送する**。編集はプラグインのエンジンの中で実行され、DAW の再生・
+プラグインの画面・DAW に返すノートに反映され、DAW のソングを保存すると一緒に保存される。
+
+手順（AI 側）:
+
+1. `ara_documents()` — 開いている文書の一覧。文書ごとに `document`（DAW の文書名）・`work_key`・`daw`（DAW の実行ファイル名）・`daw_pid`・
+   `engine_pid`・`allow`（DAW の Gliss が許すこと）・`tracks`。`tracks[]` は修飾ごとに `track_id`・`ara_id`（persistentID）・`name`（修飾の名前）・
+   `daw_track`（DAW のトラック名）・`duration_sec`（ソースの長さ）・`offset_sec`・`analyzed`（解析済みか）・`prep`（裏の準備の状態）・`guide`・
+   `editing_in_plugin`（プラグインの画面で開いているか）。つながらない文書は `error` 付き。
+2. `ara_attach(ara_id?, track_id?, document?)` — 修飾を選ぶ。省くと、修飾が 1 つならそれ、ほかはプラグインの画面で開いているもの。
+   文書が複数あるときは `document`（`work_key`・文書名・`engine_pid`）。
+3. 以後のツールは**単体のときと同じ名前・引数**で、選んだ修飾に効く: `analyze_take`（解析済みならすぐ返る）→ `list_notes`・`get_pitch`・
+   `list_deviations`・`get_phonemes` → `shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・
+   `plan_edit`/`apply_plan`・`set_guide_track`・`undo`/`redo` など。返り値の dict には `ara: {document, work_key, ara_id}` が付く。
+   別の修飾へは `select_track(track_id)`（外部の選択だけを変える。プラグインの画面の編集対象は変えない）か `ara_attach` をもう一度。
+4. `ara_detach()` — やめる（以後のツールはこのエンジン＝単体の Gliss の曲に戻る）。
+
+- 使えないもの（許可に関係なく `permission: "ara"`）: DAW の文書の作り・トラックの増減・保存・書き出し（`new_project`・`load_project`・
+  `open_project`・`save_project`・`close_project`・`add_track`・`remove_track`・`export_wav`・`render_tracks`・`split_track`・`join_track`・
+  `mute_track_range`）と `ara_*`。プラグインの画面が断るものと同じ（`plugin/src/ara/EngineCalls.cpp` の `isForbidden`）。
+- 取り消しは曲で 1 本（§2-9）。外部の `undo` は、プラグインの画面の編集を含む曲の履歴の最後を戻す。外部の編集は `author: "ai"`。
+- 長い処理はいつもどおりジョブ（`get_job` も転送される。ジョブはプラグインのエンジンで走る）。
+- DAW の文書を閉じた・プラグインのエンジンが止まったら、転送は `{"ok": false, "error": "DAW の文書（…）が見つからない…"}`。
+  エンジンが起動し直した（プラグインの［つなぎ直す］）ときは、同じ `work_key` の新しい記録へそのまま転送する。
+
+**許可**（プラグインのエンジンの環境変数 `GLISS_ARA_AI`。DAW を起動するときの環境から引き継ぐ。§4-1 の `bridge.json` は使わない）:
+
+| 値 | 外部の AI に許すこと |
+|---|---|
+| `off` | 何も（中継の口を開かない。`ara_documents` に出ない） |
+| `read` | 読む・測るだけ（編集は `permission: "edit"` で断る） |
+| `edit`（既定） | 編集まで（保存・書き出し＝ユーザーのファイルに書く `render_region(path=…)` などは `permission: "save"` で断る） |
+| `save` | 編集と保存・書き出し |
+
+「編集」「保存・書き出し」の分け方は §4-1 の表と同じ（`bridge.category`）。
+
+**しくみ**:
+
+- プラグインのエンジンは `ara_open` の後に `127.0.0.1` の口（ポートは OS が選ぶ）を開き、記録
+  `%APPDATA%\Gliss\ara-sessions\<エンジンの pid>.json`（`{format: "gliss-ara-relay", version: 1, pid, engine, host, port, token, daw_pid, daw,
+  work_key, document, dir, allow, started_at}`）を書く。置き場は `GLISS_ARA_SESSIONS_DIR` で差し替える。`daw_pid` はプラグインが渡す
+  `GLISS_ARA_HOST_PID`。エンジンが終わる（DAW が文書を閉じる）と口を閉じて記録を消す。落ちて残った記録は、AI 側が pid の生存と
+  実行ファイルの一致で見分けて無視し、消す。
+- 1 回の呼び出しごとに 1 本つなぎ、UTF-8 の JSON を 1 行送って 1 行受ける（`{token, op: "list" | "select" | "call", ara_id?, tool?, args?}`）。
+  トークン（32 バイトの乱数）が合わない要求は断る。`127.0.0.1` にしか bind しないので、ほかの PC からはつながらない。
+- 実行はプラグインのエンジンのロック（`_lock`）の中で、選んだ修飾のトラックに一時的に切り替えて行い、終わったらプラグインの画面の
+  編集対象に戻す（画面の呼び出しと外部の呼び出しが同時に来ても、順に、それぞれのトラックに当たる）。ロックを取らないツール
+  （`get_job`・`engine_info` など）はそのまま呼ぶ。
+- プラグインは 1 秒ごとの `ara_revs` で版の変わった修飾を取り直し（`ara_render_dirty` → 再生のキャッシュ → `notifyContentChanged`、
+  `ara_notes`、`ara_archive`）、`external.seq` が変わったら画面に `project-changed`（`session_seq` も変われば `session-changed`）を知らせる。
+  反映までは最大で約 1 秒。
 
 ## 4. Claude Code から使う
 
@@ -1134,6 +1191,7 @@ DAW の操作は `ara_sync` / `ara_set_modification` / `ara_remove_modification`
 | **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`split_track`・`join_track`・`mute_track_range`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
 | **保存・書き出し** | `save_project`・`export_wav`・`prepare_asr_model`（聞き取り用の数 GB のモデルをダウンロードして書く）、`render_region(path=…)`・`export_view_data(path=…)`・`render_preview(name=<フォルダーを含むパス>)`（ユーザーが指定した場所に書くとき） |
 | AI からは呼べない | DAW のプラグイン専用の `ara_*`（§3-4。`bridge.py` の `ARA_TOOLS`。`permission: "ara"` で断る） |
+| 許可なしで呼べる（DAW の文書） | `ara_documents`・`ara_attach`・`ara_detach`（§3-5。選んだ後のツールは DAW の Gliss の `GLISS_ARA_AI` に従い、`bridge.json` の許可は見ない） |
 | 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info` |
 
 `select_track` は編集対象を切り替えるだけ（履歴に入らない）なので許可なし。`plan_edit` は計画を作るだけで、当てるのは `apply_plan`（編集）。

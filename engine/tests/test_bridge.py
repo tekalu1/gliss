@@ -119,6 +119,8 @@ def test_every_tool_is_classified():
         "list_tracks", "select_track", "track_overview", "render_tracks",
         # 聞き取り（issue #54）: 候補を返すだけで確定の歌詞は変えない・使えるかを見るだけ
         "transcribe", "asr_status",
+        # DAW の Gliss の文書を見る・選ぶ・やめる（ara_relay.py。選んだ後のツールは DAW の Gliss の許可に従う）
+        "ara_documents", "ara_attach", "ara_detach",
     }
     names = [f.__name__ for f in m.TOOLS]
     assert len(names) == len(set(names))

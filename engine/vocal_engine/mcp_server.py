@@ -133,6 +133,19 @@ def _tool(fn=None, *, lock=True):
         def wrapper(*a, **kw):
             t0 = time.perf_counter()
             if not bridge.is_app():
+                # DAW の Gliss の文書を選んでいる（ara_attach）: そのプラグインのエンジンへ転送する（ara_relay.py）。
+                # 許可は DAW の Gliss の設定（GLISS_ARA_AI）に従う
+                from . import ara_relay
+                if ara_relay.attached() and f.__name__ not in ara_relay.LOCAL_TOOLS:
+                    try:
+                        ba = sig.bind_partial(*a, **kw)
+                    except TypeError:
+                        ba = None
+                    if ba is not None:
+                        r = ara_relay.forward(f.__name__, dict(ba.arguments))
+                        log.get("tool").info("%s -> DAW (%s)", f.__name__,
+                                             "ok" if not (isinstance(r, dict) and r.get("ok") is False) else "failed")
+                        return r
                 # AI のプロセス（画面が起動したエンジンでない）: 画面の「AI に許可」に従う（bridge.py）。
                 # 編集の author は必ず "ai"（画面の履歴で AI の操作に印を付ける。apply_plan の既定は human）
                 try:
@@ -169,6 +182,7 @@ def _tool(fn=None, *, lock=True):
                 return {"ok": False, "error": str(e), "tool": f.__name__,
                         "conflict": isinstance(e, ProjectConflict),
                         "preparing": isinstance(e, PreparationPending), "log": log.current_log_file()}
+        wrapper.engine_lock = lock              # 外部の AI の中継（ara_relay.execute）がロックの要否を見る
         return wrapper
     return deco(fn) if fn is not None else deco
 
@@ -2153,6 +2167,9 @@ def build_server():
             "（画面の曲と編集中のトラックを開く。編集は画面に即反映される）。"
             "ファイルから始めるときは open_project / load_project(path)。"
             "画面の「AI に許可」で許していない操作（編集／保存・書き出し）は ok=false が返る。"
+            "**DAW（Fender Studio Pro など）の中の Gliss（ARA プラグイン）の曲を触るときは、ara_documents で"
+            "開いている文書と修飾を見て ara_attach(ara_id) で選ぶ**（以後のツールはその修飾に効き、DAW の再生に反映される。"
+            "戻るときは ara_detach）。"
             "**歌詞が分かっているなら set_lyrics を呼ぶ**と"
             "音素アラインメントが走り、タイミング編集の単位が音素境界になる"
             "（母音だけ伸縮して子音の長さを保てる）。"
@@ -2183,6 +2200,8 @@ def main():
     try:
         server.run(transport="stdio")
     finally:
+        from . import ara_relay
+        ara_relay.stop()                         # 外部の AI の中継の口を閉じ、記録を消す
         log.get().info("=== 終了")
 
 
