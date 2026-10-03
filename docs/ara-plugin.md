@@ -101,6 +101,46 @@ DAW がイベントの上に音符を描く・MIDI に書き出す・ほかの�
 | Cubase / Nuendo | 未確認。ARA の拡張の「音声を MIDI に」などでノートが取れるか、`detected` と `adjusted` で扱いが変わるか |
 | Reaper | 未確認（この PC に無い）。報告では ARA のノートを MIDI のアイテムに書き出せる |
 
+### 外部の AI から操作する（中継。`engine/vocal_engine/ara_relay.py`）
+
+Claude Code などの外部の AI（自分でエンジン `python -m vocal_engine.mcp` を起動する MCP クライアント）が、DAW の中で開いている Gliss の文書を
+普段のツールで編集できる。DAW の文書を持つのはプラグインのエンジン 1 本だけなので、プラグインのエンジンが `127.0.0.1` の口をトークン付きで開き、
+AI のエンジンが呼び出しを転送する。ツールと仕組みの詳細は [engine/docs/MCP.md](../engine/docs/MCP.md) §3-5。
+
+AI からの手順:
+
+1. `ara_documents()` で開いている文書と修飾（DAW のトラック名・修飾の名前・persistentID・ソースの長さ・解析の状態・プラグインの画面で開いているか）を見る。
+2. `ara_attach(ara_id)` で修飾を選ぶ（修飾が 1 つ・画面で開いているものなら省ける）。
+3. `analyze_take` → `list_notes` / `list_deviations` → `shift_pitch`・`correct_to_guide`・`move_note`・`undo` など、単体のときと同じ名前・引数で呼ぶ。
+4. 終わったら `ara_detach()`（単体の Gliss の曲に戻る）。
+
+- 編集はプラグインのエンジンの中で、選んだ修飾のトラックに一時的に切り替えて実行し、画面の編集対象に戻す（エンジンのロックの中。画面の呼び出しと
+  外部の呼び出しが同時に来ても順に当たる）。外部の編集は曲の取り消しの履歴に `author: "ai"` で入る。
+- 同期のスレッドは今までどおり 1 秒ごとに `ara_revs` を見るので、外部の編集は約 1 秒で再生のキャッシュ・DAW に返すノート・保存用の写し
+  （`ara_archive`。DAW のソングに保存される）に入る。`ara_revs` の `external.seq` が変われば画面に `project-changed`（セッションを変えうるもの
+  なら `session-changed` も）を送り、画面は「外部の変更を読み込んだ」で描き直す。プラグインのログには `sync: external edit` の行が出る。
+- 許可はプラグインのエンジンの環境変数 `GLISS_ARA_AI`（DAW を起動するときの環境から引き継ぐ）: `off`（口を開かない）・`read`（読むだけ）・
+  `edit`（既定。編集まで）・`save`（編集と保存・書き出し）。DAW の文書の作り・トラックの増減・保存（`load_project`・`add_track`・`save_project` など。
+  画面が断るものと同じ）は許可に関係なく断る。プラグインの画面にはまだ切り替えが無い。
+- 記録は `%APPDATA%\Gliss\ara-sessions\<エンジンの pid>.json`（接続先・トークン・DAW の pid（プラグインが `GLISS_ARA_HOST_PID` で渡す）・文書の鍵）。
+  エンジンが終わる（DAW が文書を閉じる）と消え、落ちて残ったものは AI 側が pid の生存で無視して消す。
+
+#### 外部の AI からの操作を DAW で確かめる（Fender Studio Pro 8。人の許可を取って）
+
+開発版のプラグインを Studio Pro に載せる手順（ビルドの出力を使う。インストール済みの `%LOCALAPPDATA%\Programs\Common\VST3\Gliss.vst3` は上書きしない）:
+
+1. Studio Pro を閉じる（読み込み中の DLL は上書きできない。プラグインの一覧を取り直させるためにも閉じた状態で置く）。
+2. `<wt>\plugin\build\GlissARA_artefacts\Release\VST3\Gliss.vst3`（フォルダごと）を、Studio Pro の VST3 の探す場所に足すか写す。
+   インストール済みの `Gliss.vst3` と同じ `ARA_FACTORY_ID`・`BUNDLE_ID` なので、両方が探す場所にあると 2 つ並ぶか片方だけが読まれる。
+   確かめる間はインストール済みの置き場を Studio Pro の探す場所から外す（ファイルは消さない）か、Studio Pro がどちらを読んだかをプラグインのログで見る。
+3. Studio Pro を、次の環境変数を付けて起動する（PowerShell から `$env:…='…'` を設定して `& "<Studio Pro の exe>"`）:
+   `GLISS_ENGINE_PYTHON=<main>\.venv\Scripts\python.exe`・`GLISS_ENGINE_CWD=<wt>\engine`（worktree のエンジンを使う）・
+   必要なら `GLISS_ARA_TRACE_DIR=<ログの置き場>`・`GLISS_ARA_AI=edit`（既定と同じ）。
+4. ボーカルのイベントに Gliss を ARA の拡張として挿し、エディタを開く（エンジンが起動し、`%APPDATA%\Gliss\ara-sessions\` に記録ができる）。
+5. Claude Code（`~/.claude.json` の `gliss`。外部のエンジンは main の `engine` でなく worktree の `engine` を読むよう、`PYTHONPATH` か `cwd` を `<wt>\engine` にする）から
+   `ara_documents` → `ara_attach` → `analyze_take` → `shift_pitch` を呼び、再生の音・イベントの上のノート・プラグインの画面（描き直し）が変わること、
+   ソングを保存して開き直しても編集が残ることを確かめる。
+
 ### エディタ（`GlissEditor`・`plugin/src/editor`）
 
 - `GlissEditor` は ARA の `EditorView` のドキュメントから `DocumentBridge`（`plugin/src/ara/DocumentBridge.h`。`GlissDocumentController` が実装する）を `dynamic_cast` で得る。
@@ -133,6 +173,8 @@ DAW がイベントの上に音符を描く・MIDI に書き出す・ほかの�
 | `GLISS_TEST_EDIT` | 試験用の編集。エンジンにつないで最初の修飾を解析した後に 1 回だけ当てる。`{"tool": "shift_pitch", "args": {...}}`・`shift_pitch` の引数そのもの（`{"cents": 100, "start_sec": 0, "end_sec": 5}`）・`shift_pitch:<note_id>:<cents>` |
 | `GLISS_ENGINE_DISABLED` | `1` でエンジンを起動しない（原音のまま。エンジンの要らない検証を速く・利用者の環境のエンジンを起動しないため） |
 | `GLISS_PLUGIN_STATE_FILE` | 画面の設定 `plugin-state.json`（既定 `%APPDATA%\Gliss\plugin-state.json`）の置き場を差し替える（試験で利用者の設定を書かない） |
+| `GLISS_ARA_AI` | 外部の AI に許すこと（`off`・`read`・`edit`（既定）・`save`。上の「外部の AI から操作する」）。エンジンが読む |
+| `GLISS_ARA_SESSIONS_DIR` | 外部の AI の中継の記録の置き場（既定 `%APPDATA%\Gliss\ara-sessions`）。試験で利用者の置き場に書かない。プラグインのエンジンと AI のエンジンで同じ値にする |
 | `GLISS_PLUGIN_WEB_DIR` | 既にあるフォルダ（`<repo>\app\renderer`）を指すと、エディタは画面の資源（`index.html`・`*.js`・`ara-bridge.js`）を埋め込みでなくそのフォルダから要求のたびに読む（ビルドし直さずに画面を直せる）。`ara-bridge.js` は user script なのでエディタを開き直したときに読み直す。このときは F5・Ctrl+R をブラウザの再読み込みに残す（DAW へ渡さない） |
 
 エンジンの起動の設定（`GLISS_ENGINE_PYTHON`・`GLISS_ENGINE_CWD`）は下の「配布版のプラグインがエンジンを見つける順」、エンジン側の環境変数（`VOCAL_ENGINE_WORK_DIR`・`GLISS_F0_ESTIMATOR` など）は AGENTS.md。試験では `VOCAL_ENGINE_WORK_DIR`・`VOCAL_ENGINE_LOG_DIR` を一時フォルダに向ける。
@@ -147,7 +189,17 @@ cmake --build plugin/build --config Release --target GlissARA_VST3
 # 出来るもの: plugin\build\GlissARA_artefacts\Release\VST3\Gliss.vst3\Contents\x86_64-win\Gliss.vst3
 ```
 
-最初の構成で JUCE（約 130 MB）・ARA SDK（サブモジュール込み）・WebView2 の NuGet パッケージ（URL とハッシュを固定）・Signalsmith Stretch と Linear を取る。2 回目以降はネットワークが要らない。`COPY_PLUGIN_AFTER_BUILD` は切ってある（システムの VST3 フォルダに書かない）。
+最初の構成で JUCE（約 130 MB）・ARA SDK（サブモジュール込み）・WebView2 の NuGet パッケージ（URL とハッシュを固定）・Signalsmith Stretch と Linear を取る。2 回目以降はネットワークが要らない。
+
+新しい worktree で取り直さずに、別の worktree の `plugin/build/_deps` を使うとき（2026-10-04 に通した形。`<他>` = その worktree の `plugin/build/_deps`）:
+JUCE・ARA SDK・Signalsmith は `FETCHCONTENT_SOURCE_DIR_*` で指せるが、WebView2 は `JUCE_WEBVIEW2_PACKAGE_LOCATION` を自分の `_deps/nuget` に固定しているので、
+`<他>\nuget` を自分の `plugin/build/_deps/nuget` に写してから指す。`test-plugin.ps1` は VST3 SDK を自分の `_deps\vst3sdk-3.7.11` に探す（無いと取りに行く）ので、それも写す。
+
+```powershell
+cmake -S plugin -B plugin/build -G "Visual Studio 17 2022" -A x64 "-DFETCHCONTENT_SOURCE_DIR_JUCE=<他>/juce-src" "-DFETCHCONTENT_SOURCE_DIR_ARA_SDK=<他>/ara_sdk-src" `
+  "-DFETCHCONTENT_SOURCE_DIR_SIGNALSMITH_STRETCH=<他>/signalsmith_stretch-src" "-DFETCHCONTENT_SOURCE_DIR_SIGNALSMITH-LINEAR=<他>/signalsmith-linear-src" `
+  "-DFETCHCONTENT_SOURCE_DIR_WEBVIEW2=plugin/build/_deps/nuget/Microsoft.Web.WebView2.1.0.4258.31"
+````COPY_PLUGIN_AFTER_BUILD` は切ってある（システムの VST3 フォルダに書かない）。
 同じ構成が `GlissHostCheck`（検証用のホスト）も作る（`-DGLISS_BUILD_HOSTCHECK=OFF` で外せる）。
 
 DAW に載せて試すときは、`Gliss.vst3` を DAW が探す場所に置く（Fender Studio Pro 8 の VST3 の追加の場所に `plugin\build\GlissARA_artefacts\Release\VST3` を足すか、`%CommonProgramFiles%\VST3` へ管理者権限でコピーする。どちらも未確認。実物の DAW での確認は人の許可を取って行う）。配布版はインストーラがユーザーごとの置き場に入れる（下の「配布」）。
@@ -263,6 +315,7 @@ ARA SDK のホスト（`ARATestHost` と `GlissARATest`）は `plugin/tests/arat
 | エンジン: TestHost（全 12 項目） | エンジンにつないだまま全項目が終了コード 0（ドキュメントを作ってすぐ壊す試験でエンジンが残らない） |
 | エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る。ノート: 先に編集なしのドキュメント（リージョン 2 つ。2 つ目はソースの 1.5〜4.2 秒をソングの 10 秒）でホストとして解析を頼んで待ち、ソース・修飾・リージョンのノートがエンジンの `ara_notes` の解析だけのノートと一致して `detected`、2 つ目のリージョンは切って写したもの。編集の後は `adjusted` で、エンジンの編集後のノートと一致し、全部 1 半音上がる。アーカイブから戻した後も同じ |
 | エンジン: **GlissHostCheck `--ara-editor`**（`AraEditorCheck.h`） | JUCE の ARA ホスト（`juce_ARAHosting`）で Gliss.vst3 に本物のドキュメントを作り、インスタンスを全部の役で結び付けてエディタを開く。プラグインのログで、エディタがドキュメントの `DocumentBridge` を得る・画面の `ui-ready`・`bootstrap`・エンジンの起動と修飾の登録・画面の `engineCall`（`list_tracks`・`select_track`・`export_view_data`）の成功・`/fs/` を断っていないことを確かめる |
+| エンジン: **GlissARATest `-relay`** ＋ `verify_ara_relay.py` | 外部の AI の代わり（`plugin/tests/relay_client.py`。別のプロセスの `vocal_engine.mcp` を stdio で起動）が、開いているドキュメントを `ara_documents` で見つけ、`ara_attach` → `analyze_take` → `shift_pitch`（+100 セント）を中継で呼ぶ。編集の前の描画が原音・後の描画がエンジンの `render_region` とサンプル単位で同じ・保存（アーカイブ）に作者 `ai` の changeset・DAW に返すノートが adjusted で 1 半音上・プラグインのログに `sync: external edit`・ドキュメントを閉じたら中継の記録が消える |
 | **GlissHostCheck `--editor`**（`EditorCheck.h`・`FakeDocumentBridge.h`） | Gliss.vst3 を読まず、エディタの画面の部品（`plugin/src/editor`）を**偽の DocumentBridge** につないでこのプロセスの中で画面の外に開く: `app/renderer` が読み込まれ `ui-ready` が来る（その前の知らせは捨てる）・`window.api` と `data-mode=ara`・user script から `/juce/index.js` の動的 import・`engineCall` の往復（`{ok:false}` も値で・別スレッドの completion も）・ほかのネイティブ関数・`/fs/`（空白・`%`・`+`・日本語の名前を読める／外・`..`・無い・フォルダ・知らない資源は拒否）・知らせ 6 種が画面の受け手に届く・F8 は窓へ渡り Space は渡らない・応答の前に閉じても落ちない・2 つ同時に 20 回開閉。`--expect-web-dir` で `GLISS_PLUGIN_WEB_DIR` から読むこと |
 
 どの検証もタイムアウトを持ち、終わりに起動したプロセス（ホスト・WebView2・エンジン）を木ごと止めて、残りが 0 であることを確かめる。
@@ -311,6 +364,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 | `plugin/tests/aratest/` | ARA SDK のホスト（`ARATestHost`）と、その部品で作った通し試験 `GlissARATest` を 1 つのツリーで作る CMake |
 | `plugin/tests/verify_render_trace.py` | 再生の記録を試験信号と突き合わせる（numpy が要る） |
 | `plugin/tests/verify_ara_engine.py` | `GlissARATest` の出力をエンジンの `render_region`・`ara_notes` と突き合わせる（エンジンの python・cwd は engine） |
+| `plugin/tests/relay_client.py`・`verify_ara_relay.py` | `GlissARATest -relay` が起動する外部の AI の代わりと、その出力の確かめ |
 | `plugin/scripts/test-plugin.ps1` | ビルドと検証の一式 |
 
 ## 段階と残り
