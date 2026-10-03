@@ -976,7 +976,7 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 | AudioSource | プラグインが書いたソースの WAV（ソースの周波数・チャンネルのまま） |
 | AudioModification | **ボーカルのトラック 1 本**（`ara_id`。範囲はソース全体、編集の秒はソースの秒）。プロジェクトは `tracks/ara-<ara_id のハッシュ 12 桁>/` |
 | PlaybackRegion | エンジンは知らない（トラックの `offset_sec` = 代表のリージョンでソースの 0 秒が置かれるソングの秒） |
-| MusicalContext | `session.tempo`（`source: "daw"`） |
+| MusicalContext | `session.tempo`（`source: "daw"`。`ara_sync` の `tempo`。プラグインはまだ渡していない） |
 
 - `ara_*` は **`author` を取らず、取り消しの履歴に入れない**（DAW が決めたことを Gliss の Ctrl+Z で戻させない）。
   画面の操作（ガイドの指定・テンポなど）の `session` の項目を Ctrl+Z しても、ARA のトラック（有無・位置・名前・素材）と
