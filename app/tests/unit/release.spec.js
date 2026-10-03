@@ -120,7 +120,8 @@ test('(R6b) アンインストールで更新のキャッシュを消す。た�
   expect(util).toMatch(/ExecWait '"\$uninstallerFileNameTemp" \/S \/KEEP_APP_DATA \$0 _\?=\$installationDir'/);
   // installer.nsh: --updated でないとき（利用者のアンインストール）だけ、更新のキャッシュのフォルダを消す
   const mine = fs.readFileSync(new URL('../../build/installer.nsh', import.meta.url), 'utf8');
-  expect(mine).toMatch(/!macro customUnInstall\s+\$\{ifNot\} \$\{isUpdated\}\s+RMDir \/r "\$LOCALAPPDATA\\gliss-updater"\s+\$\{endIf\}\s+!macroend/);
+  // （DAW のプラグインも同じ条件で消す。(R11)）
+  expect(mine).toMatch(/!macro customUnInstall\s+\$\{ifNot\} \$\{isUpdated\}\s+RMDir \/r "\$LOCALAPPDATA\\gliss-updater"\s+!insertmacro glissRemovePlugin "\$\{GLISS_VST3_DIR\}"\s+\$\{endIf\}\s+!macroend/);
   // フォルダ名は electron-builder が付ける updaterCacheDirName（パッケージ名 + "-updater"）と同じ
   const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
   expect(`${pkg.name}-updater`).toBe('gliss-updater');
@@ -227,4 +228,65 @@ test('(R10b) THIRD_PARTY_NOTICES に Gliss の F0 モデルの学習データの
   // 公開リポジトリの衛生: 個人のパスは書かない
   expect(text).not.toMatch(/[A-Z]:\\(Users|dev)\\/);
   expect(notices({ version: '0.1.0', python: [], node: [] })).not.toContain('VocalSet');
+});
+
+test('(R11) DAW のプラグイン: 同梱・インストーラの置き場・プラグインが読むレジストリのキー', async () => {
+  const yml = fs.readFileSync(new URL('../../electron-builder.yml', import.meta.url), 'utf8');
+  // plugin/build/dist/Gliss.vst3（scripts/build-plugin.mjs）を resources/plugin/Gliss.vst3 に入れる
+  expect(yml).toMatch(/- from: \.\.\/plugin\/build\/dist\/Gliss\.vst3\s+to: plugin\/Gliss\.vst3/);
+  const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+  expect(pkg.scripts.dist).toMatch(/pnpm build:engine && pnpm build:plugin && pnpm prepack:files && electron-builder/);
+  expect(pkg.scripts['prepack:files']).toMatch(/^node \.\.\/scripts\/build-plugin\.mjs --check && /);
+  // インストーラ: ユーザーごとの VST3 の置き場に写し、両方の Gliss.vst3 に gliss-install.json（インストール先）を書く
+  const mine = fs.readFileSync(new URL('../../build/installer.nsh', import.meta.url), 'utf8');
+  expect(mine).toMatch(/!define GLISS_VST3_DIR "\$LOCALAPPDATA\\Programs\\Common\\VST3"/);
+  expect(mine).toMatch(/!macro customInstall\s+!insertmacro glissInstallPlugin "\$\{GLISS_VST3_DIR\}"\s+!macroend/);
+  expect(mine).toMatch(/!insertmacro glissWriteInstallJson "\$INSTDIR\\resources\\plugin\\Gliss\.vst3"/);
+  expect(mine).toMatch(/CopyFiles \/SILENT "\$INSTDIR\\resources\\plugin\\Gliss\.vst3" "\$\{VST3DIR\}"/);
+  expect(mine).toMatch(/"format":"gliss-install","version":1,"installDir":"\$R8"/);
+  // 管理者の置き場（Program Files\Common Files）には書かない
+  expect(mine).not.toMatch(/COMMONFILES|Common Files/i);
+  // プラグインが読むレジストリのキー（electron-builder の INSTALL_REGISTRY_KEY = Software\<appId の UUID v5>）が appId と合う
+  const builder = path.dirname(require.resolve('electron-builder/package.json'));
+  const lib = path.dirname(require.resolve('app-builder-lib/package.json', { paths: [builder] }));
+  const { UUID } = require(require.resolve('builder-util-runtime', { paths: [lib] }));
+  const nsisTarget = fs.readFileSync(path.join(lib, 'out', 'targets', 'nsis', 'NsisTarget.js'), 'utf8');
+  const ns = /ELECTRON_BUILDER_NS_UUID = .*?"([0-9a-f-]{36})"/.exec(nsisTarget)?.[1];
+  expect(ns).toBeTruthy();
+  expect(nsisTarget).toMatch(/const guid = options\.guid \|\| [\w.]*UUID\.v5\(appInfo\.id, ELECTRON_BUILDER_NS_UUID\)/);
+  expect(yml).not.toMatch(/^\s*guid:/m);
+  const appId = /^appId: (\S+)$/m.exec(yml)[1];
+  const cpp = fs.readFileSync(new URL('../../../plugin/src/engine/EngineConfig.cpp', import.meta.url), 'utf8');
+  expect(cpp).toContain(`L"Software\\\\${UUID.v5(appId, ns)}"`);
+  const multiUser = fs.readFileSync(path.join(lib, 'templates', 'nsis', 'multiUser.nsh'), 'utf8');
+  expect(multiUser).toContain('!define /ifndef INSTALL_REGISTRY_KEY "Software\\${APP_GUID}"');
+});
+
+test('(R11b) THIRD_PARTY_NOTICES: プラグインの依存（JUCE の SBOM を辿る・知らない同梱物で止める）', async () => {
+  const { juceVendored, pluginJuceModules, notices, pluginLicenseLines } = await import('../../../scripts/third-party-notices.mjs');
+  const mods = pluginJuceModules();
+  expect(mods).toEqual(expect.arrayContaining(['juce_core', 'juce_audio_plugin_client', 'juce_gui_extra']));
+  expect(mods.some((m) => m.startsWith('juce_recommended'))).toBe(false);
+  const pkg = (name, id, license, sourceInfo) => ({ name, SPDXID: id, versionInfo: '1', licenseDeclared: license, sourceInfo });
+  const juce = 'AGPL-3.0-only OR LicenseRef-JUCE-Commercial';
+  const spdx = {
+    packages: [pkg('juce_core', 'c', juce), pkg('juce_x', 'x', juce), pkg('zlib', 'z', 'Zlib', 'Vendored at modules/juce_core/zip/zlib in the JUCE source tree; provenance'),
+      pkg('ASIO SDK', 'a', 'LicenseRef-Steinberg-ASIO OR GPL-3.0-only', 'Vendored at modules/juce_audio_devices/native/asio in the JUCE source tree'),
+      pkg('Unknown', 'u', 'MIT', 'Vendored at modules/juce_x/unknown in the JUCE source tree')],
+    relationships: [{ spdxElementId: 'c', relationshipType: 'CONTAINS', relatedSpdxElement: 'z' },
+      { spdxElementId: 'c', relationshipType: 'CONTAINS', relatedSpdxElement: 'a' },
+      { spdxElementId: 'x', relationshipType: 'CONTAINS', relatedSpdxElement: 'u' }],
+  };
+  // ASIO（JUCE_ASIO が 0）は入れない。置き場は「Vendored at <dir> in the JUCE source tree」から読む
+  expect(juceVendored(spdx, ['juce_core'])).toEqual([{ name: 'zlib', version: '1', license: 'Zlib', dir: 'modules/juce_core/zip/zlib' }]);
+  // SBOM に知らない同梱物が増えたら、置き場が読めても載せる（入れない一覧にあるものだけ外す）
+  expect(juceVendored(spdx, ['juce_x']).map((v) => v.name)).toEqual(['Unknown']);
+  expect(() => juceVendored(spdx, ['juce_missing'])).toThrow(/juce_missing/);
+  // 節: AGPLv3 で配ることと、対応するソースの場所
+  const info = { juce: { version: '9.0.3' }, araSdk: { version: 'releases/2.3.0' }, webview2: { version: '1.0.4258.31' } };
+  const text = notices({ version: '0.1.0', python: [], node: [], plugin: [{ name: 'JUCE', version: '9.0.3', license: 'AGPL-3.0-only', texts: [] }], pluginInfo: info });
+  expect(text).toContain('DAW のプラグイン（resources/plugin/Gliss.vst3');
+  expect(text).toContain('GNU Affero General Public License version 3');
+  expect(pluginLicenseLines(info).join('\n')).toContain('ARA SDK 2.3.0');
+  expect(notices({ version: '0.1.0', python: [], node: [] })).not.toContain('Gliss.vst3');
 });

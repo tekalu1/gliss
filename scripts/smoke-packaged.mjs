@@ -9,6 +9,7 @@
 //
 // 確かめること:
 //   1. 起動して、同梱のエンジン exe（resources/engine/vocal-engine/vocal-engine.exe）に MCP で接続できる
+//      （DAW のプラグイン resources/plugin/Gliss.vst3 と、その中のライセンスの文書が入っている）
 //   2. 合成した WAV（実素材は使わない）を開いて解析できる（--models があるとき。ノート数・F0 の値）
 //   3. 重みが無いときは落ちずに、画面が「モデルの準備」へ案内する（--open-without-models: その状態で WAV を開いたときの画面）
 // 実素材・利用者の %LOCALAPPDATA% には触れない（LOCALAPPDATA を一時フォルダに差し替えて起動する）。
@@ -111,6 +112,15 @@ async function main() {
     report.main = await app.evaluate(({ app: a }) => ({ isPackaged: a.isPackaged, version: a.getVersion(), name: a.getName(),
       resources: process.resourcesPath, userData: a.getPath('userData'), exe: process.execPath }));
     if (!report.main.isPackaged) fail('app.isPackaged が false（配布版として起動していない）');
+    // DAW のプラグイン（scripts/build-plugin.mjs。インストーラが VST3 の置き場に写す元）と、その中のライセンスの文書
+    const plugin = path.join(report.main.resources, 'plugin', 'Gliss.vst3', 'Contents');
+    const dll = path.join(plugin, 'x86_64-win', 'Gliss.vst3');
+    report.plugin = { dll: fs.existsSync(dll) ? fs.statSync(dll).size : null,
+      resources: fs.existsSync(path.join(plugin, 'Resources')) ? fs.readdirSync(path.join(plugin, 'Resources')).sort() : [] };
+    if (!report.plugin.dll) fail(`DAW のプラグインが入っていない: ${dll}`);
+    for (const f of ['moduleinfo.json', 'NOTICE.txt', 'LICENSE-AGPL-3.0.txt', 'THIRD_PARTY_NOTICES.txt']) {
+      if (!report.plugin.resources.includes(f)) fail(`Gliss.vst3/Contents/Resources/${f} が無い`);
+    }
     await win.waitForFunction(() => !!window.api && !!window.__app, null, { timeout: 120000 });
     const boot = await win.evaluate(() => window.api.bootstrap());
     report.engineReady = boot.engineReady; report.engineError = boot.engineError;
