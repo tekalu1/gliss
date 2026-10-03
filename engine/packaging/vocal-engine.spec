@@ -5,7 +5,7 @@
 #   cd engine\packaging
 #   ..\..\.venv-exe\Scripts\pyinstaller.exe vocal-engine.spec --noconfirm        （フォルダ形式 = dist\vocal-engine\）
 #   set "VE_ONEFILE=1" && ..\..\.venv-exe\Scripts\pyinstaller.exe vocal-engine.spec --noconfirm  （1 ファイル = dist\vocal-engine-onefile.exe。実測用。配布はフォルダ形式）
-# .venv-exe は torch を入れていない環境（本体の .venv とは別。requirements-exe.txt）。重みは同梱しない。
+# .venv-exe は torch を入れていない環境（本体の .venv とは別。requirements-exe.txt）。重みは Gliss の F0 モデル（試作）だけ同梱する。
 import os
 import hashlib
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -17,6 +17,10 @@ hidden = (collect_submodules("vocal_engine")
           + collect_submodules("librosa")          # lazy_loader で遅れて import する
           + collect_submodules("mcp", filter=lambda n: not n.startswith("mcp.cli")))
 datas = collect_data_files("librosa") + collect_data_files("parselmouth")
+# 同梱の重み: Gliss の F0 モデル（試作。135 KB。vocal_engine/analysis/f0.py の GLISS_F0_PATH）。
+# ほかの重み（RMVPE・HubertFA）は同梱しない
+datas.append((os.path.join(ENGINE, "vocal_engine", "analysis", "models", "gliss-f0.onnx"),
+              os.path.join("vocal_engine", "analysis", "models")))
 
 # 実際にパックする Python ソースから版を作る。__version__ を上げ忘れても描画キャッシュを分ける。
 _build_hash = hashlib.sha256()
