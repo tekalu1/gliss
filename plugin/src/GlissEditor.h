@@ -4,12 +4,15 @@
 #include <juce_gui_extra/juce_gui_extra.h>
 
 #include "GlissProcessor.h"
+#include "ara/DocumentBridge.h"
+#include "editor/EditorWebView.h"
 
 namespace gliss
 {
 
-/** プラグインの窓（DAW のエディタ欄）。WebView2 に plugin/web の静的な HTML を出す。
-    ARA の EditorView で選ばれているリージョンを、JS のイベント "selection" で画面へ送る。 */
+/** プラグインの窓（DAW のエディタ欄）。ARA の EditorView に結び付いていれば、ドキュメント（DocumentBridge）につないだ
+    画面（editor::EditorWebView。WebView2 に app/renderer）を出し、EditorView の選択の変化をドキュメントへ渡す。
+    ARA に結び付いていない（ARA に対応しないホスト・普通の VST3 として挿された）ときは、短い案内だけを出す。 */
 class GlissEditor final : public juce::AudioProcessorEditor,
                           private juce::AudioProcessorEditorARAExtension,
                           private juce::ARAEditorView::Listener
@@ -23,25 +26,15 @@ public:
 
     juce::AudioProcessorEditorARAExtension* getARAClientExtensions() override { return this; }
 
-private:
-    /** WebView2 のユーザーデータのフォルダ。プロセスごとの一時フォルダで、最後のエディタが閉じたときに消す。
-        既定の場所は DAW によっては書き込めず、複数の DAW や複数のプロセスで同じフォルダを奪い合うと固まる。 */
-    struct UserDataFolder
-    {
-        UserDataFolder();
-        ~UserDataFolder();
-        juce::File folder;
-    };
+    /** ARA の EditorView のドキュメントの DocumentBridge（GlissDocumentController が実装する）。無ければ nullptr。 */
+    static DocumentBridge* findDocumentBridge (juce::ARAEditorView* editorView);
 
+private:
     // ARAEditorView::Listener
     void onNewSelection (const juce::ARAViewSelection& selection) override;
 
-    static juce::var describeSelection (const juce::ARAViewSelection* selection);
-    void sendSelection();
-
-    juce::SharedResourcePointer<UserDataFolder> userDataFolder;   // webView より先に作り、後に壊す
-    std::unique_ptr<juce::WebBrowserComponent> webView;
-    juce::var latestSelection;
+    DocumentBridge* bridge = nullptr;
+    std::unique_ptr<editor::EditorWebView> webView;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlissEditor)
 };

@@ -1,94 +1,55 @@
 #include "GlissEditor.h"
 
-#include "BinaryData.h"
 #include "Diagnostics.h"
-#include "ProcessUtils.h"
 
 namespace gliss
 {
-
-namespace
-{
-std::optional<juce::WebBrowserComponent::Resource> provideResource (const juce::String& path)
-{
-    if (path != "/" && path != "/index.html")
-        return std::nullopt;
-
-    const auto* data = reinterpret_cast<const std::byte*> (BinaryData::index_html);
-    return juce::WebBrowserComponent::Resource { std::vector<std::byte> (data, data + BinaryData::index_htmlSize), "text/html" };
-}
-}
-
-GlissEditor::UserDataFolder::UserDataFolder()
-{
-    const auto temp = juce::File::getSpecialLocation (juce::File::tempDirectory);
-    const auto prefix = juce::String ("GlissARA-");
-
-    // 終了のときに WebView2 がまだフォルダを掴んでいて消せなかった、前のプロセスの残りを片付ける。
-    for (const auto& old : temp.findChildFiles (juce::File::findDirectories, false, prefix + "*"))
-        if (const auto pid = old.getFileName().substring (prefix.length()).getIntValue(); pid > 0 && ! isProcessRunning (pid))
-            old.deleteRecursively();
-
-    folder = temp.getChildFile (prefix + juce::String (currentProcessId()));
-    folder.createDirectory();
-}
-
-GlissEditor::UserDataFolder::~UserDataFolder()
-{
-    // WebView2 のブラウザプロセスが終わるのを待たないので、消せなければそのままにする。
-    folder.deleteRecursively();
-}
 
 GlissEditor::GlissEditor (GlissProcessor& processor)
     : AudioProcessorEditor (&processor),
       AudioProcessorEditorARAExtension (&processor)
 {
-    using Options = juce::WebBrowserComponent::Options;
+    auto* editorView = getARAEditorView();
+    bridge = findDocumentBridge (editorView);
 
-    const auto options = Options()
-        .withBackend (Options::Backend::webview2)
-        .withWinWebView2Options (Options::WinWebView2()
-                                     .withUserDataFolder (userDataFolder->folder)
-                                     .withBackgroundColour (juce::Colour (0xff1e1e24)))
-        .withNativeIntegrationEnabled()
-        .withResourceProvider (&provideResource)
-        .withEventListener ("ready", [this] (juce::var)
-                            {
-                                diag::log ("editor: page ready");
-                                sendSelection();
-                            });
-
-    if (juce::WebBrowserComponent::areOptionsSupported (options))
+    if (bridge != nullptr)
     {
-        webView = std::make_unique<juce::WebBrowserComponent> (options);
+        webView = std::make_unique<editor::EditorWebView> (*bridge);
         addAndMakeVisible (*webView);
-        webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
-    }
-    else
-    {
-        diag::log ("editor: WebView2 is not available");
-    }
 
-    if (auto* editorView = getARAEditorView())
-    {
         editorView->addListener (this);
-        latestSelection = describeSelection (&editorView->getViewSelection());
+        // 開いた時点の DAW の選択をドキュメントに知らせる（画面は bootstrap / hostState でこれを読む）
+        bridge->editorSelectionChanged (editorView->getViewSelection());
+        diag::log ("editor: opened with a document");
     }
     else
     {
-        latestSelection = describeSelection (nullptr);
+        diag::log (editorView != nullptr ? "editor: the ARA document has no DocumentBridge; showing the notice"
+                                         : "editor: not bound to an ARA document; showing the notice");
     }
 
     // ARA ではエディタをリサイズできることが求められる（ホストの画面に組み込まれるため）。
     setResizable (true, false);
     setResizeLimits (360, 200, 4096, 4096);
-    setSize (640, 360);
+    setSize (bridge != nullptr ? 1100 : 640, bridge != nullptr ? 680 : 360);
 }
 
 GlissEditor::~GlissEditor()
 {
-    if (auto* editorView = getARAEditorView())
-        editorView->removeListener (this);
+    if (bridge != nullptr)
+        if (auto* editorView = getARAEditorView())
+            editorView->removeListener (this);
+
+    webView.reset();
+}
+
+DocumentBridge* GlissEditor::findDocumentBridge (juce::ARAEditorView* editorView)
+{
+    if (editorView == nullptr)
+        return nullptr;
+
+    auto* specialisation = juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController (editorView->getDocumentController());
+    return dynamic_cast<DocumentBridge*> (specialisation);
 }
 
 void GlissEditor::paint (juce::Graphics& g)
@@ -97,9 +58,11 @@ void GlissEditor::paint (juce::Graphics& g)
 
     if (webView == nullptr)
     {
-        g.setColour (juce::Colours::white);
+        g.setColour (juce::Colours::white.withAlpha (0.75f));
         g.setFont (juce::FontOptions (15.0f));
-        g.drawFittedText ("Gliss (ARA)\nWebView2 runtime was not found.", getLocalBounds(), juce::Justification::centred, 3);
+        g.drawFittedText (juce::String::fromUTF8 ("Gliss は ARA の拡張として使います。\n"
+                                                  "ARA に対応した DAW で、オーディオのイベントに挿してください。"),
+                          getLocalBounds().reduced (16), juce::Justification::centred, 4);
     }
 }
 
@@ -111,52 +74,12 @@ void GlissEditor::resized()
 
 void GlissEditor::onNewSelection (const juce::ARAViewSelection& selection)
 {
-    auto description = describeSelection (&selection);
+    // ARA の「メインスレッド」から呼ばれる。JUCE のプラグインではメッセージスレッドと同じ（ARAViewSelection の中身は
+    // この呼び出しの間だけ有効なので、別のスレッドへは移さない）。
+    jassert (juce::MessageManager::existsAndIsCurrentThread());
 
-    // ARA のメインスレッドから呼ばれる。画面（WebView2）はメッセージスレッドでしか触れない。
-    if (juce::MessageManager::getInstance()->isThisTheMessageThread())
-    {
-        latestSelection = std::move (description);
-        sendSelection();
-        return;
-    }
-
-    juce::MessageManager::callAsync ([safeThis = juce::Component::SafePointer<GlissEditor> (this), description = std::move (description)]() mutable
-    {
-        if (safeThis != nullptr)
-        {
-            safeThis->latestSelection = std::move (description);
-            safeThis->sendSelection();
-        }
-    });
-}
-
-void GlissEditor::sendSelection()
-{
-    if (webView != nullptr)
-        webView->emitEventIfBrowserIsVisible ("selection", latestSelection);
-}
-
-juce::var GlissEditor::describeSelection (const juce::ARAViewSelection* selection)
-{
-    juce::Array<juce::var> regions;
-
-    if (selection != nullptr)
-    {
-        for (const auto* region : selection->getPlaybackRegions<juce::ARAPlaybackRegion>())
-        {
-            auto* item = new juce::DynamicObject();
-            item->setProperty ("name", juce::convertOptionalARAString (region->getEffectiveName(), "(unnamed)"));
-            item->setProperty ("startSeconds", region->getStartInPlaybackTime());
-            item->setProperty ("durationSeconds", region->getDurationInPlaybackTime());
-            regions.add (juce::var (item));
-        }
-    }
-
-    auto* root = new juce::DynamicObject();
-    root->setProperty ("isARA", selection != nullptr);
-    root->setProperty ("regions", regions);
-    return juce::var (root);
+    if (bridge != nullptr)
+        bridge->editorSelectionChanged (selection);
 }
 
 } // namespace gliss

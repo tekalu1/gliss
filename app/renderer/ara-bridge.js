@@ -61,9 +61,12 @@
 
   // ---------------------------------------------------------------- ファイルの読み出し（/fs/）
   const fsUrl = (p) => `/fs/${encodeURIComponent(String(p))}`;
+  // JUCE 9.0.3 の resource provider は状態コードを選べない（いつも 200）。C++ は読ませないものをこの MIME で返す
+  const NOT_FOUND = 'application/x-gliss-not-found';
   async function fetchFs(p) {
     const res = await fetch(fsUrl(p));
-    if (!res.ok) throw new Error(`読み取りを許していない場所: ${p}`);
+    const type = (res.headers && typeof res.headers.get === 'function' && res.headers.get('content-type')) || '';
+    if (!res.ok || String(type).startsWith(NOT_FOUND)) throw new Error(`読み取りを許していない場所: ${p}`);
     return res;
   }
 

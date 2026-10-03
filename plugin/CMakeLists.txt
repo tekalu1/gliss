@@ -48,9 +48,22 @@ FetchContent_MakeAvailable(ara_sdk webview2 juce)
 set(JUCE_WEBVIEW2_PACKAGE_LOCATION "${GLISS_NUGET_DIR}" CACHE PATH "WebView2 の NuGet パッケージを置いた場所" FORCE)
 juce_set_ara_sdk_path("${ara_sdk_SOURCE_DIR}")
 
-# ---- 画面（WebView2 に配る静的な HTML。実行ファイルに埋め込む） ----
+# ---- 画面（WebView2 に配る app/renderer。DLL に埋め込む） ----
+# 開発時は環境変数 GLISS_PLUGIN_WEB_DIR のフォルダから要求のたびに読む（src/editor/WebResources）。*.js を足したら構成し直す
+# （CONFIGURE_DEPENDS でビルドのときに拾う）。名前空間を分け、画面のファイル名と部品のファイル名がぶつからないようにする。
+set(GLISS_RENDERER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../app/renderer")
+file(GLOB GLISS_RENDERER_SCRIPTS CONFIGURE_DEPENDS "${GLISS_RENDERER_DIR}/*.js")
 juce_add_binary_data(GlissWebAssets
-    SOURCES web/index.html)
+    HEADER_NAME GlissPageData.h
+    NAMESPACE GlissPageData
+    SOURCES "${GLISS_RENDERER_DIR}/index.html" ${GLISS_RENDERER_SCRIPTS})
+
+# エディタの部品: JUCE の webview-interop（画面の /juce/index.js。getNativeFunction）と、キーを DAW へ渡す user script
+juce_add_binary_data(GlissEditorAssets
+    HEADER_NAME GlissEditorData.h
+    NAMESPACE GlissEditorData
+    SOURCES "${juce_SOURCE_DIR}/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js"
+            src/editor/key-forward.js)
 
 # ---- プラグイン ----
 # ID は appId（io.github.tekalu1.gliss）を基にする。ARA_FACTORY_ID は能力（解析の種類・再生の変形）が変わったら版を上げる。
@@ -104,6 +117,7 @@ target_compile_definitions(GlissARA PUBLIC
 target_link_libraries(GlissARA
     PRIVATE
         GlissWebAssets
+        GlissEditorAssets
         juce::juce_audio_basics
         juce::juce_audio_formats
         juce::juce_audio_plugin_client
