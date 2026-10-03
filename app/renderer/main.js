@@ -38,6 +38,7 @@ import { aiOpen, closeAi, installAiDialog, openAi } from './aidlg.js';
 import { askText } from './askai.js';
 import { commandFor, keysOf, loadOverrides, overrides } from './keys.js';
 import { installFirstRun, setModelSizes, showFirstRun } from './first-run.js';
+import { f0State, onF0Change, refreshF0 } from './f0.js';
 import { addonsOpen, addonsState, closeAddons, installAddons, openAddons } from './addons.js';
 import { adoptDoc, adoptSession, guideSuffix, loadSession, onDoc, phonemeSuffix, setTrack } from './session.js';
 import {
@@ -656,6 +657,8 @@ async function boot() {
     renderToolbar();
     return;
   }
+  onF0Change(syncAppMenu);
+  await refreshF0();              // ピッチ検出の方式（エンジンが実際に使うもの・RMVPE の重みの有無）をメニューのチェックへ
   const { take, guide } = b;
   try {
     if (b.project) {
@@ -714,6 +717,8 @@ window.__app = {
   },
   commands: () => COMMANDS.map((c) => ({ id: c.id, label: c.label, group: c.group, keys: keysOf(c.id) })),
   keyOverrides: () => overrides(),
+  // ピッチ検出の方式（編集 > ピッチ検出の方式）
+  f0: f0State,
   // ホイールの割り当て・つかんだノートのプレビュー音（issue #27）。音は出さずに「鳴らそうとしたもの」を見る
   wheels: () => WHEEL.map((w) => ({ id: w.id, label: w.label, keys: keysOf(w.id) })),
   previewState, previewLog: previewLogOf, clearPreviewLog, previewEnabled, setPreviewEnabled,

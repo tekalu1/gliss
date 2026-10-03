@@ -21,6 +21,7 @@ import { status } from './engine.js';
 import { startRename } from './tracks.js';
 import { guideShown, guideWhy } from './session.js';
 import { asrRangeAt, asrReady, asrWhy, defaultAsrTime, transcribeAt } from './asr.js';
+import { chooseF0, f0State } from './f0.js';
 import {
   accelerator, comboOf, commandFor, keysOf, onKeysChanged, registerDefaults, wheelCombo,
 } from './keys.js';
@@ -124,7 +125,7 @@ const hasFades = () => selectedNotes().some((n) => (n.fade_in_sec || 0) > 0 || (
 
 // ---------------------------------------------------------------- 表
 // [id, 名前, グループ, 既定のキー, 実行, 有効の条件, チェック]
-const GR = { play: '再生・ツール', edit: '編集', note: 'ノート', lyrics: '歌詞', view: '表示', track: 'トラック', file: 'ファイル', help: 'ヘルプ' };
+const GR = { play: '再生・ツール', edit: '編集', f0: 'ピッチ検出の方式', note: 'ノート', lyrics: '歌詞', view: '表示', track: 'トラック', file: 'ファイル', help: 'ヘルプ' };
 export const COMMANDS = [
   ['play', '再生／停止', GR.play, ['Space'], () => (S.playing ? stop() : play())],
   ['tool-main', 'メインツール', GR.play, ['1'], () => setTool('main'), null, () => S.tool === 'main'],
@@ -139,6 +140,12 @@ export const COMMANDS = [
   ['select-all', 'すべて選択', GR.edit, ['Ctrl+A'], () => { S.sel = S.pitched.map((n) => n.id); render(); }, hasNotes],
   ['tempo', 'テンポを入力', GR.edit, [], () => openTempoInput('bpm'), () => S.tracks.length > 0],
   ['keys', 'ショートカット（キー・ホイール）…', GR.edit, ['Ctrl+,'], () => host.openKeys()],
+  // ピッチ（F0）検出の方式（ユーザー設定。替えたら開いているトラックを解析し直す。f0.js）。
+  // チェックはエンジンが実際に使う方式（RMVPE の重みが無ければ Gliss）
+  ['f0-rmvpe', 'RMVPE（既定）', GR.f0, [], () => chooseF0('rmvpe'), () => f0State().rmvpe,
+    () => f0State().effective === 'rmvpe'],
+  ['f0-gliss', 'Gliss（試作）', GR.f0, [], () => chooseF0('gliss'), null, () => f0State().effective === 'gliss'],
+  ['f0-praat', 'Praat', GR.f0, [], () => chooseF0('praat'), null, () => f0State().effective === 'praat'],
 
   ['guide-match', 'ガイドに合わせる…', GR.note, ['G'], (ctx) => { const p = pos(ctx); openPop(p.x, p.y); }, guideShown],
   ['semitone', '半音に合わせる', GR.note, ['Q'], () => snapToSemitone(editable().map((n) => n.id)), () => editable().length > 0],
@@ -285,7 +292,8 @@ const SEP = { sep: true };
 const MENUBAR = [
   ['ファイル', ['new-project', 'open-take', { recent: true, label: '最近使ったプロジェクト' }, SEP, 'save', 'save-as', SEP,
     'add-track', 'open-guide', 'load-lyrics', 'import-lyrics', SEP, 'export', 'export-as', SEP, { role: 'quit', label: '終了' }]],
-  ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'keys']],
+  ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes',
+    { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
   ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute',
     SEP, 'ask-ai']],
   ['表示', ['guide-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
@@ -305,21 +313,21 @@ export function undoLabels() {
 
 export function appMenuTemplate() {
   const { u, rd } = undoLabels();
-  return MENUBAR.map(([label, items]) => ({
-    label,
-    submenu: items.map((it) => {
-      if (typeof it !== 'string') return it;
-      const c = byId.get(it);
-      let l = c.label;
-      // 有効の条件は右クリックのメニュー・キーと同じ（選択が変わると描き直しで送り直す）
-      let en = isEnabled(it);
-      if (it === 'undo') { l = u ? `元に戻す: ${u}` : '元に戻す'; en = !!u; }
-      if (it === 'redo') { l = rd ? `やり直す: ${rd}` : 'やり直す'; en = !!rd; }
-      const k = keysOf(it)[0];
-      return { cmd: it, label: l, accelerator: accelerator(k), enabled: en,
-        ...(c.checked ? { checked: !!c.checked() } : {}) };
-    }),
-  }));
+  const item = (it) => {
+    if (it.submenu) return { label: it.label, submenu: it.submenu.map(item) };
+    if (typeof it !== 'string') return it;
+    const c = byId.get(it);
+    let l = c.label;
+    // 有効の条件は右クリックのメニュー・キーと同じ（選択が変わると描き直しで送り直す）
+    let en = isEnabled(it);
+    if (it === 'undo') { l = u ? `元に戻す: ${u}` : '元に戻す'; en = !!u; }
+    if (it === 'redo') { l = rd ? `やり直す: ${rd}` : 'やり直す'; en = !!rd; }
+    if (it === 'f0-rmvpe' && !en) l = 'RMVPE（モデル未取得）';
+    const k = keysOf(it)[0];
+    return { cmd: it, label: l, accelerator: accelerator(k), enabled: en,
+      ...(c.checked ? { checked: !!c.checked() } : {}) };
+  };
+  return MENUBAR.map(([label, items]) => ({ label, submenu: items.map(item) }));
 }
 
 let lastMenu = '';
