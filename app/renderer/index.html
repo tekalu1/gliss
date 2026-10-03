@@ -132,17 +132,21 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 .pop button.ok{margin-top:6px;background:#2f2f34;border:0;color:var(--fg);font:inherit;padding:3px 14px;cursor:pointer;float:right}
 .pop button.ok:hover{background:#3a3a40}
 #roll{display:block;width:100%;flex:1 1 auto;min-height:0}
-/* トラックビュー（上）。モック proposal/track-view.html と同じ。見出しは 名前・ガイド・M・S だけ */
-#tv{flex:none;overflow:hidden;display:flex;flex-direction:column}
+/* トラックビュー（上）。モック proposal/track-view.html と同じ。見出しは 1 段目が 名前・ガイド・M・S、2 段目が音量・パン。
+   幅は --hw（tracks.js が決める。既定 160 px）。高さ 40 px 未満（.short）は 2 段目を畳み、150 px 未満（.narrow）は dB の数字を隠す */
+#tv{flex:none;overflow:hidden;display:flex;flex-direction:column;position:relative;--hw:160px}
 #tv[hidden],#split[hidden]{display:none}
 #tvBody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#2a2a2e transparent}
 .rr{display:flex;height:20px;position:sticky;top:0;z-index:1;background:#111113}
-.rhd{width:160px;flex:none}
+.rhd{width:var(--hw,160px);flex:none}
 #tvRuler{flex:1;display:block;height:20px;min-width:0}
 .rows{display:flex}
-#heads{width:160px;flex:none}
+#heads{width:var(--hw,160px);flex:none}
 #lanes{flex:1;display:block;min-width:0}
-.th{height:var(--th,44px);display:flex;align-items:center;gap:1px;padding:0 6px 0 10px;border-top:1px solid #232326;color:var(--fg2)}
+.th{height:var(--th,44px);display:flex;flex-direction:column;justify-content:center;gap:1px;padding:0 6px 0 10px;border-top:1px solid #232326;color:var(--fg2)}
+.th .r1{display:flex;align-items:center;gap:1px;height:20px;min-width:0;flex:none}
+.th .r2{display:flex;align-items:center;gap:6px;height:16px;padding-right:2px;min-width:0;flex:none}
+#tv.short .th .r2{display:none}
 .th.vocal{cursor:pointer}
 .th.cur{background:#1a1a1d;color:var(--sel)}
 .th.off .nm{color:var(--fg3)}
@@ -156,6 +160,34 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 .th .g[aria-pressed="true"]{background:none;color:var(--sel)}
 .th svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block}
 .th .gx{width:20px;flex:none}
+/* 音量のスライダー（3 乗に近い目盛り。縦線が 0 dB）とパンのノブ。聞こえないトラックは薄く（値は残す） */
+.vol{position:relative;flex:1;min-width:36px;height:16px;cursor:ew-resize;outline:none;touch-action:none}
+.vol .tr{position:absolute;left:0;right:0;top:7px;height:2px;background:#2a2a2e;border-radius:1px}
+.vol .fi{position:absolute;left:0;top:7px;height:2px;background:#6a6a70;border-radius:1px}
+.th.cur .vol .fi{background:#8f8f94}
+.vol .z{position:absolute;top:4px;width:1px;height:8px;background:#3a3a3e}
+.vol .kn{position:absolute;top:3px;width:6px;height:10px;margin-left:-3px;border-radius:1.5px;background:#a4a4aa;box-shadow:0 0 0 1px #111113}
+.vol:hover .kn,.vol.drag .kn{background:var(--sel)}
+.vol:focus-visible .kn{outline:1px solid var(--sel);outline-offset:1px}
+.th .vv{flex:none;width:30px;text-align:right;font-size:10.5px;color:var(--fg3);font-variant-numeric:tabular-nums;line-height:16px}
+.th .vv.chg{color:var(--fg2)}
+#tv.narrow .th .vv{display:none}
+.pan{flex:none;width:16px;height:16px;cursor:ns-resize;outline:none;touch-action:none;border-radius:50%}
+.pan svg{width:16px;height:16px;display:block;stroke-linecap:round;fill:none}
+.pan .bg{stroke:#3a3a3e;stroke-width:2}
+.pan .arc{stroke:#8f8f94;stroke-width:2}
+.pan .ind{stroke:#c8c8cc;stroke-width:1.5}
+.pan:hover .ind,.pan.drag .ind{stroke:var(--sel)}
+.pan:focus-visible{outline:1px solid var(--sel);outline-offset:1px}
+.th.off .vol,.th.off .pan,.th.off .vv{opacity:.45}
+/* ドラッグ中の値の吹き出し（音量・パン・見出しの幅） */
+#tvBub{position:absolute;z-index:5;pointer-events:none;background:#232326;color:var(--sel);font-size:11px;line-height:17px;padding:0 6px;border-radius:2px;box-shadow:0 4px 12px rgba(0,0,0,.5);white-space:nowrap;font-variant-numeric:tabular-nums;transform:translate(-50%,-100%)}
+#tvBub[hidden]{display:none}
+/* 見出しとレーンの境目: 1 px の線。ドラッグで幅、ダブルクリックで既定（#split と同じ見た目） */
+#hsz{position:absolute;top:0;bottom:0;left:calc(var(--hw,160px) - 2px);width:5px;cursor:col-resize;z-index:3;touch-action:none;outline:none}
+#hsz::after{content:"";position:absolute;top:0;bottom:0;left:2px;width:1px;background:#2a2a2e}
+#hsz:hover::after,#hsz.on::after{background:#56565c}
+#hsz:focus-visible::after{background:var(--sel)}
 /* 裏の準備の印（tracks.js の prepMark。issue #63）: 名前の右に小さく。準備中 = 進み具合の輪、待ち = 点線の輪、失敗 = !（対応付けの失敗 #32 は薄く） */
 .th .pp{flex:none;width:12px;height:12px;margin:0 3px 0 2px;display:inline-flex;align-items:center;justify-content:center;cursor:default}
 .th .pp:empty{display:none}
@@ -272,16 +304,20 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 .toast.on{opacity:1;transform:translate(-50%,0)}
 /* 子音・息（音程の無いノート）: 乗っている・つかんでいる間はやや濃く（issue #35） */
 #roll .npg:hover path[data-nopitch],#roll .npg.hov path[data-nopitch]{fill-opacity:.26}
-/* 無音にしたノート（Del）: 帯を薄く */
-#roll .nb.muted .blob{fill-opacity:.1}
-#roll .nb.muted:hover .blob,#roll .nb.muted.hov .blob{fill-opacity:.16}
-#roll .nb.muted.sel .blob{fill-opacity:.24}
+/* 無音のノート（Del・ミュートツール）: 点線の輪郭と薄い塗り（ピッチの線は draw.js が灰色にする） */
+#roll .nb.muted .blob,#roll .npg.muted path[data-nopitch]{fill-opacity:.06;stroke:#8f8f94;stroke-opacity:.7;stroke-width:1;stroke-dasharray:3 2.5}
+#roll .nb.muted:hover .blob,#roll .nb.muted.hov .blob,#roll .npg.muted:hover path[data-nopitch],#roll .npg.muted.hov path[data-nopitch]{fill-opacity:.12;stroke-opacity:.95}
+#roll .nb.muted.sel .blob,#roll .npg.muted.sel path[data-nopitch]{fill-opacity:.18}
 /* ツールのカーソル（鉛筆・はさみ）。blob の cursor:move などより優先 */
 #roll.tool-draw rect[data-note],#roll.tool-draw path,#roll.tool-draw{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z' stroke='%23111' stroke-width='3.2'/><path d='m15 5 4 4' stroke='%23111' stroke-width='3.2'/><path d='M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='m15 5 4 4' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 3 21,crosshair!important}
 #roll.tool-cut rect[data-note],#roll.tool-cut rect[data-join],#roll.tool-cut{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M20 4 8.12 15.88' stroke='%23111' stroke-width='3.2'/><path d='M14.47 14.48 20 20' stroke='%23111' stroke-width='3.2'/><path d='M8.12 8.12 12 12' stroke='%23111' stroke-width='3.2'/><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M20 4 8.12 15.88' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M14.47 14.48 20 20' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M8.12 8.12 12 12' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 12 12,crosshair!important}
-#roll.tool-draw rect[data-lane],#roll.tool-cut rect[data-lane]{cursor:text!important}
+#roll.tool-mute rect[data-note],#roll.tool-mute{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M11 5 6 9H3v6h3l5 4z' stroke='%23111' stroke-width='3.2'/><path d='m22 9-6 6M16 9l6 6' stroke='%23111' stroke-width='3.2'/><path d='M11 5 6 9H3v6h3l5 4z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='m22 9-6 6M16 9l6 6' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 6 12,pointer!important}
+#roll.tool-draw rect[data-lane],#roll.tool-cut rect[data-lane],#roll.tool-mute rect[data-lane]{cursor:text!important}
+/* トラックビュー（上）のはさみ・ミュート: クリップに乗ったときだけツールのカーソル（外は矢印） */
+#lanes.cur-cut{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M20 4 8.12 15.88' stroke='%23111' stroke-width='3.2'/><path d='M14.47 14.48 20 20' stroke='%23111' stroke-width='3.2'/><path d='M8.12 8.12 12 12' stroke='%23111' stroke-width='3.2'/><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M20 4 8.12 15.88' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M14.47 14.48 20 20' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M8.12 8.12 12 12' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 12 12,crosshair!important}
+#lanes.cur-mute{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M11 5 6 9H3v6h3l5 4z' stroke='%23111' stroke-width='3.2'/><path d='m22 9-6 6M16 9l6 6' stroke='%23111' stroke-width='3.2'/><path d='M11 5 6 9H3v6h3l5 4z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='m22 9-6 6M16 9l6 6' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 6 12,pointer!important}
 /* 鍵盤とルーラー（タイムスケール）の上はどのツールでも矢印（issue #6） */
-#roll.tool-draw rect[data-scale],#roll.tool-cut rect[data-scale],#roll.tool-draw rect[data-keys],#roll.tool-cut rect[data-keys]{cursor:default!important}
+#roll.tool-draw rect[data-scale],#roll.tool-cut rect[data-scale],#roll.tool-mute rect[data-scale],#roll.tool-draw rect[data-keys],#roll.tool-cut rect[data-keys],#roll.tool-mute rect[data-keys]{cursor:default!important}
 .lyr{position:absolute;z-index:3;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55);padding:0}
 .lyr[hidden]{display:none}
 .lyr input{width:100%;background:#1c1c1f;border:1px solid #3a3a3e;color:var(--fg);font:inherit;font-size:13px;padding:6px 8px;outline:none}
@@ -340,6 +376,7 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
     <button id="bToolMain" aria-label="メインツール（1）" title="メインツール（1）" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5 18.5 12l-6 1.5-3 5.5z"/></svg></button>
     <button id="bToolDraw" aria-label="鉛筆（2）: ピッチを描く" title="鉛筆（2）: ピッチを描く" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z"/><path d="m15 5 4 4"/></svg></button>
     <button id="bToolCut" aria-label="はさみ（3）: ノートを分ける" title="はさみ（3）: ノートを分ける（境目をダブルクリックで結合）" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg></button>
+    <button id="bToolMute" aria-label="ミュート（4）: クリックで無音にする／戻す" title="ミュート（4）: クリックで無音にする／戻す（なぞるとまとめて）" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/></svg></button>
     <span class="grp"></span>
     <button id="bUndo" aria-label="元に戻す（Ctrl+Z）" title="元に戻す（Ctrl+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
     <button id="bRedo" aria-label="やり直す（Ctrl+Shift+Z）" title="やり直す（Ctrl+Shift+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
@@ -376,6 +413,8 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
       <div class="rr"><div class="rhd"></div><svg id="tvRuler" aria-hidden="true"></svg></div>
       <div class="rows"><div id="heads"></div><svg id="lanes" role="img" aria-label="トラック"></svg></div>
     </div>
+    <div id="hsz" role="separator" aria-orientation="vertical" aria-label="トラックの見出しの幅" tabindex="0" title="ドラッグで見出しの幅を変える（ダブルクリックで既定）"></div>
+    <div id="tvBub" aria-hidden="true" hidden></div>
   </div>
   <div id="split" role="separator" aria-orientation="horizontal" aria-label="トラックビューとエディタービューの境界" hidden></div>
   <svg id="roll" role="img" aria-label="ピアノロール"></svg>

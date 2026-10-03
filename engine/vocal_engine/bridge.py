@@ -40,8 +40,9 @@ EDIT_TOOLS = frozenset({
     "set_lyrics", "import_lyrics", "set_note_syllable",
     "shift_pitch", "set_pitch_curve", "move_note", "stretch", "move_boundary", "correct_to_guide",
     "set_transition", "split_note", "merge_notes", "apply_plan", "set_connection",
-    "mute_notes", "set_fade", "reset_to_original", "undo", "redo",
+    "mute_notes", "unmute_notes", "set_fade", "reset_to_original", "undo", "redo",
     "add_track", "remove_track", "set_track", "set_guide_track", "set_tempo",
+    "split_track", "join_track", "mute_track_range",
 })
 # 保存・書き出し: ユーザーのファイルを書く（プロジェクトの中の一時ファイル = render_preview などは対象外）。
 # prepare_asr_model は数 GB の聞き取り用モデルをダウンロードしてディスクに書くので、AI が勝手に落とさないようこちら

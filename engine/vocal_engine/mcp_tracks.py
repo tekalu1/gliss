@@ -23,7 +23,8 @@ from . import log
 from . import mcp_server as _srv
 from . import prep
 from .project import Project, ProjectError
-from .project.session import SessionError
+from .project.session import (CUT_EPS, CUT_MIN_EDGE, MUTE_MIN, SessionError, covered, norm_gain_db, norm_mutes,
+                              norm_pan, pieces_of, subtract_range)
 
 _ok = _srv._ok
 _tool = _srv._tool
@@ -114,6 +115,23 @@ def current_offset_sec():
         return float(t["offset_sec"])
     except ProjectError:
         return 0.0
+
+
+def current_mutes():
+    """編集対象のトラックの、クリップで消している区間（トラックの頭が 0 の秒。書き出しで 0 にする）。"""
+    s = _srv._state.get("session")
+    tid = current_track_id()
+    if s is None or not tid:
+        return []
+    try:
+        s.reload_if_changed()
+        t = s.track(tid)
+        p = _srv._state.get("project")
+        if p is None or os.path.normcase(p.dir) != os.path.normcase(s.project_dir_of(t)):
+            return []
+        return [list(m) for m in t.get("mutes") or []]
+    except ProjectError:
+        return []
 
 
 def summary(s=None, extra=None):
@@ -238,6 +256,8 @@ def list_tracks() -> dict:
     offset_sec: **タイムライン上の位置**（音源全体をずらした量。既定 0 = 曲頭 0:00 起点）。
     編集の秒（list_notes などの秒）は、そのトラックの頭が 0（タイムラインの秒 = offset_sec + 編集の秒）。
     guide_stale: 編集対象のプロジェクトのガイドが古い（外部でガイド・位置を変えた。select_track で開き直す）。
+    cuts: クリップを分けた切れ目（トラックの頭が 0 の秒。split_track / join_track）。
+    mutes: クリップで消している区間 [[始め, 終わり]…]（同じ秒。mute_track_range。再生・書き出しで鳴らさない）。
     """
     s = _session()
     return _ok(**summary(s))
@@ -336,9 +356,13 @@ def remove_track(track_id: str, author: str = "ai") -> dict:
 @_guarded
 def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = None,
               solo: bool = None, offset_sec: float = None, index: int = None,
-              author: str = "ai") -> dict:
-    """トラックの名前・種類・ミュート／ソロ・**位置**・**並び順**を変える（渡したものだけ）。
-    名前・種類・位置・並び順は取り消せる（undo）。ミュート／ソロは取り消しの対象外（聴き比べの操作。DAW と同じ）。
+              gain_db: float = None, pan: float = None, author: str = "ai") -> dict:
+    """トラックの名前・種類・ミュート／ソロ・**音量・パン**・**位置**・**並び順**を変える（渡したものだけ）。
+    名前・種類・位置・並び順は取り消せる（undo）。ミュート／ソロ・音量・パンは取り消しの対象外（聴き比べの操作。DAW と同じ）。
+
+    gain_db: トラックの音量（dB。既定 0。−60〜+6 に丸め、−60 以下は無音 = −∞）。**再生（画面）だけに効く**
+      （書き出し・render_tracks の音のファイルには入らない）。session（.gliss）には保存する
+    pan: トラックのパン（−1 = 左いっぱい 〜 +1 = 右いっぱい、既定 0）。再生だけに効く
 
     offset_sec: タイムライン上の位置（秒。負も可）。**音源全体を非破壊でずらす**（ファイルは書き換えない）。
       編集は音と一緒に動く（編集の秒はトラックの頭が 0 のまま）。ガイドとの対応はタイムライン上の位置で
@@ -362,6 +386,9 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
         s.tracks = order
     if offset_sec is not None and not np.isfinite(float(offset_sec)):
         raise SessionError("offset_sec が数ではない")
+    for key, val in (("gain_db", gain_db), ("pan", pan)):
+        if val is not None and not np.isfinite(float(val)):
+            raise SessionError("%s が数ではない" % key)
     if kind is not None:
         if kind not in ("vocal", "inst"):
             raise SessionError("kind は vocal か inst")
@@ -378,6 +405,10 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
         t["mute"] = bool(mute)
     if solo is not None:
         t["solo"] = bool(solo)
+    if gain_db is not None:
+        t["gain_db"] = norm_gain_db(gain_db)
+    if pan is not None:
+        t["pan"] = norm_pan(pan)
     if offset_sec is not None:
         v = float(offset_sec)
         if not np.isfinite(v):
@@ -394,6 +425,97 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
     _schedule(s)                                 # 位置が変わればガイドとの組み合わせも変わる
     return _ok(track=dict(t), reopened=reopened, session=summary(s),
                next=("analyze_take を呼ぶ（ガイドとの位置が変わった）" if reopened else None))
+
+
+# ---------------------------------------------------------------- クリップを分ける・部分を消す（トラックビューのはさみ・ミュート）
+def _finish_clip_edit(s, label, t, before, cur0, author, group=None):
+    _record_session(s, label, t["id"], before, cur0, cur0, author, group=group)
+    s.save()
+    return _ok(track=dict(t), session=summary(s))
+
+
+def _sec(v, name):
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        raise SessionError("%s が数ではない" % name)
+    if not np.isfinite(x):
+        raise SessionError("%s が数ではない" % name)
+    return x
+
+
+@_tool
+@_guarded
+def split_track(track_id: str, sec: float, author: str = "ai") -> dict:
+    """トラックのクリップを 1 か所で分ける（切れ目を足す）。取り消せる（undo「クリップを分ける」）。
+
+    sec: **トラックの頭が 0 の秒**（編集の秒と同じ。タイムラインの秒 − offset_sec）。両端から 20 ms より内側だけ。
+    切れ目は「部分」の境目になるだけで、音は変わらない。部分ごとに mute_track_range で消せる。
+    切れ目と消した部分は、トラックの位置（offset_sec）を動かすと一緒に動く。
+    """
+    s = _session()
+    before, cur0 = s.snapshot(), current_track_id()
+    t = s.track(track_id)
+    v = round(_sec(sec, "sec"), 6)
+    dur = float(t["duration_sec"])
+    if v < CUT_MIN_EDGE or v > dur - CUT_MIN_EDGE:
+        raise SessionError("端に近すぎる（両端から %d ms 以上内側で分ける。長さ %.3f 秒）"
+                           % (round(CUT_MIN_EDGE * 1000), dur))
+    if any(abs(c - v) < CUT_EPS for c in t["cuts"]):
+        raise SessionError("もう切れている: %.3f 秒" % v)
+    t["cuts"] = sorted(t["cuts"] + [v])
+    return _finish_clip_edit(s, "クリップを分ける", t, before, cur0, author)
+
+
+@_tool
+@_guarded
+def join_track(track_id: str, sec: float, tolerance_sec: float = 0.05, author: str = "ai") -> dict:
+    """secの近く（tolerance_sec 以内）にある切れ目をつなぐ。取り消せる（undo「クリップをつなぐ」）。
+
+    つないだ部分は、両側が消えていれば消したまま、片側だけが消えていたら戻す（DAW で結合したときと同じ）。
+    """
+    s = _session()
+    before, cur0 = s.snapshot(), current_track_id()
+    t = s.track(track_id)
+    v = _sec(sec, "sec")
+    near = [c for c in t["cuts"] if abs(c - v) <= max(CUT_EPS, float(tolerance_sec))]
+    if not near:
+        raise SessionError("%.3f 秒の近くに切れ目が無い（list_tracks の cuts で確認）" % v)
+    c = min(near, key=lambda x: abs(x - v))
+    ps = pieces_of(t["cuts"], t["duration_sec"])
+    i = t["cuts"].index(c)
+    left, right = ps[i], ps[i + 1]
+    t["cuts"] = [x for x in t["cuts"] if x != c]
+    if not (covered(t["mutes"], *left) and covered(t["mutes"], *right)):
+        t["mutes"] = norm_mutes(subtract_range(t["mutes"], left[0], right[1]), t["duration_sec"])
+    return _finish_clip_edit(s, "クリップをつなぐ", t, before, cur0, author)
+
+
+@_tool
+@_guarded
+def mute_track_range(track_id: str, start_sec: float, end_sec: float, mute: bool = True,
+                     group: str = None, author: str = "ai") -> dict:
+    """トラックの [start_sec, end_sec] を消す（mute=True）／戻す（False）。取り消せる（undo「部分のミュート」「部分を戻す」）。
+
+    start_sec / end_sec: **トラックの頭が 0 の秒**。消した区間は再生で鳴らさない（伴奏にも効く。5 ms のフェード）。
+    編集対象のボーカルでは、書き出し（export_wav）もその区間を 0 にする（前後 5 ms をフェード）。
+    ピアノロールのノートの「無音」（mute_notes）とは別のもの（編集ではなくクリップの状態）。
+    group: 続けて呼ぶ操作（画面のなぞって消す）で同じ値を渡すと、取り消しの履歴で 1 回にまとまる。
+    """
+    s = _session()
+    before, cur0 = s.snapshot(), current_track_id()
+    t = s.track(track_id)
+    a, b = _sec(start_sec, "start_sec"), _sec(end_sec, "end_sec")
+    dur = float(t["duration_sec"])
+    a, b = max(0.0, min(a, b)), min(dur, max(a, b))
+    if b - a < MUTE_MIN:
+        raise SessionError("区間が短すぎる（%.3f〜%.3f 秒。長さ 0〜%.3f 秒の中で）" % (a, b, dur))
+    if mute:
+        t["mutes"] = norm_mutes(t["mutes"] + [[a, b]], dur)
+    else:
+        t["mutes"] = norm_mutes(subtract_range(t["mutes"], a, b), dur)
+    return _finish_clip_edit(s, "部分のミュート" if mute else "部分を戻す", t, before, cur0, author,
+                             group=group)
 
 
 @_tool
@@ -969,4 +1091,4 @@ def render_tracks(track_ids: list = None, backend: str = "praat", background: bo
 
 
 TOOLS = [list_tracks, select_track, add_track, remove_track, set_track, set_guide_track,
-         set_tempo, track_overview, render_tracks]
+         split_track, join_track, mute_track_range, set_tempo, track_overview, render_tracks]

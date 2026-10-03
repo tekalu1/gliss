@@ -44,7 +44,7 @@ import { adoptDoc, adoptSession, guideSuffix, loadSession, onDoc, phonemeSuffix,
 import {
   addTrackFile, installTracks, isDragging, prepOf, removeTrack, renameTrack, renderTracks, selectTrack, setGuide,
   setKind, setTrackHeight, setViewTimeline, soundRegion, TRACK_H, trackHeight, tracksState, tvT, tvX,
-  commitOrder, panTracks, setTracksView, tracksView, zoomTracks,
+  commitOrder, panTracks, setTracksView, tracksView, zoomTracks, savedHeadWidth, setHeadWidth,
 } from './tracks.js';
 import { ARA, araAfterSession, araBoot, araFeatures } from './ara.js';
 
@@ -59,7 +59,7 @@ function saveView() {
   clearTimeout(saveView._t);
   saveView._t = setTimeout(() => {
     savedView = { t0: S.view.t0, span: S.view.span, take: S.take?.path || null,
-      pv: S.pv ? { ...S.pv } : null, trackH: trackHeight(), tv: tracksView() };
+      pv: S.pv ? { ...S.pv } : null, trackH: trackHeight(), tv: tracksView(), headW: savedHeadWidth() };
     window.api.saveState({ view: savedView });
   }, 400);
 }
@@ -701,6 +701,7 @@ async function boot() {
   syncAppMenu();
   savedView = (b.view && b.view.span > 0) ? b.view : null;   // 前回のズーム・スクロール位置
   if (savedView?.trackH) setTrackHeight(savedView.trackH);
+  if (b.view?.headW) setHeadWidth(b.view.headW, { save: false });   // 見出しの幅（全体で 1 つ）
   if (ARA) {
     // プラグイン: 開く操作は DAW が持つ。DAW の選択のトラックを選んで解析し、描く（ara.js の araBoot）
     onF0Change(syncAppMenu);
@@ -753,7 +754,7 @@ window.__app = {
   tracksState, selectTrack, setGuide, setViewTimeline, soundRegion, renderTracks, tvX, tvT,
   addTrackFile, removeTrack, setKind, renameTrack,
   // トラックの並び順（issue #38）・上の横の表示範囲（issue #39）
-  commitOrder, zoomTracks, panTracks, tracksView, setTracksView,
+  commitOrder, zoomTracks, panTracks, tracksView, setTracksView, setHeadWidth,
   // 右クリックのメニューとコマンド（issue #17）・キーボードショートカットの設定（issue #22）
   runCommand, menuItems, openKeys, closeKeys, keysOpen, appMenuTemplate,
   // AI とつなぐ（ヘルプ > AI とつなぐ…）・右クリックの「AI に頼む」の文・AI の編集の印（ノートの縁）
@@ -811,7 +812,7 @@ window.__app = {
   gridLines: () => [...document.querySelectorAll('#roll [data-grid]')].map((l) => ({ x: +l.getAttribute('x1'), l: +l.dataset.grid })),
   // フェード（issue #20）
   fadeInfo,
-  local: () => ({ fade: [...S.local.fade.entries()] }),
+  local: () => ({ fade: [...S.local.fade.entries()], mute: [...S.local.mute.entries()] }),
   phonemes: () => (S.ph?.phonemes || []).map((p) => ({
     id: p.id, text: p.text, kana: p.kana, label: p.label,
     start: p.edited_start_sec, end: p.edited_end_sec,
@@ -849,7 +850,7 @@ window.__app = {
   edgeInfo,
   zoomReset,
   pitchView: () => (S.pv ? { ...S.pv } : null),
-  trackHeight,
+  trackHeight, setTrackHeight,
   edgeHover: () => (S.edgeHover ? { ...S.edgeHover } : null),
   /** 編集前の秒 → 編集後の秒（確定済み）と、計画のプレビューでの行き先（テスト用）。 */
   toEdited,

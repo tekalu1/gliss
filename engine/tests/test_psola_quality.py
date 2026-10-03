@@ -107,18 +107,24 @@ def _renderer(clip):
     return Renderer(x, sr, f0r.f0, f0r.voiced, f0r.hop_s, backend="psola"), x, sr
 
 
-def test_seam_of_near_identity_edit_is_transparent(clip_c):
+@pytest.mark.parametrize("align_ms", [0.0, 5.0])
+def test_seam_of_near_identity_edit_is_transparent(clip_c, monkeypatch, align_ms):
     """ほぼ無編集（+0.001 セント）の区間を差し込んでも、境界 ±10 ms は原音と同じ。
 
-    旧版は原音との相対誤差 0.77〜0.87（境界で原音の継ぎ足し＋等パワーの重ね）。"""
+    旧版は原音との相対誤差 0.77〜0.87（境界で原音の継ぎ足し＋等パワーの重ね）。
+    位相をそろえない（align_ms = 0）なら両端の境界が透明。そろえるとき（既定）は、頭の境界は原音に
+    そろえてほぼ透明になる。尻の境界は保証しない（再合成した区間の位相は無声をまたぐなどで区間の中でずれていくので、
+    頭と尻が同時にそろうとは限らない。そろわないときは従来どおり等パワーで混ざる）。"""
+    from vocal_engine.render import pipeline as P
     from vocal_engine.render.pipeline import Segment
+    monkeypatch.setattr(P, "ALIGN_MAX_MS", align_ms)
     r, x, sr = _renderer(clip_c)
     dur = len(x) / sr
     y, _ = r.render_range(0.0, dur, [Segment(0.5, 1.16029, cents=1e-3)])
-    for b in (0.5, 1.16029):
+    for b in ((0.5, 1.16029) if align_ms == 0.0 else (0.5,)):
         c, h = int(round(b * sr)), int(0.010 * sr)
         err = np.sqrt(np.mean((y[c - h:c + h] - x[c - h:c + h]) ** 2) / np.mean(x[c - h:c + h] ** 2))
-        assert err < 0.02, "境界 %.3f s の相対誤差 %.3f" % (b, err)
+        assert err < (0.3 if align_ms else 0.02), "境界 %.3f s の相対誤差 %.3f" % (b, err)
 
 
 def test_seam_of_pitch_edit_has_no_level_bump(clip_c):

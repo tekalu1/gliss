@@ -124,6 +124,109 @@ def _same_clip_dict(a, b):
             and abs(float(a["length_sec"]) - float(b["length_sec"])) < 1e-6)
 
 
+GAIN_MIN_DB = -60.0     # これ以下は無音（−∞）
+GAIN_MAX_DB = 6.0
+
+
+def norm_gain_db(v):
+    """トラックの音量（dB）。0 を既定に、−60〜+6 に丸める（−60 は無音 = −∞）。"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v:
+        return 0.0
+    return round(max(GAIN_MIN_DB, min(GAIN_MAX_DB, v)), 3)
+
+
+def norm_pan(v):
+    """トラックのパン（−1 = 左いっぱい 〜 +1 = 右いっぱい。0 = 中央）。"""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if v != v:
+        return 0.0
+    return round(max(-1.0, min(1.0, v)), 4)
+
+
+CUT_EPS = 1e-3                  # 切れ目・消した区間の端がこれより近ければ同じ点とみなす（秒）
+CUT_MIN_EDGE = 0.02             # トラックの両端からこれより内側にだけ切れ目を入れられる（秒）
+MUTE_MIN = 1e-3                 # 消した区間の最小の長さ（秒）
+
+
+def norm_cuts(cuts, duration=None):
+    """切れ目（トラックの頭が 0 の秒）を整える: 数だけ・範囲の中だけ・昇順・近いものは 1 つに。"""
+    out = []
+    for v in sorted(float(x) for x in (cuts or []) if _finite(x)):
+        if v <= 0 or (duration is not None and v >= duration):
+            continue
+        if out and v - out[-1] < CUT_EPS:
+            continue
+        out.append(round(v, 6))
+    return out
+
+
+def norm_mutes(mutes, duration=None):
+    """部分のミュートの区間 [[始め, 終わり]…] を整える: 範囲に収め・昇順・重なる／接する区間は 1 つに。"""
+    rows = []
+    for m in mutes or []:
+        try:
+            a, b = float(m[0]), float(m[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            continue
+        if not (_finite(a) and _finite(b)):
+            continue
+        a = max(0.0, a)
+        if duration is not None:
+            b = min(float(duration), b)
+        if b - a >= MUTE_MIN:
+            rows.append([a, b])
+    rows.sort()
+    out = []
+    for a, b in rows:
+        if out and a <= out[-1][1] + CUT_EPS:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [[round(a, 6), round(b, 6)] for a, b in out]
+
+
+def _finite(v):
+    try:
+        return v is not None and abs(float(v)) < float("inf")
+    except (TypeError, ValueError):
+        return False
+
+
+def subtract_range(mutes, a, b):
+    """区間のリストから [a, b] を引く（消した部分を戻す）。"""
+    out = []
+    for x, y in mutes:
+        if y <= a + CUT_EPS / 2 or x >= b - CUT_EPS / 2:
+            out.append([x, y])
+            continue
+        if x < a - CUT_EPS / 2:
+            out.append([x, a])
+        if y > b + CUT_EPS / 2:
+            out.append([b, y])
+    return out
+
+
+def pieces_of(cuts, duration):
+    """切れ目で分けた部分 [[始め, 終わり]…]（トラックの頭が 0 の秒）。"""
+    xs = [0.0] + list(cuts) + [float(duration)]
+    return [[xs[i], xs[i + 1]] for i in range(len(xs) - 1)]
+
+
+def covered(mutes, a, b):
+    """[a, b] が消した区間で全部覆われているか。"""
+    for x, y in mutes:
+        if x <= a + CUT_EPS and y >= b - CUT_EPS:
+            return True
+    return False
+
+
 def _norm_track(t):
     t = dict(t)
     t.setdefault("kind", "vocal")
@@ -132,10 +235,16 @@ def _norm_track(t):
     t["offset_sec"] = float(t.get("offset_sec") or 0.0)
     t["mute"] = bool(t.get("mute"))
     t["solo"] = bool(t.get("solo"))
+    t["gain_db"] = norm_gain_db(t.get("gain_db"))
+    t["pan"] = norm_pan(t.get("pan"))
     t.setdefault("clip", None)
     t.setdefault("source_id", None)
     t.setdefault("ara_id", None)
-    t.setdefault("name",os.path.splitext(os.path.basename(t.get("path") or "track"))[0])
+    # 切れ目と、消した部分（クリップの分割。トラックの頭＝クリップの頭が 0 の秒。offset_sec で動かしても一緒に動く）
+    dur = t.get("duration_sec")
+    t["cuts"] = norm_cuts(t.get("cuts"), dur)
+    t["mutes"] = norm_mutes(t.get("mutes"), dur)
+    t.setdefault("name", os.path.splitext(os.path.basename(t.get("path") or "track"))[0])
     return t
 
 
@@ -643,13 +752,13 @@ class Session:
 
     @staticmethod
     def structure(snap):
-        """スナップショットのうち、取り消しの対象になるところ（ミュート／ソロ・ガイドの歌詞の控えを除く）。"""
-        drop = ("mute", "solo", "guide_lyrics")
+        """スナップショットのうち、取り消しの対象になるところ（ミュート／ソロ・音量・パン・ガイドの歌詞の控えを除く）。"""
+        drop = ("mute", "solo", "gain_db", "pan", "guide_lyrics")
         return {"tracks": [{k: v for k, v in t.items() if k not in drop} for t in snap["tracks"]],
                 "guide": snap.get("guide"), "tempo": snap.get("tempo")}
 
     def restore(self, snap):
-        """スナップショットに戻す。ミュート／ソロとガイドの歌詞の控えは今のまま（取り消しの対象外）。
+        """スナップショットに戻す。ミュート／ソロ・音量・パン・ガイドの歌詞の控えは今のまま（取り消しの対象外）。
 
         DAW（ARA）のセッションでは、ARA のトラック（有無・位置・名前・素材）と DAW のテンポ（source = "daw"）は
         今のまま（DAW が決めたもの）。戻すのはガイドの指定・画面で変えたテンポと、ARA でないトラック。"""
@@ -663,6 +772,7 @@ class Session:
             if c is None:
                 continue
             t["mute"], t["solo"] = c.get("mute", False), c.get("solo", False)
+            t["gain_db"], t["pan"] = c.get("gain_db", 0.0), c.get("pan", 0.0)
             if c.get("guide_lyrics") is not None:
                 t["guide_lyrics"] = copy.deepcopy(c["guide_lyrics"])
             else:
@@ -882,7 +992,7 @@ class Session:
         tracks = []
         for t in self.tracks:
             d = {k: t.get(k) for k in ("id", "name", "kind", "path", "offset_sec", "duration_sec",
-                                       "sr", "channels", "mute", "solo", "clip")}
+                                       "sr", "channels", "mute", "solo", "gain_db", "pan", "clip", "cuts", "mutes")}
             if t.get("ara_id"):                  # DAW（ARA）のトラック: AudioModification と DAW のトラック名
                 d["ara_id"], d["group"] = t["ara_id"], t.get("group")
             d["guide"] = t["id"] == self.guide
@@ -1036,8 +1146,8 @@ def open_session(take, guide=None, project_dir=None, reuse=True, lyrics=None, gu
         sha = sha256_file(tpath)
         if sha != prim.get("sha256"):
             what.append("テイクの差し替え")
-            # 別の素材になった: 前のテイクの位置・ミュート／ソロ・ガイドの歌詞の控えは引き継がない
-            prim.update(offset_sec=0.0, mute=False, solo=False)
+            # 別の素材になった: 前のテイクの位置・切れ目・消した部分・ミュート／ソロ・音量・パン・ガイドの歌詞の控えは引き継がない
+            prim.update(offset_sec=0.0, mute=False, solo=False, gain_db=0.0, pan=0.0, cuts=[], mutes=[])
             prim.pop("guide_lyrics", None)
         prim.update(path=tpath, sha256=sha, sr=int(info.samplerate),
                     channels=int(info.channels), source_frames=int(info.frames), clip=tc,

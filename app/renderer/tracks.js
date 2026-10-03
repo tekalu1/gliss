@@ -1,7 +1,9 @@
 // トラックビュー（上）。モック `proposal/track-view.html` の設計のとおり（issue #7。`docs/track-view.md` §3）。
 //
-//  - トラックの見出しは 名前・ガイド指定のアイコン・M・S の 4 つだけ。裏の準備（issue #63）がまだの間だけ、名前の右に
-//    小さな印（準備中の輪・待ちの点線の輪・失敗の !）を足す。
+//  - トラックの見出しは 1 段目が 名前・ガイド指定のアイコン・M・S、2 段目が音量のスライダー・パンのノブ（高さ 40 px 未満は
+//    2 段目を畳む）。音量・パンは M／S と同じ聴き比べの操作（再生だけに効く・取り消しの対象外・session に保存）。
+//    見出しとレーンの境目をドラッグして見出しの幅を変える（140〜360 px。state.json の view に保存）。
+//    裏の準備（issue #63）がまだの間だけ、名前の右に小さな印（準備中の輪・待ちの点線の輪・失敗の !）を足す。
 //  - クリップ（音声ファイル 1 本）をクリック → そのトラックを編集対象にして、クリックした所の歌っている
 //    かたまり（無ければクリップ全体）を下に出す。レーンを横にドラッグ → その範囲に下がズーム（ドラッグ中も追従）。
 //    トラック名のクリック → 表示範囲はそのまま、編集対象だけ切り替え。伴奏はクリックしても再生位置が動くだけ。
@@ -15,6 +17,10 @@
 //    上半分は範囲のドラッグ（Studio One／Fender Studio Pro のスマートツールと同じ分け方: 上半分 = 範囲、
 //    下半分 = 矢印）。動かさずに離せば、どちらの半分でもクリック。
 //    Shift で細かく（1/10）、元の位置（0）の 6 px・30 ms 以内に吸い付く（Shift・Alt の間は吸い付かない）。Ctrl+Z で戻す。
+//  - **ツールで上の動きが変わる**（承認済み 2026-10-03。docs/track-view.md §8）: はさみ = クリップをクリックで切る・切れ目の
+//    ダブルクリックでつなぐ（ホバーで縦線・時間スナップ、Shift で外す）、ミュート = 部分のクリックで消す⇔戻す（なぞってまとめて）、
+//    鉛筆 = メインと同じ（カーソルも矢印）、メイン = 今のまま。切れ目と消した部分はトラックの `cuts` / `mutes`（トラックの頭が
+//    0 の秒。エンジンの split_track / join_track / mute_track_range）。消した部分は再生で鳴らさず（audio.js）、書き出しにも効く。
 //  - トラックの操作（追加・外す・位置・名前・種類・ガイドの指定）はエンジンの曲の取り消しの履歴に入る（issue #16）。
 //    Ctrl+Z で別のトラックの操作を戻すと、エンジンがそのトラックを編集対象にする（setHistoryHandler で画面に反映）。
 //  - トラックの追加（ファイル > トラックを追加… / ウィンドウへのドロップ。main.js）と、見出し・クリップ・ルーラーの
@@ -29,26 +35,36 @@
 import { $, analyzeTake, call, onAbandon, status } from './engine.js';
 import { beginBusy, laterBusy } from './busy.js';
 import {
-  COLORS, LAYOUT, S, audible, buttonReleased, clamp, clearProject, currentTrack, fmtTime, offsetOf, setPlan,
-  timelineRange, totalSec,
+  COLORS, LAYOUT, S, audible, buttonReleased, clamp, clearProject, currentTrack, fmtTime, isMuted, offsetOf, setPlan,
+  spanOf, timelineRange, totalSec,
 } from './state.js';
 import { onPlayhead, onRender, render, renderToolbar } from './draw.js';
-import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setTrack } from './session.js';
+import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setMix, setTrack } from './session.js';
 import { enqueue, handleEngineError, refresh, setHistoryHandler, wake } from './edits.js';
-import { dropBuffers, play, stop } from './audio.js';
+import { dropBuffers, play, setGains, stop } from './audio.js';
+import { CUT_MIN_EDGE, covered, joinAt, normCuts, paintPiece, pieces } from './clipedit.js';
 import { closeMenu, openClipMenu, openRulerMenu, openTrackMenu } from './menus.js';
 import { wheelAction } from './commands.js';
 import { G, currentDiv, snapStep, snapTime, tempo, ticks, timeSnapOn } from './grid.js';
 import { ARA, araCacheOf, araExtent, araLoop, araLoopHold, araRegions, araSeek, araSig, araToRep } from './ara.js';
+import {
+  GAIN_MAX_DB, GAIN_MIN_DB, dbToPos, fmtDb, fmtPan, gainOf, knobSvg, panFromUi, panOf, panSpeech, panUi, posToDb,
+} from './mixer.js';
 
 // トラックの高さ（全トラック共通）。縦ズーム（既定 Ctrl+ホイール。issue #27）で 28〜96 px（v3 §9）
 export const TRACK_H = { MIN: 28, MAX: 96, DEF: 44 };
 let TH = TRACK_H.DEF;
+// 見出しの幅（全体で 1 つ。曲ごとではなく表示の設定）。上限はトラックビューの幅の 40% まで
+export const HEAD_W = { MIN: 140, MAX: 360, DEF: 160, NARROW: 150, RATIO: 0.4 };
+let HW = HEAD_W.DEF;
+const SHORT_H = 40;         // これ未満の高さでは 2 段目（音量・パン）を畳む
+const MIX_DBL_MS = 400;     // 音量・パンの 2 回押し（既定値に戻す）の間隔
 const RH = 20;              // ルーラーの高さ
 const CLIP_T = 4;           // クリップの上端（行の中）
 const clipH = () => TH - 7;
 const { SCALE_H, LANE_H } = LAYOUT;
 const { TAKE, GUIDE, SEL, INST, VOCAL } = COLORS;
+const ICON_MUTE = '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>';
 const ICON_GUIDE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg>';
 const SNAP_PX = 6;          // 元の位置（0）に吸い付く距離
 const SNAP_MAX_SEC = 0.03;  // ただしこれより大きくは吸い付かない（曲全体の表示では 6 px が 1 秒近くになる）
@@ -64,6 +80,8 @@ let lanes = null;
 let ruler = null;
 let split = null;
 let tvBody = null;
+let hsz = null;
+let bub = null;
 let saveView = () => {};
 let onNewTake = () => false;  // 新しく足したテイクを編集対象にしたとき（最初の発声に寄せる。main.js）
 let laneW = 1000;
@@ -80,11 +98,26 @@ let tvView = null;          // 上の表示範囲 { t0, span }（秒。issue #39
 let tvDir = null;           // tvView を決めたプロジェクト（別のプロジェクトを開いたら全体表示に戻す）
 let pendingOrder = null;    // 見出しのドラッグで決めた並び（id の配列。当たるまでこの並びで描く。issue #38）
 let hd = null;              // 見出しのドラッグ（並び替え）
+let mixDrag = null;         // 音量・パンのドラッグ { id, kind }（見出しは描き直すので、window で追う）
+let lastMix = { key: '', t: 0, x: 0, y: 0 };
+let tvHover = null;         // はさみ・ミュートのホバー: { id, t: 切る位置（トラックの秒）, cut: 近い切れ目, piece: [a, b] }
+let lastHit = null;         // 最後のポインタの当たり（ツールを替えたときにカーソルを付け直す）
+let tvTool = 'main';        // 描いたときのツール（変わったらホバーを捨てる）
+let lastCut = { id: null, t: 0, x: 0 };   // はさみ: 前のクリック（切れ目のダブルクリックでつなぐ）
 let suppressClick = false;  // 並び替えのドラッグの後の click は名前のクリック（編集対象の切り替え）にしない
 const overviews = new Map(); // トラック id → JSON メタと Int8 波形（セッションが変わったら捨てる）
 const waveCache = new Map();
 const ovLoading = new Set();
 let ovDir = null;
+
+/** ツールごとの説明（ステータス行。下のピアノロールと上のトラックビューの両方）。 */
+export const TOOL_STATUS = {
+  main: 'メインツール: 下はノートを選ぶ・動かす。上はクリックで下に出す（上半分 = 範囲・下半分 = 位置）',
+  draw: '鉛筆: 下はピッチを描く。上は描くものが無いので、メインと同じに働く',
+  cut: 'はさみ: 下はノートを分ける（境目をダブルクリックで結合）。上はクリップをクリックで分ける・切れ目をダブルクリックでつなぐ（Shift でグリッドに寄せない）',
+  mute: 'ミュート: 下はノートを無音にする／戻す。上は部分をクリックで消す／戻す（横になぞるとまとめて）',
+};
+export function toolHint(tool) { return TOOL_STATUS[tool] || ''; }
 
 /** 上に描く並び（並び替えのドラッグ中・確定待ちはその並び）。行の番号はこの並びの番号。 */
 export function rows() {
@@ -285,20 +318,69 @@ function headsHtml() {
   return rows().map((t, i) => {
     const cur = t.id === S.session?.current;
     const cls = `th ${t.kind}${cur ? ' cur' : ''}${audible(t) ? '' : ' off'}`;
+    const nm = esc(t.name);
     const g = t.kind === 'vocal'
       ? `<button class="g" data-act="guide" aria-pressed="${!!t.guide}" title="${t.guide ? 'ガイドを外す' : 'このトラックをガイドにする'}" aria-label="ガイド">${ICON_GUIDE}</button>`
       : '<span class="gx"></span>';
     const pp = t.kind === 'vocal' ? `<span class="pp" data-pp="${esc(t.id)}"></span>` : '';
-    return `<div class="${cls}" data-i="${i}" data-id="${esc(t.id)}"><span class="nm" title="${esc(t.path || t.name)}">${esc(t.name)}</span>${pp}${g}`
-      + `<button data-act="m" aria-pressed="${!!t.mute}" title="ミュート" aria-label="ミュート">M</button>`
-      + `<button data-act="s" aria-pressed="${!!t.solo}" title="ソロ" aria-label="ソロ">S</button></div>`;
+    const db = gainOf(t); const pan = panOf(t);
+    const dragging = (k) => (mixDrag && mixDrag.id === t.id && mixDrag.kind === k ? ' drag' : '');
+    const pct = (dbToPos(db) * 100).toFixed(2);
+    // 高さが小さくて 2 段目を畳んでいる間は、値を名前のツールチップに出す
+    const tip = `${esc(t.path || t.name)} — 音量 ${fmtDb(db)} dB・パン ${fmtPan(pan)}`;
+    const r1 = `<div class="r1"><span class="nm" title="${tip}">${nm}</span>${pp}${g}`
+      + `<button data-act="m" aria-pressed="${!!t.mute}" title="ミュート" aria-label="${nm} のミュート">M</button>`
+      + `<button data-act="s" aria-pressed="${!!t.solo}" title="ソロ" aria-label="${nm} のソロ">S</button></div>`;
+    const r2 = '<div class="r2">'
+      + `<div class="vol${dragging('vol')}" data-mix="vol" role="slider" tabindex="0" aria-label="${nm} の音量" aria-valuemin="${GAIN_MIN_DB}" aria-valuemax="${GAIN_MAX_DB}" aria-valuenow="${db}" aria-valuetext="${fmtDb(db)} dB" title="音量 ${fmtDb(db)} dB（ダブルクリックで 0 dB・Shift で細かく）">`
+      + `<i class="tr"></i><i class="fi" style="width:${pct}%"></i><i class="z" style="left:80%"></i><i class="kn" style="left:${pct}%"></i></div>`
+      + `<span class="vv${Math.abs(db) > 0.04 ? ' chg' : ''}">${fmtDb(db)}</span>`
+      + `<div class="pan${dragging('pan')}" data-mix="pan" role="slider" tabindex="0" aria-label="${nm} のパン" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="${panUi(pan)}" aria-valuetext="${panSpeech(pan)}" title="パン ${fmtPan(pan)}（上下にドラッグ・ダブルクリックで中央）">${knobSvg(pan)}</div></div>`;
+    return `<div class="${cls}" data-i="${i}" data-id="${esc(t.id)}">${r1}${r2}</div>`;
   }).join('');
+}
+
+// ---------------------------------------------------------------- 見出しの幅
+/** 見出しの幅の上限（360 px と、トラックビューの幅の 40% の小さいほう。下限の 140 px は割らない）。 */
+function maxHeadW() {
+  const w = tv?.getBoundingClientRect().width || 0;
+  return Math.max(HEAD_W.MIN, w > 0 ? Math.min(HEAD_W.MAX, Math.floor(w * HEAD_W.RATIO)) : HEAD_W.MAX);
+}
+/** 今の見出しの幅（覚えている幅を、いまのトラックビューの幅に収めたもの）。 */
+export function headWidth() { return Math.round(clamp(HW, HEAD_W.MIN, maxHeadW())); }
+/** 覚えている幅（state.json の view に保存する値）。 */
+export function savedHeadWidth() { return HW; }
+
+function applyHeadW() {
+  if (!tv) return;
+  const w = headWidth();
+  tv.style.setProperty('--hw', `${w}px`);
+  tv.classList.toggle('narrow', w < HEAD_W.NARROW);
+  tv.classList.toggle('short', TH < SHORT_H);
+  if (hsz) {
+    hsz.setAttribute('aria-valuemin', String(HEAD_W.MIN));
+    hsz.setAttribute('aria-valuemax', String(maxHeadW()));
+    hsz.setAttribute('aria-valuenow', String(w));
+    hsz.setAttribute('aria-valuetext', `${w} px`);
+  }
+}
+
+/** 見出しの幅を決める（140〜360 px・トラックビューの幅の 40% まで）。save: 表示の設定として覚える。 */
+export function setHeadWidth(w, { save = true } = {}) {
+  const v = Math.round(clamp(+w || HEAD_W.DEF, HEAD_W.MIN, HEAD_W.MAX));
+  const changed = v !== HW;
+  HW = v;
+  lastSig = '';
+  renderTracks();
+  if (changed && save) saveView();
+  return headWidth();
 }
 
 export function renderTracks() {
   if (!lanes) return;
   layout();
   if (!S.tracks.length) return;
+  applyHeadW();                       // 見出しの幅を先に決める（レーンの幅はそのあとで測る）
   laneW = Math.max(50, lanes.getBoundingClientRect().width || 1000);
   // 上の目盛り: タイムライン（ドラッグ中の見かけの位置を含む）＋後ろに 4% の余白（DAW の曲の終わりの後の空き）。
   // 同じトラックの並びの間は広がるだけ（自動では縮めない）。ドラッグ中も同じ規則で決めるので、
@@ -317,14 +399,21 @@ export function renderTracks() {
   // ズーム・スクロールした表示（issue #39）は全体の範囲の中に収める（位置のドラッグ中は止める = 1:1）
   if (tvView && (!dr || dr.type !== 'move')) tvView = clampTv(tvView);
   range = tvView ? [tvView.t0, tvView.t0 + tvView.span] : autoRange;
+  if (tvTool !== S.tool) { tvTool = S.tool; tvHover = null; lastCut = { id: null, t: 0, x: 0 }; }
   const hh = headsHtml();
   // 名前の入力中は見出しを作り直さない（入力欄が消える）
-  if (hh !== lastHeads && !renaming) { heads.innerHTML = hh; lastHeads = hh; paintPrep(true); }
+  if (hh !== lastHeads && !renaming) {
+    const keep = focusedMix();
+    heads.innerHTML = hh;
+    lastHeads = hh;
+    paintPrep(true);
+    if (keep) heads.querySelector(`.th[data-id="${CSS.escape(keep.id)}"] [data-mix="${keep.kind}"]`)?.focus({ preventScroll: true });
+  }
   heads.style.setProperty('--th', `${TH}px`);
   const vr = viewRange();
   const sig = JSON.stringify([laneW, TH, range, vr, S.loop, S.session?.current, S.session?.guide,
-    rows().map((t) => [t.id, offsetOf(t), t.kind, t.mute, t.solo, t.duration_sec]),
-    overviews.size, dr && [dr.type, dr.row, dr.a, dr.b, dr.moved, dr.off],
+    rows().map((t) => [t.id, offsetOf(t), t.kind, t.mute, t.solo, t.duration_sec, t.cuts, t.mutes]), S.tool,
+    overviews.size, dr && [dr.type, dr.row, dr.a, dr.b, dr.moved, dr.off], S.vd ? mutedSpans() : null,
     tempo(), G.fmt, currentDiv(), araSig()]);
   if (ARA) paintPrep();
   if (sig !== lastSig) {
@@ -333,6 +422,21 @@ export function renderTracks() {
     drawRuler();
   }
   moveHead();
+  applyCursor();
+}
+
+/** 編集中のトラックの無音の区間（ノートの無音。秒 = そのトラックの音の中。つながった分は 1 つにまとめる）。
+ * 無音にした直後（当たるまで）の見かけも含める。ほかのボーカルには出さない（エンジンが区間を返さない）。 */
+function mutedSpans() {
+  const out = [];
+  for (const n of S.notes) {
+    if (!isMuted(n)) continue;
+    const [a, b] = spanOf(n);
+    const last = out[out.length - 1];
+    if (last && a <= last[1] + 1e-4) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
 }
 
 function drawLanes(vr) {
@@ -382,6 +486,27 @@ function drawLanes(vr) {
     for (const d of wavePaths(t)) {
       s += `<path d="${d}" fill="${col}" opacity="${op.toFixed(3)}" transform="translate(${f1(x0)},${y})" pointer-events="none"/>`;
     }
+    // クリップの切れ目（部分の境目）と、消した部分（ミュートツール）: 点線の輪郭・薄い波形・スピーカー×
+    const bg = cur ? '#161619' : '#111113';
+    for (const [a, b] of t.mutes || []) {
+      const mx0 = Math.max(x0, tvX(off + a)); const mx1 = Math.min(x1, tvX(off + b));
+      if (mx1 < 0 || mx0 > laneW || mx1 <= mx0) continue;
+      s += `<rect data-mute-range="${esc(t.id)}" data-a="${a}" data-b="${b}" x="${f1(mx0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, mx1 - mx0))}" height="${clipH()}" rx="2" fill="${bg}" fill-opacity=".78" stroke="#8f8f94" stroke-opacity=".7" stroke-dasharray="3 2.5" pointer-events="none"/>`;
+      if (mx1 - mx0 > 22 && clipH() >= 22) s += `<g transform="translate(${f1(mx0 + 4)},${y + CLIP_T + 3}) scale(.5)" fill="none" stroke="#8f8f94" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" pointer-events="none">${ICON_MUTE}</g>`;
+    }
+    for (const c of t.cuts || []) {
+      const cx = tvX(off + c);
+      if (cx < -2 || cx > laneW + 2) continue;
+      s += `<line data-cut="${esc(t.id)}" data-sec="${c}" x1="${f1(cx)}" y1="${y + CLIP_T}" x2="${f1(cx)}" y2="${y + CLIP_T + clipH()}" stroke="${bg}" stroke-width="2" pointer-events="none"/>`;
+    }
+    // 無音のノート（ミュートツール・Del）: 波形を暗くして、点線の輪郭（ピアノロールの無音のノートと同じ見分け）
+    if (cur && S.vd) {
+      for (const [a, b] of mutedSpans()) {
+        const mx0 = tvX(off + a); const mx1 = tvX(off + b);
+        if (mx1 < 0 || mx0 > laneW) continue;
+        s += `<rect data-muted-span="${f1(a)}" x="${f1(mx0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, mx1 - mx0))}" height="${clipH()}" rx="2" fill="#161619" fill-opacity=".72" stroke="#8f8f94" stroke-opacity=".7" stroke-dasharray="3 2.5" pointer-events="none"/>`;
+      }
+    }
   });
   // 下で表示している範囲（レーンをドラッグ中はその範囲）
   const ci = R.findIndex((t) => t.id === curId);
@@ -406,8 +531,31 @@ function drawLanes(vr) {
     s += `<g id="tvTip" pointer-events="none"><rect x="${f1(tx)}" y="${ty}" width="${f1(w)}" height="17" rx="2" fill="#232326"/>`
       + `<text x="${f1(tx + 5)}" y="${ty + 12.5}" font-size="11" fill="${SEL}">${txt}</text></g>`;
   }
+  s += '<g id="tvov" pointer-events="none"></g>';
   s += `<line id="tvph" x1="0" y1="0" x2="0" y2="${LH}" stroke="${SEL}" pointer-events="none"/>`;
   lanes.innerHTML = s;
+  paintOverlay();
+}
+
+/** はさみの縦線・ミュートの部分の枠（ホバー。lanes を描き直さずに付け替える）。 */
+function paintOverlay() {
+  const g = lanes?.querySelector('#tvov');
+  if (!g) return;
+  const h = tvHover;
+  const R = rows();
+  const i = h ? R.findIndex((t) => t.id === h.id) : -1;
+  if (i < 0 || (dr && dr.type !== 'paint')) { g.innerHTML = ''; return; }
+  const t = R[i];
+  const y = i * TH; const off = offsetOf(t);
+  let s = '';
+  if (S.tool === 'cut') {
+    const x = tvX(off + (h.cut ?? h.t));
+    s = `<line id="tvcut" x1="${f1(x)}" y1="${y + 2}" x2="${f1(x)}" y2="${y + TH - 2}" stroke="${SEL}" stroke-width="${h.cut != null ? 2 : 1}"/>`;
+  } else if (S.tool === 'mute' && h.piece) {
+    const xa = tvX(off + h.piece[0]); const xb = tvX(off + h.piece[1]);
+    s = `<rect id="tvpiece" x="${f1(xa)}" y="${y + CLIP_T}" width="${f1(Math.max(1, xb - xa))}" height="${clipH()}" rx="2" fill="${SEL}" fill-opacity=".06" stroke="${SEL}" stroke-opacity=".6"/>`;
+  }
+  g.innerHTML = s;
 }
 
 function drawRuler() {
@@ -1036,9 +1184,11 @@ export function setGuide(id) {
 }
 
 // ---------------------------------------------------------------- ポインタ
-function laneHit(e) {
+function laneHit(e) { return hitAt(e.clientX, e.clientY); }
+
+function hitAt(clientX, clientY) {
   const r = lanes.getBoundingClientRect();
-  const x = e.clientX - r.left; const y = e.clientY - r.top;
+  const x = clientX - r.left; const y = clientY - r.top;
   const row = Math.floor(y / TH);
   const t = rows()[row] || null;
   const tl = tvT(x);
@@ -1061,6 +1211,9 @@ function onLaneDown(e) {
   closeMenu();
   const h = laneHit(e);
   if (!h.t) return;
+  // はさみ・ミュートは、クリップの上ではメインの操作（範囲・位置）の代わりに働く（クリップの外はメインと同じ）
+  if (S.tool === 'cut' && h.inClip) { cutDown(e, h); return; }
+  if (S.tool === 'mute' && h.inClip) { muteDown(e, h); return; }
   if (h.move) {
     // クリップの下半分: 位置をずらす（音源全体）。確定待ちの見かけの位置があれば、そこから
     dr = { type: 'move', row: h.row, id: h.t.id, x0: e.clientX, xl: e.clientX, t0: h.tl,
@@ -1150,13 +1303,11 @@ function clampRange(t, a, b) {
 function onLaneMove(e) {
   if (!dr) {
     const h = laneHit(e);
-    lanes.style.cursor = h.move ? 'grab' : h.t && h.t.kind === 'vocal' && h.inClip ? 'pointer' : 'default';
-    // ツールチップ（SVG の title 属性は出ないので、外側の HTML に付ける）
-    const tip = h.move ? 'ドラッグで位置をずらす（Shift: 細かく / Alt: 吸い付かない）' : '';
-    if (tvBody.title !== tip) tvBody.title = tip;
+    hoverTool(h, e);
     return;
   }
   if (buttonReleased(e)) { onLaneLost(); return; }   // 離したことが届いていない（state.js）
+  if (dr.type === 'paint') { paintMove(e); return; }
   if (dr.type === 'move') { moveDrag(e); return; }
   if (dr.type !== 'range') return;
   const t = rows()[dr.row];
@@ -1185,6 +1336,7 @@ function onLaneLost() {
 
 function onLaneUp() {
   if (dr && dr.type === 'move') { endMove(); return; }
+  if (dr && dr.type === 'paint') { endPaint(); return; }
   const d = dr;
   if (!d || d.type !== 'range') return;
   dr = null;
@@ -1196,6 +1348,203 @@ function onLaneUp() {
     return;
   }
   clickAt(t, d.t0);
+}
+
+// ---------------------------------------------------------------- ツール（はさみ・ミュート。承認済み 2026-10-03）
+const r6 = (v) => Math.round(v * 1e6) / 1e6;
+const secText = (v) => `${v.toFixed(2)} 秒`;
+const CUT_NEAR_PX = 5;      // 切れ目に乗っているとみなす距離
+const DBL_MS = 450;         // 切れ目のダブルクリックの間隔
+
+/** ホバー: ツールのカーソル・ツールチップ・はさみの縦線／ミュートの部分の枠（メインと鉛筆は今までどおり）。 */
+function hoverTool(h, e) {
+  lastHit = { inClip: h.inClip, move: h.move, t: h.t };
+  tvHover = null;
+  let tip = '';
+  if (S.tool === 'cut' && h.t && h.inClip) {
+    const off = offsetOf(h.t);
+    let v = h.tl;
+    if (timeSnapOn(e)) v = snapTime(v, tvStep());
+    const cut = (h.t.cuts || []).find((c) => Math.abs(tvX(off + c) - h.x) <= CUT_NEAR_PX);
+    tvHover = { id: h.t.id, t: r6(v - off), cut: cut ?? null };
+    tip = cut != null ? '切れ目: ダブルクリックでつなぐ' : 'クリックでここを分ける（Shift: グリッドに寄せない）';
+  } else if (S.tool === 'mute' && h.t && h.inClip) {
+    const k = pieceAt(h.t, h.tl);
+    const p = k >= 0 ? pieces(h.t.cuts || [], h.t.duration_sec || 0)[k] : null;
+    tvHover = p ? { id: h.t.id, piece: p } : null;
+    if (p) tip = `クリックでこの部分を${covered(h.t.mutes || [], p[0], p[1]) ? '戻す' : '消す'}（なぞるとまとめて）`;
+  } else if (S.tool !== 'cut' && S.tool !== 'mute') {
+    if (h.move) tip = 'ドラッグで位置をずらす（Shift: 細かく / Alt: 吸い付かない）';
+  }
+  applyCursor(lastHit);
+  if (tvBody.title !== tip) tvBody.title = tip;   // SVG の title 属性は出ないので、外側の HTML に付ける
+  paintOverlay();
+}
+
+/** ツールのカーソル: はさみ・ミュートはクリップの上だけ（CSS の cur-cut / cur-mute。外は矢印）、鉛筆はメインと同じ動きで矢印。 */
+function applyCursor(h = lastHit) {
+  if (!lanes || (dr && dr.type !== 'paint')) return;       // 位置・範囲のドラッグ中は触らない（grabbing のまま）
+  const inClip = !!h?.inClip;
+  lanes.classList.toggle('cur-cut', S.tool === 'cut' && inClip);
+  lanes.classList.toggle('cur-mute', S.tool === 'mute' && inClip);
+  if (S.tool === 'cut' || S.tool === 'mute') lanes.style.cursor = '';
+  else if (S.tool === 'draw') lanes.style.cursor = 'default';
+  else lanes.style.cursor = h?.move ? 'grab' : h?.t && h.t.kind === 'vocal' && h.inClip ? 'pointer' : 'default';
+}
+
+/** 時刻 tl（タイムラインの秒）が入っている部分の番号（クリップの外は -1）。 */
+function pieceAt(t, tl) {
+  const loc = tl - offsetOf(t);
+  const ps = pieces(t.cuts || [], t.duration_sec || 0);
+  return ps.findIndex(([a, b]) => loc >= a && loc <= b);
+}
+
+/** 切れ目・消した部分の操作 1 つ: 見かけをすぐ変えて（mutate）、エンジンの呼び出しを順番待ちに入れ、返り値で置き換える。
+ * 順番待ちの間に Ctrl+Z で外されたら見かけを戻す。 */
+function clipEdit(label, ts, mutate, calls, done) {
+  const before = ts.map((t) => ({ t, cuts: (t.cuts || []).slice(), mutes: (t.mutes || []).map((m) => m.slice()) }));
+  mutate();
+  afterLocal(ts);
+  const cancel = () => {
+    for (const b of before) { b.t.cuts = b.cuts; b.t.mutes = b.mutes; }
+    afterLocal(ts);
+  };
+  return enqueue(async () => {
+    S.busy = true;
+    renderToolbar();
+    try {
+      let r = null;
+      for (const c of calls) r = await call(c.tool, { ...c.args, author: 'human' });
+      if (r?.session) adoptSession(r.session);
+      status(done);
+      return true;
+    } catch (err) {
+      if (!await handleEngineError(err)) status(`${label}できなかった: ${err.message}`);
+      await resync();
+      return false;
+    } finally {
+      S.busy = false;
+      renderToolbar();
+      render();
+      renderTracks();
+      wake();
+    }
+  }, { label, cancel });
+}
+
+/** 見かけを変えた後の描き直し（上・下の斜線・再生中の音）。 */
+function afterLocal(ts) {
+  setGains();                       // 再生中なら消した区間を今から先の音にも当てる
+  renderTracks();
+  if (ts.some((t) => t.id === S.session?.current)) render();
+}
+
+/** はさみ: クリックで分ける・切れ目の上のダブルクリックでつなぐ（時間スナップ。Shift で外す。クリップ全体が対象）。 */
+function cutDown(e, h) {
+  const t = h.t;
+  const off = offsetOf(t);
+  const dur = t.duration_sec || 0;
+  const now = performance.now();
+  const dbl = lastCut.id === t.id && now - lastCut.t < DBL_MS && Math.abs(h.x - lastCut.x) < 8;
+  lastCut = { id: t.id, t: now, x: h.x };
+  const cut = (t.cuts || []).find((c) => Math.abs(tvX(off + c) - h.x) <= CUT_NEAR_PX);
+  if (cut != null) {
+    if (!dbl) { status(`${t.name}: 切れ目（${secText(cut)}）。ダブルクリックでつなぐ`); return; }
+    lastCut = { id: null, t: 0, x: 0 };
+    const j = joinAt(t, cut);
+    clipEdit('クリップをつなぐ', [t], () => { t.cuts = j.cuts; t.mutes = j.mutes; },
+      [{ tool: 'join_track', args: { track_id: t.id, sec: cut } }], `${t.name}: 切れ目をつないだ（${secText(cut)}）`);
+    return;
+  }
+  const v = timeSnapOn(e) ? snapTime(h.tl, tvStep()) : h.tl;
+  const sec = r6(v - off);
+  if (sec < CUT_MIN_EDGE || sec > dur - CUT_MIN_EDGE) {
+    status('クリップの端に近すぎる（両端から 20 ms 以上内側で分ける）');
+    return;
+  }
+  clipEdit('クリップを分ける', [t], () => { t.cuts = normCuts([...(t.cuts || []), sec], dur); },
+    [{ tool: 'split_track', args: { track_id: t.id, sec } }], `${t.name}: ${secText(sec)} で分けた（切れ目をダブルクリックでつなぐ）`);
+}
+
+/** ミュート: 部分を押したら、その部分の今の状態の反対（消す⇔戻す）を、なぞった部分すべてに当てる向きにする（行をまたいでよい）。 */
+function muteDown(e, h) {
+  const k = pieceAt(h.t, h.tl);
+  if (k < 0) return;
+  const [a, b] = pieces(h.t.cuts || [], h.t.duration_sec || 0)[k];
+  const to = !covered(h.t.mutes || [], a, b);
+  dr = { type: 'paint', to, ops: [], seen: new Set(), before: new Map(), moved: true, at: { x: e.clientX, y: e.clientY }, group: `paint-${Date.now()}` };
+  paintAt(h.t, k, to);
+  lanes.setPointerCapture(e.pointerId);
+  paintOverlay();
+}
+
+function paintAt(t, k, to) {
+  const key = `${t.id}:${k}`;
+  if (dr.seen.has(key)) return;
+  dr.seen.add(key);
+  const [a, b] = pieces(t.cuts || [], t.duration_sec || 0)[k];
+  if (covered(t.mutes || [], a, b) === to) return;
+  if (!dr.before.has(t.id)) dr.before.set(t.id, { t, cuts: (t.cuts || []).slice(), mutes: (t.mutes || []).map((m) => m.slice()) });
+  t.mutes = paintPiece(t, k, to);
+  dr.ops.push({ id: t.id, name: t.name, a, b, to });
+  afterLocal([t]);
+}
+
+/** なぞっている間: 通った部分を押した部分と同じ向きにする（速く動かして飛ばした分は、前の点との間を細かく見る）。 */
+function paintMove(e) {
+  const from = dr.at;
+  const steps = Math.max(1, Math.ceil(Math.hypot(e.clientX - from.x, e.clientY - from.y) / 4));
+  let last = null;
+  for (let i = 1; i <= steps; i++) {
+    const h = hitAt(from.x + (e.clientX - from.x) * i / steps, from.y + (e.clientY - from.y) * i / steps);
+    if (!h.t || !h.inClip) continue;
+    const k = pieceAt(h.t, h.tl);
+    if (k >= 0) { paintAt(h.t, k, dr.to); last = { t: h.t, k }; }
+  }
+  dr.at = { x: e.clientX, y: e.clientY };
+  if (last) {
+    tvHover = { id: last.t.id, piece: pieces(last.t.cuts || [], last.t.duration_sec || 0)[last.k] };
+    paintOverlay();
+  }
+}
+
+/** 離した: 変わった部分を 1 つのまとまり（group = 取り消し 1 回）としてエンジンに当てる。 */
+function endPaint() {
+  const d = dr;
+  dr = null;
+  tvHover = null;
+  if (!d.ops.length) { renderTracks(); return; }
+  const ts = [...d.before.values()].map((b) => b.t);
+  const cancel = () => { for (const b of d.before.values()) { b.t.cuts = b.cuts; b.t.mutes = b.mutes; } afterLocal(ts); };
+  const to = d.to;
+  const names = [...new Set(d.ops.map((o) => o.name))].join('・');
+  const done = d.ops.length === 1
+    ? `${names}: ${secText(d.ops[0].a)}〜${secText(d.ops[0].b)} を${to ? '消した' : '戻した'}（Ctrl+Z で戻る）`
+    : `${names}: ${d.ops.length} か所を${to ? '消した' : '戻した'}（Ctrl+Z で 1 回で戻る）`;
+  enqueue(async () => {
+    S.busy = true;
+    renderToolbar();
+    try {
+      let r = null;
+      for (const o of d.ops) {
+        r = await call('mute_track_range', { track_id: o.id, start_sec: o.a, end_sec: o.b, mute: o.to, group: d.group, author: 'human' });
+      }
+      if (r?.session) adoptSession(r.session);
+      status(done);
+      return true;
+    } catch (err) {
+      if (!await handleEngineError(err)) status(`ミュートできなかった: ${err.message}`);
+      await resync();
+      return false;
+    } finally {
+      S.busy = false;
+      renderToolbar();
+      render();
+      renderTracks();
+      wake();
+    }
+  }, { label: to ? '部分のミュート' : '部分を戻す', cancel });
+  renderTracks();
 }
 
 // ルーラー（上下共通）: クリックで再生位置、ドラッグでループ
@@ -1249,6 +1598,7 @@ function onHeadsClick(e) {
   if (suppressClick) { suppressClick = false; return; }     // 並び替えのドラッグの後
   const th = e.target.closest('.th');
   if (!th) return;
+  if (e.target.closest('.vol, .pan')) return;                // 音量・パン（押したときに値を決める。名前のクリックではない）
   const t = S.tracks.find((x) => x.id === th.dataset.id);
   if (!t) return;
   const b = e.target.closest('button');
@@ -1274,6 +1624,186 @@ async function toggle(t, key) {
   }
 }
 
+// ---------------------------------------------------------------- 音量・パン（見出しの 2 段目）
+// M／S と同じ聴き比べの操作: その場で音に当て（再生中も）、取り消しの履歴には入れず、session に保存する（session.js setMix）。
+// 値を変えると見出しを作り直すので、ドラッグは window で追う。2 回押しは押下の間隔で見る（dblclick は作り直しで届かない）。
+
+/** 音量・パンを当てる（変わらなければ何もしない）。エンジンへの保存の失敗は状態行に出す。 */
+function mix(t, patch) {
+  if (Object.keys(patch).every((k) => t[k] === patch[k])) return Promise.resolve(false);
+  return setMix(t.id, patch).catch(async (err) => {
+    const handled = (err.conflict || err.preparing) && await enqueue(() => handleEngineError(err));
+    if (!handled) status(`音量・パンを保存できなかった: ${err.message}`);
+    return false;
+  });
+}
+
+/** 描き直しでフォーカスが外れないように、フォーカスしているスライダーを覚える。 */
+function focusedMix() {
+  const a = document.activeElement;
+  if (!a || !heads.contains(a) || !a.dataset?.mix) return null;
+  const id = a.closest('.th')?.dataset.id;
+  return id ? { id, kind: a.dataset.mix } : null;
+}
+
+const mixEl = (id, kind) => heads.querySelector(`.th[data-id="${CSS.escape(id)}"] [data-mix="${kind}"]`);
+
+/** ドラッグ中の値の吹き出し（スライダーのつまみ・ノブの上。x/y はトラックビューの中の位置）。 */
+function showBub(text, x, y) {
+  if (!bub) return;
+  bub.hidden = false;
+  bub.textContent = text;
+  const w = bub.offsetWidth; const tw = tv.getBoundingClientRect().width;
+  bub.style.left = `${Math.round(clamp(x, w / 2 + 2, Math.max(w / 2 + 2, tw - w / 2 - 2)))}px`;
+  bub.style.top = `${Math.round(y)}px`;
+}
+function hideBub() { if (bub) bub.hidden = true; }
+
+function showMixBub(t, kind) {
+  const el = mixEl(t.id, kind);
+  if (!el) return;
+  const r = el.getBoundingClientRect(); const tr = tv.getBoundingClientRect();
+  if (kind === 'vol') {
+    const db = gainOf(t);
+    showBub(`${fmtDb(db)} dB`, r.left + dbToPos(db) * r.width - tr.left, r.top - tr.top - 3);
+  } else {
+    showBub(fmtPan(panOf(t)), r.left + r.width / 2 - tr.left, r.top - tr.top - 3);
+  }
+}
+
+function resetMix(t, kind) {
+  if (kind === 'vol') { mix(t, { gain_db: 0 }); status(`${t.name}: 音量を 0 dB に戻した`); }
+  else { mix(t, { pan: 0 }); status(`${t.name}: パンを中央に戻した`); }
+}
+
+function onMixDown(e) {
+  if (e.button !== 0) return;
+  const el = e.target.closest('.vol, .pan');
+  if (!el) return;
+  const t = S.tracks.find((x) => x.id === el.closest('.th')?.dataset.id);
+  if (!t || mixDrag) return;
+  e.preventDefault();
+  closeMenu();
+  el.focus({ preventScroll: true });
+  const kind = el.classList.contains('vol') ? 'vol' : 'pan';
+  const now = performance.now();
+  const key = `${kind}:${t.id}`;
+  const dbl = lastMix.key === key && now - lastMix.t < MIX_DBL_MS && Math.hypot(e.clientX - lastMix.x, e.clientY - lastMix.y) < 8;
+  lastMix = { key, t: dbl ? 0 : now, x: e.clientX, y: e.clientY };
+  if (dbl) { resetMix(t, kind); return; }
+  mixDrag = { id: t.id, kind };
+  let apply;
+  let jump = false;                                       // つまみ以外を押した（その位置の値にする）
+  if (kind === 'vol') {
+    const r = el.getBoundingClientRect();
+    // 押した所へ跳ばない: つまみの上ならそこからの差で、つまみ以外ならそこへ移してそこからの差で動かす（Shift で 1/10）
+    let pos = dbToPos(gainOf(t));
+    if (Math.abs(e.clientX - (r.left + pos * r.width)) > 6) { pos = clamp((e.clientX - r.left) / r.width, 0, 1); jump = true; }
+    let last = e.clientX;
+    apply = (ev) => {
+      if (ev) {
+        pos = clamp(pos + (ev.clientX - last) / r.width * (ev.shiftKey ? 0.1 : 1), 0, 1);
+        last = ev.clientX;
+      }
+      let db = posToDb(pos);
+      if (!(ev && ev.shiftKey) && db > -0.15 && db < 0.15) db = 0;     // 0 dB に吸い付く（Shift の間は吸い付かない）
+      mix(t, { gain_db: db });
+    };
+  } else {
+    // 上下（上 = 右）にドラッグ。横に動かしても効く。1 px = 1。Shift で 1/10。中央の ±2 に吸い付く
+    let val = panUi(panOf(t)); let ly = e.clientY; let lx = e.clientX;
+    apply = (ev) => {
+      if (!ev) return;                                    // 押しただけでは変えない
+      val = clamp(val + ((ly - ev.clientY) + (ev.clientX - lx)) * (ev.shiftKey ? 0.1 : 1), -100, 100);
+      ly = ev.clientY; lx = ev.clientX;
+      const fine = ev.shiftKey;
+      mix(t, { pan: Math.abs(val) < 2 && !fine ? 0 : panFromUi(fine ? Math.round(val * 10) / 10 : Math.round(val)) });
+    };
+  }
+  const refresh = () => { renderTracks(); showMixBub(t, kind); };
+  const mv = (ev) => {
+    if (buttonReleased(ev)) { up(); return; }            // 離したことが届いていない（state.js）
+    apply(ev);
+    refresh();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', mv);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    mixDrag = null;
+    hideBub();
+    lastHeads = '';                                       // つまみの「ドラッグ中」の見た目を外す
+    renderTracks();
+  };
+  window.addEventListener('pointermove', mv);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+  if (jump) apply(null);
+  lastHeads = '';
+  refresh();
+}
+
+/** キー: 音量は ←→（↑↓）で 0.5 dB・Shift で 0.1 dB・Home で 0 dB・End で −∞。パンは 5・Shift で 1・Home で中央。 */
+function onMixKey(e) {
+  const el = e.target.closest?.('.vol, .pan');
+  if (!el || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = S.tracks.find((x) => x.id === el.closest('.th')?.dataset.id);
+  if (!t) return;
+  const dir = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+  if (el.classList.contains('vol')) {
+    if (dir) mix(t, { gain_db: clamp(Math.round((gainOf(t) + dir * (e.shiftKey ? 0.1 : 0.5)) * 10) / 10, GAIN_MIN_DB, GAIN_MAX_DB) });
+    else if (e.key === 'Home') mix(t, { gain_db: 0 });
+    else if (e.key === 'End') mix(t, { gain_db: GAIN_MIN_DB });
+    else return;
+  } else if (dir) {
+    mix(t, { pan: panFromUi(clamp(panUi(panOf(t)) + dir * (e.shiftKey ? 1 : 5), -100, 100)) });
+  } else if (e.key === 'Home') {
+    mix(t, { pan: 0 });
+  } else return;
+  e.preventDefault();
+  e.stopPropagation();                                   // ←→ はノートの移動・再生位置のコマンドに渡さない
+}
+
+// ---------------------------------------------------------------- 見出しの幅の境目
+function installHeadSize() {
+  hsz.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    closeMenu();
+    hsz.classList.add('on');
+    const x0 = e.clientX; const w0 = headWidth();
+    const mv = (ev) => {
+      if (buttonReleased(ev)) { up(); return; }
+      const w = setHeadWidth(Math.min(w0 + ev.clientX - x0, maxHeadW()));
+      showBub(`${w} px`, w, 16);
+    };
+    const up = () => {
+      hsz.classList.remove('on');
+      hideBub();
+      window.removeEventListener('pointermove', mv);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', mv);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    showBub(`${w0} px`, w0, 16);
+  });
+  hsz.addEventListener('dblclick', () => {
+    setHeadWidth(HEAD_W.DEF);
+    status(`見出しの幅を既定（${HEAD_W.DEF} px）に戻した`);
+  });
+  hsz.addEventListener('keydown', (e) => {
+    const d = { ArrowLeft: -10, ArrowRight: 10 }[e.key];
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (d) setHeadWidth(headWidth() + d);
+    else if (e.key === 'Home') setHeadWidth(HEAD_W.DEF);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+}
+
 // ---------------------------------------------------------------- 並び順（見出しのドラッグ。issue #38）
 const ORDER_PX = 4;         // これだけ縦に動いたら並び替えのドラッグ（それまではクリック）
 
@@ -1285,7 +1815,7 @@ function moved(order, id, to) {
 }
 
 function onHeadsDown(e) {
-  if (e.button !== 0 || e.target.closest('button, input')) return;
+  if (e.button !== 0 || e.target.closest('button, input, .vol, .pan')) return;
   const th = e.target.closest('.th');
   if (!th) return;
   const R = rows();
@@ -1523,15 +2053,20 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   ruler = $('#tvRuler');
   split = $('#split');
   tvBody = $('#tvBody');
+  hsz = $('#hsz');
+  bub = $('#tvBub');
   saveView = onViewChanged || (() => {});
   onNewTake = newTake || (() => false);
   lanes.addEventListener('pointerdown', onLaneDown);
   lanes.addEventListener('pointermove', onLaneMove);
   lanes.addEventListener('pointerup', onLaneUp);
   lanes.addEventListener('pointercancel', onLaneUp);
+  lanes.addEventListener('pointerleave', () => { if (dr) return; tvHover = null; lastHit = null; paintOverlay(); applyCursor(); });
   lanes.addEventListener('lostpointercapture', onLaneLost);   // pointerup の後は dr が無いので何もしない
   ruler.addEventListener('pointerdown', onRulerDown);
   heads.addEventListener('click', onHeadsClick);
+  heads.addEventListener('pointerdown', onMixDown);
+  heads.addEventListener('keydown', onMixKey);
   heads.addEventListener('pointerdown', onHeadsDown);
   heads.addEventListener('pointermove', onHeadsMove);
   window.addEventListener('pointerup', onHeadsUp);
@@ -1541,6 +2076,7 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   lanes.addEventListener('contextmenu', onLanesContext);
   ruler.addEventListener('contextmenu', openRulerMenu);
   installSplit();
+  installHeadSize();
   tvBody.addEventListener('wheel', onTvWheel, { passive: false });
   onRender(renderTracks);
   onPlayhead(moveHead);
@@ -1561,14 +2097,16 @@ export function tracksState() {
   } : null;
   return {
     range: [...range], laneW, height: tvHeight(), collapsed, fit: fitH(), frame: fr, trackH: TH,
-    view: tracksView(), order: rows().map((t) => t.id), pendingOrder: pendingOrder ? [...pendingOrder] : null,
+    view: tracksView(), headW: headWidth(), savedHeadW: savedHeadWidth(), order: rows().map((t) => t.id), pendingOrder: pendingOrder ? [...pendingOrder] : null,
     scrollTop: tvBody?.scrollTop || 0,
     clips: rows().map((t, i) => {
       const c = lanes?.querySelector(`[data-clip="${CSS.escape(t.id)}"]`);
-      return { id: t.id, row: i, x: c ? +c.getAttribute('x') : null, w: c ? +c.getAttribute('width') : null };
+      return { id: t.id, row: i, x: c ? +c.getAttribute('x') : null, w: c ? +c.getAttribute('width') : null,
+        cuts: [...(t.cuts || [])], mutes: (t.mutes || []).map((m) => [...m]) };
     }),
     heads: [...(heads?.querySelectorAll('.th') || [])].map((el) => ({
       id: el.dataset.id, cur: el.classList.contains('cur'), off: el.classList.contains('off'),
+      gain: +el.querySelector('.vol')?.getAttribute('aria-valuenow'), pan: +el.querySelector('.pan')?.getAttribute('aria-valuenow'),
       guide: el.querySelector('.g')?.getAttribute('aria-pressed') === 'true',
       prep: el.querySelector('.pp')?.dataset.state || null,
       prepTip: el.querySelector('.pp')?.title || null,

@@ -13,10 +13,11 @@
 //  - プレビュー音（issue #27。audio.js）: ノート・端をつかんだらそのノートを鳴らし、ピッチのドラッグ中は高さに追従、離したら止める。
 //  - 子音・息（音程の無いノート。issue #35）: 帯をつかんで横に動かす・ノートの端で幅を変える（音程のあるノートと同じ計画・
 //    接続・Alt・スナップ・取り消し）。上下には動かない（音程が無いので、動かし始めの向きによらず横の移動にする）。
-//  - ツール（ヘッダーのアイコン / 1・2・3）: 矢印（上のとおり）、鉛筆（ドラッグでピッチを描く）、
-//    はさみ（ノートをクリックで分割、境目をダブルクリックで結合。音素境界の近くは吸着、Alt で吸着なし）。
+//  - ツール（ヘッダーのアイコン / 1・2・3・4）: 矢印（上のとおり）、鉛筆（ドラッグでピッチを描く）、
+//    はさみ（ノートをクリックで分割、境目をダブルクリックで結合。音素境界の近くは吸着、Alt で吸着なし）、
+//    ミュート（ノートをクリックで無音⇔戻す。なぞると、押したノートと同じ向きにそろえる。離したら 1 つの編集）。
 import {
-  LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isSel, lyricEntryAt, pitchWorld,
+  LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
   setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited, toSource,
   totalSec, utteranceAt,
 } from './state.js';
@@ -26,7 +27,8 @@ import {
 } from './draw.js';
 import {
   afterQueued, applyBoundary, applyDraw, applyFade, applyPitch, applyPlan, applyTransition, enqueue, idle,
-  mergeNotes, requestPlan, restorePreviews, setLyrics, setNoteSyllable, splitNote, waitFor, wake,
+  mergeNotes, muteNotes, requestPlan, restorePreviews, setLyrics, setNoteSyllable, splitNote, unmuteNotes, waitFor,
+  wake,
 } from './edits.js';
 import { G, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
 import { startPreview, stop, stopPreview, updatePreview } from './audio.js';
@@ -35,6 +37,7 @@ import { status } from './engine.js';
 import { closeMenu, editorMenu, menuOpen } from './menus.js';
 import { runCommand, wheelAction } from './commands.js';
 import { acceptCandidate, asrCandidate, inCandidate } from './asr.js';
+import { toolHint } from './tracks.js';
 
 const { KEYS_W } = LAYOUT;
 const AXIS_PX = 4;          // blob の中央: 最初にこれだけ動いた向きで ピッチ／移動 を決める
@@ -100,6 +103,7 @@ function onDown(e) {
   // 離したら前のが終わるのを待って順番に当てる（edits.enqueue）。計画は前のが当たってから頼む。
   if (S.tool === 'draw' && startStroke(e)) return;
   if (S.tool === 'cut' && cutDown(e, d)) return;
+  if (S.tool === 'mute' && muteDown(e, d)) return;
   if (d.bound !== undefined) {
     // 音素境界のドラッグ。ノート境界と一致しなくても**音素境界が優先**。
     S.drag = { type: 'bound', id: d.bound, x0: e.clientX, moved: false, dt: 0 };
@@ -257,6 +261,7 @@ function onMove(e) {
   // Shift を押す・離すだけでスナップの有無を描き直せるように、最後のポインタを覚える
   dr.last = { clientX: e.clientX, clientY: e.clientY, shiftKey: !!e.shiftKey, altKey: !!e.altKey, target: e.target };
   dr.shift = !!e.shiftKey;
+  if (dr.type === 'mute') { muteMove(dr, e); return; }
   if (dr.type === 'fade') {
     const dxPx = e.clientX - dr.x0;
     if (Math.abs(dxPx) >= 2) dr.moved = true;
@@ -366,6 +371,7 @@ function endDrag(e) {
   S.drag = null;
   if (dr.type === 'stroke') { finishStroke(); return; }
   if (dr.type === 'fade') { finishFade(dr); return; }
+  if (dr.type === 'mute') { finishMute(dr); return; }
   if (dr.type === 'note' && dr.moved && dr.axis === 'pitch') {
     const deltas = new Map(dr.deltas || S.local.pitch);
     for (const [id, v] of deltas) queuedPitch.set(id, (queuedPitch.get(id) || 0) + v);
@@ -480,7 +486,7 @@ function connHover(e) {
   const sameEdge = (!eh && !S.edgeHover)
     || (eh && S.edgeHover && eh.id === S.edgeHover.id && eh.which === S.edgeHover.which);
   // ノートに乗っている間は帯の上の角にフェードのつまみを出す（音程の無い区間・鍵盤の上は出さない）
-  const nh = S.tool === 'main' && d.note !== undefined && S.byId.get(d.note)?.kind === 'note' ? d.note : null;
+  const nh = (S.tool === 'main' || S.tool === 'mute') && d.note !== undefined && S.byId.get(d.note)?.kind === 'note' ? d.note : null;
   const fh = nh && d.fade !== undefined ? `${nh}|${d.fade}` : null;
   // Alt はポインタのイベントの値も見る（フォーカスが外にあって keydown を取りこぼしたとき）
   if (near === S.near && e.altKey === S.alt && sameEdge && nh === S.noteHover && fh === S.fadeHover) return;
@@ -593,7 +599,51 @@ function cutDown(e, d) {
   return true;
 }
 
-/** ツールを切り替える（1 / 2 / 3・ヘッダーのアイコン）。 */
+// ---------------------------------------------------------------- ミュート
+/** 画面の点（クライアント座標）の下のノート（音程のあるノート・子音・息）。押している間は svg にキャプチャされて
+ * e.target がノートにならないので、点の下の要素から引く（当たりははさみと同じ rect）。 */
+function noteUnder(x, y) {
+  const d = document.elementFromPoint(x, y)?.dataset || {};
+  return d.note !== undefined ? S.byId.get(d.note) || null : null;
+}
+
+/** ミュート: ノートを押したら、そのノートの今の状態の反対（無音⇔戻す）を、なぞったノートすべてに当てる向きにする。 */
+function muteDown(e, d) {
+  const n = d.note !== undefined ? S.byId.get(d.note) : null;
+  if (!n) return false;                        // 空白はふつうどおり（範囲選択）
+  const to = !isMuted(n);
+  S.drag = { type: 'mute', to, ids: [n.id], x0: e.clientX, y0: e.clientY, last: null };
+  S.local.mute.set(n.id, to);
+  svg.setPointerCapture(e.pointerId);
+  render();
+  return true;
+}
+
+/** なぞっている間: 通ったノートを押したノートと同じ向きにする（速く動かして飛ばした分は、前の点との間を細かく見る）。 */
+function muteMove(dr, e) {
+  const from = dr.at || { x: dr.x0, y: dr.y0 };
+  const steps = Math.max(1, Math.ceil(Math.hypot(e.clientX - from.x, e.clientY - from.y) / 4));
+  let dirty = false;
+  for (let k = 1; k <= steps; k++) {
+    const n = noteUnder(from.x + (e.clientX - from.x) * k / steps, from.y + (e.clientY - from.y) * k / steps);
+    if (!n || dr.ids.includes(n.id)) continue;
+    dr.ids.push(n.id);
+    S.local.mute.set(n.id, dr.to);
+    dirty = true;
+  }
+  dr.at = { x: e.clientX, y: e.clientY };
+  if (dirty) render();
+}
+
+/** 離した: 向きが変わるノートだけを 1 回の呼び出し（= 取り消し 1 回）で当てる。 */
+function finishMute(dr) {
+  const ids = dr.ids.filter((id) => !!S.byId.get(id)?.muted !== dr.to);
+  if (!ids.length) { for (const id of dr.ids) S.local.mute.delete(id); render(); return; }
+  (dr.to ? muteNotes : unmuteNotes)(ids);
+  render();
+}
+
+/** ツールを切り替える（1 / 2 / 3 / 4・ヘッダーのアイコン）。 */
 export function setTool(tool) {
   if (S.tool === tool) return;
   S.tool = tool;
@@ -604,6 +654,7 @@ export function setTool(tool) {
   S.fadeHover = null;
   closeMenu();
   if (S.drag?.type === 'stroke') { S.drag = null; S.stroke = null; }
+  status(toolHint(tool));                 // 下と上（トラックビュー）での働きを 1 行で
   render();
 }
 
@@ -834,7 +885,7 @@ function installMenus() {
   $('#popTrV').addEventListener('pointerdown', () => { trPointer = true; });
   $('#popTrV').addEventListener('input', previewTr);
   $('#popTrV').addEventListener('change', releaseTr);
-  for (const [id, tool] of [['#bToolMain', 'main'], ['#bToolDraw', 'draw'], ['#bToolCut', 'cut']]) {
+  for (const [id, tool] of [['#bToolMain', 'main'], ['#bToolDraw', 'draw'], ['#bToolCut', 'cut'], ['#bToolMute', 'mute']]) {
     $(id).addEventListener('click', () => { setTool(tool); root.focus({ preventScroll: true }); });
   }
   pop = $('#pop');

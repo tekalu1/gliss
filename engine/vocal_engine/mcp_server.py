@@ -178,8 +178,9 @@ def _tool(fn=None, *, lock=True):
 HISTORY_TOOLS = {
     "set_lyrics", "import_lyrics", "shift_pitch", "set_pitch_curve", "set_transition", "split_note", "merge_notes",
     "move_note", "stretch", "move_boundary", "correct_to_guide", "apply_plan", "set_connection",
-    "reset_to_original", "mute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
-    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "open_project",
+    "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
+    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "split_track", "join_track",
+    "mute_track_range", "open_project",
     "new_project", "load_project", "save_project",
 }
 
@@ -1546,6 +1547,39 @@ def mute_notes(note_ids: list = None, start_sec: float = None, end_sec: float = 
 
 
 @_tool
+def unmute_notes(note_ids: list = None, start_sec: float = None, end_sec: float = None,
+                 author: str = "ai") -> dict:
+    """ノートの**無音を戻す**（画面の右クリック「無音を戻す」・ミュートツール）。1 つの changeset。
+
+    `mute_notes` の逆。そのノートの区間の無音（mute）だけを外す。**ピッチ・タイミング・フェードの編集は残る**
+    （`reset_to_original` は全部外す）。対象のノートの外にはみ出した無音は残す。
+    対象: note_ids（ノートの id）か範囲（重なる音程ノート）。無音でないノートは飛ばす。
+    `export_view_data` の `notes[].muted` が false に戻る。取り消すのは `undo`。
+    """
+    p = _project()
+    p.reload_if_changed()
+    ids = list(note_ids or [])
+    if start_sec is not None or end_sec is not None:
+        t0, t1 = _range(start_sec, end_sec)
+        ids += [n.id for n in p.take_notes if n.kind == "note" and n.end_sec > t0
+                and n.start_sec < t1 and n.id not in ids]
+    by = {n.id: n for n in p.take_notes}
+    missing = [i for i in ids if i not in by]
+    if missing:
+        raise ProjectError("ノートが無い: %s（list_notes で確認）" % ", ".join(missing))
+    spans = _mute_spans(p)
+    done = [i for i in ids if any(b > by[i].start_sec + 1e-9 and a < by[i].end_sec - 1e-9
+                                  for a, b, _ in spans)]
+    if not done:
+        return _ok(changeset=None, note_ids=[], message="無音を戻すノートが無かった（無音ではない）")
+    rm, add = _trim_mutes(p, [(by[i].start_sec, by[i].end_sec) for i in done])
+    cs = p.apply_changes(rm, add, author=author, label="無音を戻す（%d ノート）" % len(done))
+    _rec(p, cs, "無音を戻す")
+    return _ok(changeset=cs.id, note_ids=done, total_edits=len(p.edits),
+               next="render_preview で聴く。無音にし直すなら mute_notes、取り消すなら undo")
+
+
+@_tool
 def set_fade(note_ids: list, fade_in_sec: float = None, fade_out_sec: float = None,
              author: str = "ai") -> dict:
     """ノートの**フェードイン／アウト**（画面の帯の上の角のつまみ。DAW のクリップフェードと同じ）。1 つの changeset。
@@ -1820,6 +1854,8 @@ def export_wav(path: str = None, start_sec: float = None, end_sec: float = None,
     （元に bext が無くても、クリップなら TimeReference = 開始位置の bext を足す）。
     **トラックの位置をずらしていれば（set_track の offset_sec）、TimeReference もその量だけ動かす**
     （中身・長さは元のまま。DAW で「元の位置へ」を押すと、ずらした位置に来る。返り値の `timeline_offset_sec`）。
+    **トラックビューで消した区間（mute_track_range）は 0 にして書く**（前後 5 ms をフェード。返り値の `muted_spans_sec`。
+    ノートの無音とは別。編集対象のトラックの区間だけ）。
 
     返り値の `replaced_spans_sec` が実際に差し替えた区間。その外は元のサンプルのまま。
     """
@@ -1828,13 +1864,14 @@ def export_wav(path: str = None, start_sec: float = None, end_sec: float = None,
     if background is None:
         background = p.duration_sec > 60.0
 
-    from .mcp_tracks import current_offset_sec
+    from .mcp_tracks import current_mutes, current_offset_sec
     shift = current_offset_sec()
+    mutes = current_mutes()
 
     def work(cancel=None, report=None, commit=None):
         with _prep_yield():
             r = _export(p, path=path, start_sec=start_sec, end_sec=end_sec, backend=backend,
-                        full_source=full_source, position_shift_sec=shift,
+                        full_source=full_source, position_shift_sec=shift, mutes=mutes,
                         cancel=cancel, progress=report, commit=commit)
         r["timeline_offset_sec"] = round(shift, 6)
         return r
@@ -2081,7 +2118,7 @@ TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllabl
          shift_pitch, set_pitch_curve, move_note, stretch, move_boundary, correct_to_guide,
          set_transition, split_note, merge_notes,
          plan_edit, apply_plan, list_connections, set_connection,
-         mute_notes, set_fade, reset_to_original, undo, redo,
+         mute_notes, unmute_notes, set_fade, reset_to_original, undo, redo,
          render_preview, render_region, render_audition, render_view, export_wav,
          export_view_data, remeasure,
          list_changes,
