@@ -192,13 +192,23 @@ def _coalesce(segs, barriers=()):
     return out
 
 
+FIT_HOLD_MAX = 3        # `_fit` が最後のサンプルを保持して埋める最大の長さ（それ以上の不足は 0 で埋める）
+
+
 def _fit(y, want):
-    """合成結果を want サンプルに合わせる（丸めの差 1〜2 サンプルを詰める／足す）。"""
+    """合成結果を want サンプルに合わせる（丸めの差 1〜2 サンプルを詰める／足す）。
+
+    足りない分は **0 ではなく最後のサンプルの保持**で埋める。0 を足すと、`_join` のクロスフェードの
+    ちょうど中央に「片側が 0 のサンプル」が来て、そこだけ振幅が半分ほどに落ちる 1 サンプルのクリックになる
+    （`_render_with_margins` が続きを持っているときは `want` を直接渡して続きで埋めるので、ここへは来ない）。
+    """
     y = np.asarray(y, dtype="float64")
     if len(y) > want:
         return y[:want]
     if len(y) < want:
-        return np.concatenate([y, np.zeros(want - len(y))])
+        k = want - len(y)
+        tail = y[-1] if len(y) and k <= FIT_HOLD_MAX else 0.0
+        return np.concatenate([y, np.full(k, tail)])
     return y
 
 
@@ -314,10 +324,11 @@ class Renderer:
                 core, pre, post, info = np.zeros(0), np.zeros(hx), np.zeros(hx), {"muted": True}
             elif abs(sg.cents) < 1e-9 and abs(sg.ratio - 1.0) < 1e-9 and not sg.curve_points:
                 # 移動だけ: 中身は原音そのもの（再合成しない）
-                core, pre, post, info = self._cut(s, e), None, None, {"verbatim": True}
+                core, post = self._verbatim(s, want, hx)
+                pre, info = None, {"verbatim": True}
             else:
                 core, pre, post, info = self._render_with_margins(
-                    s, e, hx, cents=sg.cents, ratio=sg.ratio, curve_points=sg.curve_points)
+                    s, e, hx, cents=sg.cents, ratio=sg.ratio, curve_points=sg.curve_points, want=want)
             chunks.append({"kind": "muted" if sg.gain <= 0.0 and sg.ratio > 0.0 else "edited",
                            "audio": _fit(core, want), "pre": pre, "post": post,
                            "src": (s, e), "edit_ids": sg.edit_ids, "info": info})
@@ -357,17 +368,40 @@ class Renderer:
                    "xfade_rhos": rhos,
                    "out_sec": round(len(y) / sr, 4)}
 
-    def _render_with_margins(self, s, e, hx, cents=0.0, ratio=1.0, curve_points=None):
+    def _verbatim(self, a_sec, want, hx):
+        """原音そのままの want サンプル（a_sec から）と、その**直後の続き** hx サンプル（post）。
+
+        `slot()` が累積の秒から決めた長さ want は、区間の長さを丸めたものと 1 サンプルずれることがある。
+        足りない分は 0 ではなく**原音の続き**で埋め、post もその続きの先頭から取る（長さと post が噛み合う）。
+        素材の終わりを越えた分だけ 0。"""
+        ia = max(0, int(round(a_sec * self.sr)))
+        n = len(self.x)
+        core = self.x[ia:min(n, ia + want)]
+        if len(core) < want:
+            core = np.concatenate([core, np.zeros(want - len(core))])
+        else:
+            core = core.copy()
+        return core, self.x[min(n, ia + want):min(n, ia + want + hx)].copy()
+
+    def _render_with_margins(self, s, e, hx, cents=0.0, ratio=1.0, curve_points=None, want=None):
         """[s, e) を再合成し、前後に hx サンプルぶんの**同じ設定で続けた**マージンを付けて返す。
 
-        返り値 (core, pre, post, info)。core の長さは `backend.render(s, e)` と同じ。
+        返り値 (core, pre, post, info)。core の長さは want（既定は `backend.render(s, e)` と同じ）。
+        want は呼び出し側が累積の秒から決めた長さ。区間の長さを丸めたものと 1 サンプルずれることがあり、
+        そのとき core を切る位置を伸ばし縮みさせて**再合成の続き**で足りない分を埋める
+        （core を 0 で埋めると、つなぎ目のクロスフェードの中央が 1 サンプルのクリックになる）。
+        post は core の直後の続きから取る。
         マージンは素材の端で足りなければ短くなる（_join が短い方に合わせる）。
         """
         sr = self.sr
         n = len(self.x)
         a = int(round(s * sr))
         b = int(round(e * sr))
-        want = max(1, int(round((b - a) * float(ratio))))
+        if want is None:
+            want = max(1, int(round((b - a) * float(ratio))))
+        want = int(want)
+        if want <= 0:
+            return np.zeros(0), None, None, {}
         ext = int(np.ceil(hx / float(ratio))) + 1
         ea = min(ext, a)
         eb = min(ext, max(0, n - b))
@@ -378,9 +412,7 @@ class Renderer:
                                       ratio=ratio, curve_points=cp)
         y = np.asarray(y, dtype="float64")
         npre = int(round(ea * float(ratio)))
-        core = y[npre:npre + want]
-        if len(core) < want:
-            core = np.concatenate([core, np.zeros(want - len(core))])
+        core = _fit(y[npre:npre + want], want)
         pre = y[max(0, npre - hx):npre]
         post = y[npre + want:npre + want + hx]
         return core, pre, post, info
@@ -394,18 +426,15 @@ class Renderer:
             want = max(0, int(round(out_sec * self.sr)))
         if want == 0:
             return {"kind": "gap", "audio": np.zeros(0), "src": (a_sec, b_sec)}
+        hx = max(1, int(round(XFADE_MS / 2000.0 * self.sr)))
         if abs(want - len(src)) <= 1:
-            return {"kind": "gap", "audio": src[:want] if len(src) >= want else
-                    np.concatenate([src, np.zeros(want - len(src))]),
+            audio, post = self._verbatim(a_sec, want, hx)
+            return {"kind": "gap", "audio": audio, "post": post,
                     "src": (a_sec, b_sec), "verbatim": True}
         r = want / max(1, len(src))
-        hx = max(1, int(round(XFADE_MS / 2000.0 * self.sr)))
         core, pre, post, info = self._render_with_margins(a_sec, b_sec, hx, cents=0.0,
-                                                          ratio=float(np.clip(r, 0.25, 4.0)))
-        if len(core) > want:
-            core = core[:want]
-        elif len(core) < want:
-            core = np.concatenate([core, np.zeros(want - len(core))])
+                                                          ratio=float(np.clip(r, 0.25, 4.0)),
+                                                          want=want)
         return {"kind": "gap", "audio": core, "pre": pre, "post": post,
                 "src": (a_sec, b_sec), "verbatim": False, "stretched_to": round(r, 5), "info": info}
 
