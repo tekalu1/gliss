@@ -29,7 +29,8 @@
 //    離したら `set_track(index)`（取り消しの履歴に入る）。当たるまで見かけの並び（pendingOrder）を残す。
 //  - **プラグイン（ARA。ara.js）**: 位置・名前・種類・外すは DAW が決める（クリップの下半分のドラッグ・メニューは無し）。トラック
 //    1 行 = AudioModification。ソースの波形は薄く全体に出し、鳴る範囲（DAW のリージョン）だけ枠と普通の明るさで描く。
-//    ルーラーのクリック・ドラッグは DAW の再生位置・ループ（ホストの再生の制御）へも送る。
+//    ルーラーのクリック・ドラッグは DAW の再生位置・ループ（ホストの再生の制御）へも送る。見出しの M・S・音量・パンは出さず、
+//    はさみ・ミュートのツールはトラックビューでは働かない（クリップの分割・部分のミュートは DAW のリージョンの仕事）。
 //  - **表示範囲はエディターと別**（issue #39）: 横ズーム（既定 Ctrl+Shift+ホイール）・横スクロール（Shift+ホイール）で
 //    上だけ動く。既定（ズームしていない間）は全体表示で、曲の長さに合わせて広がる。表示 > ズームを戻すで全体表示に。
 import { $, analyzeTake, call, onAbandon, status } from './engine.js';
@@ -331,7 +332,8 @@ function headsHtml() {
     const r1 = `<div class="r1"><span class="nm" title="${tip}">${nm}</span>${pp}${g}`
       + `<button data-act="m" aria-pressed="${!!t.mute}" title="ミュート" aria-label="${nm} のミュート">M</button>`
       + `<button data-act="s" aria-pressed="${!!t.solo}" title="ソロ" aria-label="${nm} のソロ">S</button></div>`;
-    const r2 = '<div class="r2">'
+    // 2 段目（音量・パン）は Gliss の再生だけに効く。プラグインは DAW が鳴らすので出さない（M・S と同じ）
+    const r2 = ARA ? '' : '<div class="r2">'
       + `<div class="vol${dragging('vol')}" data-mix="vol" role="slider" tabindex="0" aria-label="${nm} の音量" aria-valuemin="${GAIN_MIN_DB}" aria-valuemax="${GAIN_MAX_DB}" aria-valuenow="${db}" aria-valuetext="${fmtDb(db)} dB" title="音量 ${fmtDb(db)} dB（ダブルクリックで 0 dB・Shift で細かく）">`
       + `<i class="tr"></i><i class="fi" style="width:${pct}%"></i><i class="z" style="left:80%"></i><i class="kn" style="left:${pct}%"></i></div>`
       + `<span class="vv${Math.abs(db) > 0.04 ? ' chg' : ''}">${fmtDb(db)}</span>`
@@ -1212,8 +1214,8 @@ function onLaneDown(e) {
   const h = laneHit(e);
   if (!h.t) return;
   // はさみ・ミュートは、クリップの上ではメインの操作（範囲・位置）の代わりに働く（クリップの外はメインと同じ）
-  if (S.tool === 'cut' && h.inClip) { cutDown(e, h); return; }
-  if (S.tool === 'mute' && h.inClip) { muteDown(e, h); return; }
+  if (clipTool() === 'cut' && h.inClip) { cutDown(e, h); return; }
+  if (clipTool() === 'mute' && h.inClip) { muteDown(e, h); return; }
   if (h.move) {
     // クリップの下半分: 位置をずらす（音源全体）。確定待ちの見かけの位置があれば、そこから
     dr = { type: 'move', row: h.row, id: h.t.id, x0: e.clientX, xl: e.clientX, t0: h.tl,
@@ -1356,24 +1358,28 @@ const secText = (v) => `${v.toFixed(2)} 秒`;
 const CUT_NEAR_PX = 5;      // 切れ目に乗っているとみなす距離
 const DBL_MS = 450;         // 切れ目のダブルクリックの間隔
 
+/** トラックビューで働くはさみ・ミュート（'cut'・'mute'・null）。プラグインはクリップを DAW が決めるので働かない（メインと同じ）。 */
+const clipTool = () => (!ARA && (S.tool === 'cut' || S.tool === 'mute') ? S.tool : null);
+
 /** ホバー: ツールのカーソル・ツールチップ・はさみの縦線／ミュートの部分の枠（メインと鉛筆は今までどおり）。 */
 function hoverTool(h, e) {
   lastHit = { inClip: h.inClip, move: h.move, t: h.t };
   tvHover = null;
   let tip = '';
-  if (S.tool === 'cut' && h.t && h.inClip) {
+  const ct = clipTool();
+  if (ct === 'cut' && h.t && h.inClip) {
     const off = offsetOf(h.t);
     let v = h.tl;
     if (timeSnapOn(e)) v = snapTime(v, tvStep());
     const cut = (h.t.cuts || []).find((c) => Math.abs(tvX(off + c) - h.x) <= CUT_NEAR_PX);
     tvHover = { id: h.t.id, t: r6(v - off), cut: cut ?? null };
     tip = cut != null ? '切れ目: ダブルクリックでつなぐ' : 'クリックでここを分ける（Shift: グリッドに寄せない）';
-  } else if (S.tool === 'mute' && h.t && h.inClip) {
+  } else if (ct === 'mute' && h.t && h.inClip) {
     const k = pieceAt(h.t, h.tl);
     const p = k >= 0 ? pieces(h.t.cuts || [], h.t.duration_sec || 0)[k] : null;
     tvHover = p ? { id: h.t.id, piece: p } : null;
     if (p) tip = `クリックでこの部分を${covered(h.t.mutes || [], p[0], p[1]) ? '戻す' : '消す'}（なぞるとまとめて）`;
-  } else if (S.tool !== 'cut' && S.tool !== 'mute') {
+  } else if (!ct) {
     if (h.move) tip = 'ドラッグで位置をずらす（Shift: 細かく / Alt: 吸い付かない）';
   }
   applyCursor(lastHit);
@@ -1385,9 +1391,10 @@ function hoverTool(h, e) {
 function applyCursor(h = lastHit) {
   if (!lanes || (dr && dr.type !== 'paint')) return;       // 位置・範囲のドラッグ中は触らない（grabbing のまま）
   const inClip = !!h?.inClip;
-  lanes.classList.toggle('cur-cut', S.tool === 'cut' && inClip);
-  lanes.classList.toggle('cur-mute', S.tool === 'mute' && inClip);
-  if (S.tool === 'cut' || S.tool === 'mute') lanes.style.cursor = '';
+  const ct = clipTool();
+  lanes.classList.toggle('cur-cut', ct === 'cut' && inClip);
+  lanes.classList.toggle('cur-mute', ct === 'mute' && inClip);
+  if (ct) lanes.style.cursor = '';
   else if (S.tool === 'draw') lanes.style.cursor = 'default';
   else lanes.style.cursor = h?.move ? 'grab' : h?.t && h.t.kind === 'vocal' && h.inClip ? 'pointer' : 'default';
 }

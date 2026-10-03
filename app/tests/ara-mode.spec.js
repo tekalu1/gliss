@@ -134,7 +134,7 @@ test('(A2) メニュー: プロジェクト・書き出し・AI・更新が無�
   expect(keys).toMatchObject({ 'new-project': [], 'open-take': [], save: [], 'save-as': [], 'add-track': [], export: [], 'export-as': [], rename: [], play: ['Space'], undo: ['Ctrl+Z'] });
 });
 
-test('(A3) セッションが来ると、編集対象を解析して描く（M・S は出さない）', async () => {
+test('(A3) セッションが来ると、編集対象を解析して描く（M・S・音量・パンは出さない）', async () => {
   // DAW の代わりに、既存のツールでセッションを作る（プラグインではエンジンの ara_* が作る）
   await win.evaluate(async ([a, b]) => {
     const r = await window.api.call('new_project', { take_path: a, author: 'human' });
@@ -150,13 +150,14 @@ test('(A3) セッションが来ると、編集対象を解析して描く（M�
   expect(await current()).toBe(ts[0].id);
   const n = await win.evaluate(() => window.__app.notes().length);
   expect(n).toBeGreaterThanOrEqual(2);
-  // ミュート／ソロは隠す・ガイドのアイコンは残す
+  // ミュート／ソロ・音量・パンは隠す（DAW が鳴らす）・ガイドのアイコンは残す
   const vis = await win.evaluate(() => {
     const shown = (el) => !!el && getComputedStyle(el).display !== 'none';
     const h = document.querySelector('#heads .th');
-    return { m: shown(h.querySelector('[data-act=m]')), s: shown(h.querySelector('[data-act=s]')), g: shown(h.querySelector('[data-act=guide]')) };
+    return { m: shown(h.querySelector('[data-act=m]')), s: shown(h.querySelector('[data-act=s]')), g: shown(h.querySelector('[data-act=guide]')),
+      mix: h.querySelectorAll('[data-mix]').length };
   });
-  expect(vis).toEqual({ m: false, s: false, g: true });
+  expect(vis).toEqual({ m: false, s: false, g: true, mix: 0 });
   // 初回の「解析中」の覆い・ポップアップは出さない（DAW の操作を止めない）
   const pop = await win.evaluate(() => ({ center: getComputedStyle(document.querySelector('#busyCenter')).display, dim: getComputedStyle(document.querySelector('.busy-scrim'), '::before').display }));
   expect(pop).toEqual({ center: 'none', dim: 'none' });
@@ -234,6 +235,18 @@ test('(A6) クリップの位置は動かせない・右クリックのメニュ
   const head = await win.evaluate(() => window.__app.menuItems().map((i) => i.label));
   expect(head).toEqual(['このトラックをガイドにする']);
   await win.keyboard.press('Escape');
+  // はさみ・ミュートのツールは、トラックビューではクリップを分けない・消さない（クリップは DAW のリージョン）
+  for (const tool of ['tool-cut', 'tool-mute']) {
+    await win.evaluate((c) => window.__app.runCommand(c), tool);
+    const b = await win.locator('#lanes [data-clip]').first().boundingBox();
+    await win.mouse.click(b.x + b.width * 0.4, b.y + b.height * 0.3);
+    await idle();
+    const cls = await win.evaluate(() => document.querySelector('#lanes').getAttribute('class') || '');
+    expect(cls).not.toMatch(/cur-(cut|mute)/);
+  }
+  await win.evaluate(() => window.__app.runCommand('tool-main'));
+  const st = await win.evaluate(() => window.__app.S.tracks.map((t) => [(t.cuts || []).length, (t.mutes || []).length]));
+  expect(st.every(([c, m]) => c === 0 && m === 0)).toBe(true);
 });
 
 test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリックはループを解除しない', async () => {

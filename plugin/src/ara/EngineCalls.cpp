@@ -9,7 +9,8 @@ namespace tools
 bool isForbidden (const juce::String& tool)
 {
     static const juce::StringArray forbidden { "new_project", "load_project", "open_project", "save_project", "close_project",
-                                               "add_track", "remove_track", "export_wav", "render_tracks" };
+                                               "add_track", "remove_track", "export_wav", "render_tracks",
+                                               "split_track", "join_track", "mute_track_range" };
     return forbidden.contains (tool) || tool.startsWith ("ara_");
 }
 

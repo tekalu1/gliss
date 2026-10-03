@@ -332,7 +332,8 @@ public:
         beginTest ("forbidden tools");
         {
             for (auto* tool : { "new_project", "load_project", "open_project", "save_project", "close_project", "add_track",
-                                "remove_track", "export_wav", "render_tracks", "ara_open", "ara_render_dirty" })
+                                "remove_track", "export_wav", "render_tracks", "split_track", "join_track", "mute_track_range",
+                                "ara_open", "ara_render_dirty" })
                 expect (tools::isForbidden (tool), tool);
 
             for (auto* tool : { "list_tracks", "select_track", "analyze_take", "shift_pitch", "undo", "engine_info", "set_guide_track" })

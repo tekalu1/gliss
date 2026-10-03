@@ -1004,7 +1004,8 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 - 編集・取り消し・トラックの選択・解析は今までのツール（`select_track`・`analyze_take`・`shift_pitch`・`undo` …）。
   `list_tracks` などの `session.tracks[]` には、ARA のトラックだけ `ara_id`・`group` が付く。
 - `new_project`・`load_project`・`open_project`・`save_project`・`close_project`・`add_track`・`remove_track`・`export_wav`・
-  `render_tracks` はプラグインからは呼ばない（プラグインが断る）。`ara` の文書の `save_project` はエンジンも断る。
+  `render_tracks`・`split_track`・`join_track`・`mute_track_range` はプラグインからは呼ばない（プラグインが断る。
+  クリップの分割・部分のミュートは DAW のリージョンの仕事で、プラグインの音にも効かない）。`ara` の文書の `save_project` はエンジンも断る。
 - `project_status().document.kind = "ara"`、`dirty` は常に false。`close_project` は作業場所を消さない（開き直したとき解析の
   キャッシュを使う）。`bridge.json` には載らない（AI の `load_project()` はプラグインの曲を開かない）。
 - プラグインがソースの WAV を書き直す（同じ音でもファイルのバイトは変わりうる）ので、編集を捨てないように、
