@@ -121,6 +121,9 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 - TestHost の `-file <wav>`（音声ファイルを渡す）は、**SDK 自身の TestPlugIn でも**ときどき終わらない（試験ごとに起きたり起きなかったりする）。Gliss の検証では使わず、内蔵の試験信号を使う。
 - TestHost は VST3 の `processMode` を `kRealtime` にして CPU の速さで描画する。先読みが間に合わないブロックが多く出る（普通の再生ではない）。このため、突き合わせの検証では `GLISS_ARA_READ_TIMEOUT_MS` で待たせる。待たない場合の挙動は、ブロックが欠ける（無音になる）だけで、読めた部分は正しい。
 - JUCE のホスト側で、`AudioPluginFormatManager::createARAFactoryAsync(説明, ...)` で ARA ファクトリを取ると、DLL のハンドルを持たずに取り、ファクトリを手放すときに外れた DLL の中を呼んで落ちる（JUCE の ARAPluginDemo でも同じ）。**インスタンスを先に作り、`juce::createARAFactoryAsync (*instance, ...)` で取る**（AudioPluginHost と同じ）。
+- JUCE 9.0.3 の `WebBrowserComponent`（Windows）で確かめたこと（2026-10-03）: resource provider には `https://juce.backend` の後ろが**解かれないまま**（`?` 以降も）渡る。`nullopt` を返すと WebView2 がネットワークへ取りに行くので、見つからないものも何か返す（エディタは印の MIME。上の「エディタ」）。ネイティブ関数の completion は `WebBrowserComponent` を壊した後に呼ぶと解放済みのものを触る（`EditorWebView::guarded` で捨てる）。
+- 検証で `evaluateJavascript` を使うとき: 結果は JSON の文字列で来るので `JSON::fromString` で読む（`JSON::parse` は最上位の `true`・文字列を読まない）。`evaluateJavascript` の中から直に `import()` すると解決しない（user script やページからの `import()` は通る）。
+- GlissHostCheck（ARA のホスト側だけ）では `juce::ARAViewSelection` が宣言されない（`JucePlugin_Enable_ARA` のときだけ）。`DocumentBridge.h` を読むファイルには `tests/hostcheck/AraSelectionShim.h` を前置きする。
 
 ## 構成
 
