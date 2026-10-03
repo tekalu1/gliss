@@ -1,10 +1,10 @@
-Gliss の F0 モデル（試作。gliss-f0.onnx）の出典
-==================================================
+Gliss の F0 モデル（gliss-f0.onnx）の出典
+==========================================
 
 gliss-f0.onnx は、SwiftF0（Lars Nieradzik 作。MIT）の学習コードと同じ構造のモデル（14 386 パラメータ）を、
-下のデータだけで Gliss が学習したもの。ピッチ（F0）の検出に使う。事前学習済みの F0 モデル（RMVPE・SwiftF0 など）の
+下のデータだけで Gliss が学習したもの。ピッチ（F0）の検出に使う。事前学習済みの F0 モデル（RMVPE・SwiftF0・CREPE など）の
 重みは、学習にもラベル作りにも使っていない。
-重みは試作で、ライセンスは Gliss 本体（GPL-3.0-or-later）に従う。学習データそのものは同梱していない。
+重みのライセンスは Gliss 本体（GPL-3.0-or-later）に従う。学習データそのものは同梱していない。
 
 学習コード
 ----------
@@ -30,19 +30,32 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
-学習に使ったデータ（各データの一部を使った。録音そのものは重みに入っていない）
+学習に使ったデータ（各データの一部または全部を使った。録音そのものは重みに入っていない）
 --------------------------------------------------------------------------------
+歌声・合唱
 - VocalSet: A Singing Voice Dataset. Julia Wilkins, Prem Seetharaman, Alison Wahl, Bryan Pardo.
   https://doi.org/10.5281/zenodo.1193957 — Creative Commons Attribution 4.0 International (CC BY 4.0)
-  https://creativecommons.org/licenses/by/4.0/ 。録音の一部を F0 の合意ラベル付きでそのまま、一部を F0 を差し替えて
+  https://creativecommons.org/licenses/by/4.0/ 。録音の大部分を F0 の合意ラベル付きでそのまま、一部を F0 を差し替えて
   再合成した音として使った（改変あり）。
+- Choral Singing Dataset. Helena Cuesta, Emilia Gómez, Agustín Martorell, Felipe Loáiciga.
+  https://doi.org/10.5281/zenodo.2649950 — CC BY 4.0。個々の歌い手の録音と、人が直した F0 の注釈を使った。
+- Cantoría Dataset. Helena Cuesta, Emilia Gómez. https://doi.org/10.5281/zenodo.5851070 — CC BY 4.0。
+  四重唱の歌い手ごとの録音を使った（F0 の注釈は使わず、重みの要らない方式の合意でラベルを作った）。
+- ESMUC Choir Dataset. Helena Cuesta, Emilia Gómez. https://doi.org/10.5281/zenodo.5848990 — CC BY 4.0。
+  近接マイクの録音と、人が直した F0 の注釈を使った。
+- Dagstuhl ChoirSet. Sebastian Rosenzweig, Helena Cuesta, Christof Weiß, Frank Scherbaum, Emilia Gómez, Meinard Müller.
+  https://doi.org/10.5281/zenodo.4618287 （Transactions of the International Society for Music Information
+  Retrieval 3(1), 2020. https://doi.org/10.5334/tismir.48 ）— CC BY 4.0。近接マイク（DYN・HSM）の録音と、同じ歌い手の
+  喉頭マイクに pYIN をかけた注釈（配布物の annotations_csv_F0_PYIN）を使った。
+
+話し声
 - PTDB-TUG: Pitch Tracking Database from Graz University of Technology. Gregor Pirker, Michael Wohlmayr,
   Stefan Petrik, Franz Pernkopf. Signal Processing and Speech Communication Laboratory, Graz University of Technology.
   Open Database License (ODbL) 1.0 https://opendatacommons.org/licenses/odbl/1.0/ ・個々の内容は
   Database Contents License 1.0 https://opendatacommons.org/licenses/dbcl/1.0/ 。
   喉頭マイクから作られた参照 F0 を正解の確認に、録音の一部を再合成の元に使った。
-- CMU Arctic speech synthesis databases (bdl, slt). John Kominek, Alan W Black. CMU-LTI-03-177, 2003.
-  http://festvox.org/cmu_arctic/ 。配布元の条件（報告書の付録 A）:
+- CMU Arctic speech synthesis databases (bdl, slt, awb, rms, clb, jmk, ksp). John Kominek, Alan W Black.
+  CMU-LTI-03-177, 2003. http://festvox.org/cmu_arctic/ 。配布元の条件（報告書の付録 A）:
   "Carnegie Mellon University Copyright (c) 2003 All Rights Reserved. Permission to use, copy, modify, and license this
   software and its documentation for any purpose, is hereby granted without fee, subject to the following conditions:
   1. The code must retain the above copyright notice, this list of conditions and the following disclaimer.
@@ -52,17 +65,28 @@ SOFTWARE.
   OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
   OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE."
   改変（再合成・F0 の差し替え）を含む。
-- LibriSpeech (dev-clean, dev-other). Vassil Panayotov, Guoguo Chen, Daniel Povey, Sanjeev Khudanpur, 2015.
+- LibriSpeech (dev-clean, dev-other, train-clean-100). Vassil Panayotov, Guoguo Chen, Daniel Povey, Sanjeev Khudanpur, 2015.
   https://www.openslr.org/12/ — CC BY 4.0。話し声の再合成・背景のおしゃべりに使った。
-- NSynth (test). Jesse Engel et al., Google Magenta, 2017. https://magenta.tensorflow.org/datasets/nsynth —
-  CC BY 4.0。楽器の単音（公称音高つき）として使った。
+
+楽器
+- NSynth (test, valid). Jesse Engel, Cinjon Resnick, Adam Roberts, Sander Dieleman, Mohammad Norouzi, Douglas Eck,
+  Karen Simonyan. Google Magenta, 2017. https://magenta.tensorflow.org/datasets/nsynth — CC BY 4.0。
+  楽器の単音（公称音高つき）として使った。
+
+拡張（雑音・音楽・残響）
 - DEMAND: a collection of multi-channel recordings of acoustic noise in diverse environments.
   Joachim Thiemann, Nobutaka Ito, Emmanuel Vincent. https://doi.org/10.5281/zenodo.1227121 — CC BY 4.0。
-  背景の雑音として足した。
+  背景の雑音として足した（14 の環境）。
 - GuitarSet. Qingyang Xi, Rachel M. Bittner, Johan Pauwels, Xuzhou Ye, Juan P. Bello.
   https://doi.org/10.5281/zenodo.3371780 — CC BY 4.0。背景の音楽として足した。
+- BUT Speech@FIT Reverb Database. Igor Szöke, Miroslav Skácel, Ladislav Mošner, Jakub Paliesek, Jan Černocký.
+  "Building and evaluation of a real room impulse response dataset", IEEE Journal of Selected Topics in Signal
+  Processing 13(4), 2019. https://doi.org/10.1109/JSTSP.2019.2917582 ・ http://merlin.fit.vutbr.cz/ReverbDB/ —
+  配布元のページ: "The database has CC-BY 4.0 license"。実測の部屋のインパルス応答（8 の部屋のうち 700 本。残りの 1 つの部屋
+  VUT_FIT_C236 は評価にだけ使い、学習には入れていない）を、残響の拡張に使った。
 
-評価にだけ使い、学習には入れていないもの: vocadito（Rachel Bittner et al. https://doi.org/10.5281/zenodo.5578807 。CC BY 4.0）。
+評価にだけ使い、学習には入れていないもの: vocadito（Rachel Bittner et al. https://doi.org/10.5281/zenodo.5578807 。CC BY 4.0）、
+BUT Speech@FIT Reverb Database の部屋 VUT_FIT_C236。
 
 ラベルを作る道具（重みには入らない）: WORLD（pyworld。Modified BSD / MIT）・Praat（praat-parselmouth。GPL-3.0-or-later）・
-librosa（ISC）・pyroomacoustics（MIT。残響の生成）。
+librosa（pYIN を含む。ISC）・pyroomacoustics（MIT。残響の生成）。
