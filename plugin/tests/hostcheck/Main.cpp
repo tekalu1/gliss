@@ -1,14 +1,19 @@
 // GlissHostCheck: JUCE のホストとして Gliss.vst3 を読み込み、画面を開かずに（実際は画面の外に置いて）確かめる。
 //
 //   GlissHostCheck <結果を書くファイル> <Gliss.vst3 のバイナリ> [<GLISS_ARA_TRACE_DIR と同じフォルダ、または ->] [--no-editor]
+//   GlissHostCheck --editor <結果を書くファイル> [--expect-web-dir] [--cycles <回数>]
 //
 // 確かめること:
 //   1. VST3 として見つかり、PluginDescription が ARA の拡張を持つと言う
 //   2. ARA ファクトリが取れ、ID が決めたとおりである
 //   3. インスタンスを作り、ARA に結び付かない（普通の VST3 の）ブロック処理が入力を変えない
-//   4. エディタを作り、画面の外の窓に置いて、WebView2 の HTML が読み込まれて "ready" が届く
-//      （プラグインが GLISS_ARA_TRACE_DIR に "editor: page ready" を書く。第 3 引数を渡したときだけ）
+//   4. エディタを作り、画面の外の窓に置く。ARA に結び付けていないので、エディタは画面（WebView2）を出さずに案内を出す
+//      （プラグインが GLISS_ARA_TRACE_DIR に "editor: not bound to an ARA document" を書く。第 3 引数を渡したときだけ）
+// --editor は Gliss.vst3 を読まず、エディタの画面の部品（plugin/src/editor）を偽の DocumentBridge につないでこのプロセスの中で
+// 確かめる（EditorCheck.h の冒頭）。
 // 窓は画面の外に置き、SW_SHOWNA（前面にも入力の対象にもならない）で出す。結果は 0（全部通った）か 1 で返す。
+#include "EditorCheck.h"
+
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_extra/juce_gui_extra.h>
 
@@ -49,9 +54,13 @@ public:
     {
         const auto args = getCommandLineParameterArray();
 
+        if (args.size() >= 2 && args[0] == "--editor")
+            return runEditorCheck (args);
+
         if (args.size() < 2)
         {
-            std::fprintf (stderr, "usage: GlissHostCheck <report file> <Gliss.vst3> [<trace dir> or -] [--no-editor]\n");
+            std::fprintf (stderr, "usage: GlissHostCheck <report file> <Gliss.vst3> [<trace dir> or -] [--no-editor]\n"
+                                  "       GlissHostCheck --editor <report file> [--expect-web-dir] [--cycles <n>]\n");
             setApplicationReturnValue (2);
             quit();
             return;
@@ -84,6 +93,7 @@ public:
     void shutdown() override
     {
         stopTimer();
+        editorCheck.reset();
         window.reset();
         editor.reset();
         araFactory = {};
@@ -91,6 +101,32 @@ public:
     }
 
 private:
+    void runEditorCheck (const juce::StringArray& args)
+    {
+        reportFile = juce::File (args[1]);
+        reportFile.deleteFile();
+
+        const auto cyclesIndex = args.indexOf ("--cycles");
+        const auto cycles = cyclesIndex >= 0 ? args[cyclesIndex + 1].getIntValue() : 20;
+
+        editorCheck = std::make_unique<EditorCheck> ([this] (const juce::String& line) { report (line); },
+                                                     [this] (bool ok, const juce::String& what) { return check (ok, what); },
+                                                     args.contains ("--expect-web-dir"), cycles);
+        editorCheck->start ([this]
+        {
+            report (failures == 0 ? "RESULT OK" : "RESULT FAILED (" + juce::String (failures) + ")");
+            setApplicationReturnValue (failures == 0 ? 0 : 1);
+
+            // WebView2 の後始末はメッセージループの上で非同期に進むので、少し回してから終わる
+            juce::Timer::callAfterDelay (teardownWaitMs, [this]
+            {
+                editorCheck.reset();
+                report ("teardown: quit");
+                quit();
+            });
+        });
+    }
+
     void createInstance()
     {
         formatManager.createPluginInstanceAsync (description, 48000.0, 512,
@@ -182,23 +218,23 @@ private:
 
     void timerCallback() override
     {
-        bool ready = false;
+        bool shown = false;
 
         for (const auto& file : traceDir.findChildFiles (juce::File::findFiles, false, "gliss-ara-*.log"))
-            if (file.loadFileAsString().contains ("editor: page ready"))
-                ready = true;
+            if (file.loadFileAsString().contains ("editor: not bound to an ARA document"))
+                shown = true;
 
-        if (ready)
+        if (shown)
         {
             stopTimer();
-            check (true, "WebView2 page loaded and sent \"ready\" (" + juce::String ((int) (juce::Time::getMillisecondCounter() - waitStart)) + " ms)");
+            check (true, "editor without an ARA document shows the notice (" + juce::String ((int) (juce::Time::getMillisecondCounter() - waitStart)) + " ms)");
             return finish();
         }
 
-        if (juce::Time::getMillisecondCounter() - waitStart > 30000)
+        if (juce::Time::getMillisecondCounter() - waitStart > 10000)
         {
             stopTimer();
-            check (false, "WebView2 page did not report ready within 30 s");
+            check (false, "editor did not report the notice within 10 s");
             finish();
         }
     }
@@ -247,6 +283,7 @@ private:
     std::unique_ptr<juce::AudioPluginInstance> instance;
     std::unique_ptr<juce::AudioProcessorEditor> editor;
     std::unique_ptr<OffscreenWindow> window;
+    std::unique_ptr<EditorCheck> editorCheck;
 
     juce::File reportFile, traceDir;
     juce::String pluginPath;
