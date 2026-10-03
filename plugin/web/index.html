@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gliss (ARA)</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: #1e1e24; color: #e8e8ee;
+    font: 14px/1.5 "Segoe UI", "Yu Gothic UI", sans-serif;
+    display: flex; flex-direction: column; padding: 16px 20px; box-sizing: border-box;
+  }
+  h1 { font-size: 20px; margin: 0 0 12px; font-weight: 600; }
+  .muted { color: #9a9aa8; }
+  .region { border: 1px solid #3a3a46; border-radius: 6px; padding: 8px 12px; margin: 0 0 8px; background: #26262e; }
+  .region .name { font-weight: 600; }
+  #status { margin-top: auto; font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>Gliss（ARA）</h1>
+  <div id="regions" class="muted">リージョンが選ばれていません</div>
+  <div id="status" class="muted"></div>
+<script>
+(function () {
+  "use strict";
+  var regionsEl = document.getElementById("regions");
+  var statusEl = document.getElementById("status");
+
+  function formatTime(seconds) {
+    var total = Math.max(0, seconds);
+    var minutes = Math.floor(total / 60);
+    var rest = total - minutes * 60;
+    return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(3);
+  }
+
+  function render(selection) {
+    if (typeof selection === "string") { try { selection = JSON.parse(selection); } catch (e) { return; } }
+    regionsEl.textContent = "";
+    if (!selection || !selection.isARA) {
+      regionsEl.className = "muted";
+      regionsEl.textContent = "ARA に対応したホストの、オーディオイベントの拡張として開いてください";
+      return;
+    }
+    var regions = selection.regions || [];
+    if (regions.length === 0) {
+      regionsEl.className = "muted";
+      regionsEl.textContent = "リージョンが選ばれていません";
+      return;
+    }
+    regionsEl.className = "";
+    regions.forEach(function (region) {
+      var item = document.createElement("div");
+      item.className = "region";
+      var name = document.createElement("div");
+      name.className = "name";
+      name.textContent = region.name;
+      var detail = document.createElement("div");
+      detail.className = "muted";
+      detail.textContent = "開始 " + formatTime(region.startSeconds) + " ／ 長さ " + formatTime(region.durationSeconds);
+      item.appendChild(name);
+      item.appendChild(detail);
+      regionsEl.appendChild(item);
+    });
+  }
+
+  var juce = window.__JUCE__;
+  if (juce && juce.backend) {
+    juce.backend.addEventListener("selection", render);
+    juce.backend.emitEvent("ready", {});
+    statusEl.textContent = "接続済み";
+  } else {
+    statusEl.textContent = "プラグインの外で開かれています（JUCE の接続なし）";
+  }
+})();
+</script>
+</body>
+</html>

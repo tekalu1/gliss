@@ -1,0 +1,2 @@
+# ビルドの出力と、CMake の FetchContent が取る依存（JUCE・ARA SDK・WebView2）
+build/
