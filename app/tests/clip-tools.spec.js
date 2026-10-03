@@ -197,7 +197,7 @@ test('(T2) はさみ: クリックで切る・ホバーで縦線・切れ目の�
   expect((await engineTrack(take.id)).cuts).toEqual([]);
   expect(await status()).toContain('つないだ');
   // 端に近すぎる
-  const e = await at(take.id, 0.005);
+  const e = await at(take.id, 0.015);
   await win.mouse.click(e.x, e.y);
   await settle();
   expect((await trk(take.id)).cuts).toHaveLength(0);
