@@ -62,7 +62,7 @@ issue #3。背景は VST3 / ARA 2 の調査（§5.2 段階 0・§5.3 ARA に着�
 
 | 名前 | 何をするか |
 |---|---|
-| `RegionRenderer(x, sr, f0r, backend)` / `.for_project(p, channels="mono"\|"all")` | チャンネルごとのレンダラ（バックエンドの下ごしらえ）を持ち回す。多チャンネルの praat はモノラル化した音で解析・ゲイン・クロスフェードの相関を共有（`export_wav` と同じ。書き出しもこれを使うようにした） |
+| `RegionRenderer(x, sr, f0r, backend)` / `.for_project(p, channels="mono"\|"all")` | チャンネルごとのレンダラ（バックエンドの下ごしらえ）を持ち回す。多チャンネルの praat はモノラル化した音で解析・ゲイン・クロスフェードの相関と位相をそろえた量を共有（`export_wav` と同じ。書き出しもこれを使うようにした） |
 | `render_region(p, start_sec, end_sec)` → `(y, info)` | 編集を当てた区間の PCM。**長さが変わらない**（[a, b) を頼めば b − a サンプル）。中身は **`export_wav` が同じ範囲に書くものと同じ**（掛かる窓を丸ごと再合成して切り出す）。`info` にソース上の開始サンプル・再合成した窓・掛かった秒 |
 | `dirty_windows(p, segs_before, segs_after)` | 1 回の編集（か undo）で差し替え直す範囲。変わった Segment に掛かる窓から始めて、重なる窓を編集の前後両方から足していく |
 | `EditCache(p)` / `.prepare()` / `.update()` | クリップ全体の「編集を当てた PCM」を持ち、編集のたびに**変わった窓だけ**再合成して差し替える（ARA の PlaybackRenderer がキャッシュを読むだけにする形の試作）。`update()` の返り値の `timing_sec` が「1 回の編集の再合成時間」 |

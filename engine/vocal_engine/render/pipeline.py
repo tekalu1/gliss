@@ -12,6 +12,8 @@
   - クロスフェードが縮まないように、**出力が 20 ms 未満の区間は隣と束ねるか、隣の隙間から借りて広げる**
     （`bundle_short_segments`）。1 つの chunk の頭と尻のクロスフェードは chunk の中で重ならない（`_join`）。
     縮んだり重なったりすると、再合成の端と次の音が 1 サンプルの段差（クリック）でつながる。
+  - 隣り合う区間は別々に再合成するので位相がそろわない（rho が 0 に近いと等パワーで混ざって痩せ、ピッチが細かく揺れる）。
+    入ってくる再合成の区間を ±ALIGN_MAX_MS 動かして、つなぎ目の相互相関をそろえる（`_join`）。原音のままの区間は動かさない。
   - フェードの形は、重ねる 2 つの音の相関 rho に合わせて振幅を補正する
     （rho=1 → 振幅の和が 1、rho=0 → 等パワー）。同じ原音どうしでも、ピッチの違う音どうしでも
     膨らまない・痩せない。
@@ -40,6 +42,10 @@ from ..project.model import Edit
 from .base import get_backend, resolve_backend_name
 
 MIN_GAP_MS = 5.0
+ALIGN_MAX_MS = 5.0       # つなぎ目で再合成した区間の位相をそろえるために動かす最大（±ms。0 なら無効）
+ALIGN_MIN_GAIN = 0.05    # 相関がこれ以上よくならなければ動かさない
+ALIGN_RIGHT_WEIGHT = 0.5  # 尻の側（動かせない次の区間）との相関の重み。頭の側（前の区間）を優先する
+ALIGN_TIE = 0.01         # 相関の差がこれ以下の量どうしでは、動かす量の小さい方を選ぶ
 
 
 @dataclass
@@ -399,7 +405,8 @@ class Renderer:
             return np.zeros(0)
         return self.x[a:b].copy()
 
-    def render_range(self, t0, t1, segments, xfade_ms=XFADE_MS, fit_out_sec=None, xfade_rhos=None):
+    def render_range(self, t0, t1, segments, xfade_ms=XFADE_MS, fit_out_sec=None, xfade_rhos=None,
+                     xfade_lags=None):
         """[t0, t1) を編集して返す。(y, info)
 
         `fit_out_sec` を渡すと**出力の長さをその秒数ぴったりに合わせる**
@@ -409,11 +416,13 @@ class Renderer:
 
         `xfade_rhos`: つなぎ目ごとのクロスフェードの相関（info["xfade_rhos"]）。多チャンネルの書き出しで
         モノラル化した音で決めた値を全チャンネルにそろえる（チャンネルごとに測ると、ゲインが
-        チャンネルで違って L + R の関係・定位が崩れる）。
+        チャンネルで違って L + R の関係・定位が崩れる）。`xfade_lags` も同じ（つなぎ目ごとに区間を動かした
+        サンプル数。info["xfade_lags"]）。
         """
         sr = self.sr
         hx = max(1, int(round(xfade_ms / 2000.0 * sr)))     # 片側マージン = 10 ms
         fade = 2 * hx                                       # クロスフェード長 = 20 ms
+        tau = int(round(ALIGN_MAX_MS / 1000.0 * sr))        # 位相をそろえるために区間を動かす最大
         fades = [s.fade for s in segments if getattr(s, "fade", None) is not None]
         segs = [s for s in segments if not s.is_identity() and getattr(s, "fade", None) is None
                 and ((s.end_sec > t0 and s.start_sec < t1)
@@ -461,18 +470,20 @@ class Renderer:
                 warnings.append("%.3f s は直前の編集と隣接していて移動を吸収できない" % s)
             want = slot((e - s) * sg.ratio)
             if sg.ratio <= 0.0:                       # crop: この区間は出さない
-                core, pre, post, info = np.zeros(0), None, None, {"cropped": True}
+                core, pre, post, info, full = np.zeros(0), None, None, {"cropped": True}, None
             elif sg.gain <= 0.0:                      # mute: 長さはそのまま、中身は無音（再合成しない）
-                core, pre, post, info = np.zeros(0), np.zeros(hx), np.zeros(hx), {"muted": True}
+                core, pre, post, info, full = (np.zeros(0), np.zeros(hx), np.zeros(hx),
+                                               {"muted": True}, None)
             elif abs(sg.cents) < 1e-9 and abs(sg.ratio - 1.0) < 1e-9 and not sg.curve_points:
                 # 移動だけ: 中身は原音そのもの（再合成しない）
                 core, post = self._verbatim(s, want, hx)
-                pre, info = None, {"verbatim": True}
+                pre, info, full = None, {"verbatim": True}, None
             else:
-                core, pre, post, info = self._render_with_margins(
-                    s, e, hx, cents=sg.cents, ratio=sg.ratio, curve_points=sg.curve_points, want=want)
+                core, pre, post, info, full = self._render_with_margins(
+                    s, e, hx, cents=sg.cents, ratio=sg.ratio, curve_points=sg.curve_points, want=want,
+                    slack=tau)
             chunks.append({"kind": "muted" if sg.gain <= 0.0 and sg.ratio > 0.0 else "edited",
-                           "audio": _fit(core, want), "pre": pre, "post": post,
+                           "audio": _fit(core, want), "pre": pre, "post": post, "full": full,
                            "src": (s, e), "edit_ids": sg.edit_ids, "info": info})
             cursor = e
             m_prev = sg.move_ms
@@ -491,8 +502,9 @@ class Renderer:
             for w in (c.get("info") or {}).get("warnings", []):
                 if w not in warnings:
                     warnings.append(w)
-        rhos = []
-        y = self._join(chunks, hx, fade, rhos=xfade_rhos, used=rhos)
+        rhos, lags = [], []
+        y = self._join(chunks, hx, fade, rhos=xfade_rhos, used=rhos, lags=xfade_lags, used_lags=lags,
+                       tau=tau)
         if fit_out_sec is not None:
             want = int(round(fit_out_sec * sr))
             if len(y) != want:
@@ -508,6 +520,7 @@ class Renderer:
                    "warnings": warnings,
                    "out_samples": int(len(y)),
                    "xfade_rhos": rhos,
+                   "xfade_lags": lags,
                    "out_sec": round(len(y) / sr, 4)}
 
     def _verbatim(self, a_sec, want, hx):
@@ -525,7 +538,8 @@ class Renderer:
             core = core.copy()
         return core, self.x[min(n, ia + want):min(n, ia + want + hx)].copy()
 
-    def _render_with_margins(self, s, e, hx, cents=0.0, ratio=1.0, curve_points=None, want=None):
+    def _render_with_margins(self, s, e, hx, cents=0.0, ratio=1.0, curve_points=None, want=None,
+                             slack=0):
         """[s, e) を再合成し、前後に hx サンプルぶんの**同じ設定で続けた**マージンを付けて返す。
 
         返り値 (core, pre, post, info)。core の長さは want（既定は `backend.render(s, e)` と同じ）。
@@ -534,6 +548,9 @@ class Renderer:
         （core を 0 で埋めると、つなぎ目のクロスフェードの中央が 1 サンプルのクリックになる）。
         post は core の直後の続きから取る。
         マージンは素材の端で足りなければ短くなる（_join が短い方に合わせる）。
+
+        slack > 0 なら、マージンを hx + slack サンプル取り、再合成した全体 (y, core の先頭の位置) を
+        5 つ目の返り値に付ける（`_join` が区間を ±slack 動かして位相をそろえるため）。無ければ None。
         """
         sr = self.sr
         n = len(self.x)
@@ -543,8 +560,8 @@ class Renderer:
             want = max(1, int(round((b - a) * float(ratio))))
         want = int(want)
         if want <= 0:
-            return np.zeros(0), None, None, {}
-        ext = int(np.ceil(hx / float(ratio))) + 1
+            return np.zeros(0), None, None, {}, None
+        ext = int(np.ceil((hx + slack) / float(ratio))) + 1
         ea = min(ext, a)
         eb = min(ext, max(0, n - b))
         cp = None
@@ -557,7 +574,8 @@ class Renderer:
         core = _fit(y[npre:npre + want], want)
         pre = y[max(0, npre - hx):npre]
         post = y[npre + want:npre + want + hx]
-        return core, pre, post, info
+        full = (y, npre) if slack > 0 and len(y) >= npre + want else None
+        return core, pre, post, info, full
 
     def _gap_chunk(self, a_sec, b_sec, out_sec, want=None):
         """非編集区間。長さが変わらないなら原音そのまま、変わるなら伸縮する。
@@ -574,13 +592,14 @@ class Renderer:
             return {"kind": "gap", "audio": audio, "post": post,
                     "src": (a_sec, b_sec), "verbatim": True}
         r = want / max(1, len(src))
-        core, pre, post, info = self._render_with_margins(a_sec, b_sec, hx, cents=0.0,
-                                                          ratio=float(np.clip(r, 0.25, 4.0)),
-                                                          want=want)
-        return {"kind": "gap", "audio": core, "pre": pre, "post": post,
+        tau = int(round(ALIGN_MAX_MS / 1000.0 * self.sr))
+        core, pre, post, info, full = self._render_with_margins(a_sec, b_sec, hx, cents=0.0,
+                                                                ratio=float(np.clip(r, 0.25, 4.0)),
+                                                                want=want, slack=tau)
+        return {"kind": "gap", "audio": core, "pre": pre, "post": post, "full": full,
                 "src": (a_sec, b_sec), "verbatim": False, "stretched_to": round(r, 5), "info": info}
 
-    def _join(self, chunks, hx, fade, rhos=None, used=None):
+    def _join(self, chunks, hx, fade, rhos=None, used=None, lags=None, used_lags=None, tau=0):
         """クロスフェードつきの重ね合わせ。長さは chunk の core の合計と一致する。
 
         境界ごとに、出ていく側の [core の最後 h | post h] と、入ってくる側の
@@ -590,18 +609,37 @@ class Renderer:
         **1 つの chunk の頭と尻のクロスフェードは、その chunk の中で重ならない**（頭の h + 尻の h <= chunk の長さ）。
         重なると、後から書く方が先に書いた混ぜ具合を途中から上書きして、そこが 1 サンプルの段差になる
         （20 ms 未満の隙間や短い区間で起きた）。足りないときは両側を比例して縮める。
+
+        **位相をそろえる**（tau > 0 のとき）: 隣り合う区間は別々に再合成するので、つなぎ目で位相がそろわない
+        （相関 rho が 0 に近い → 等パワーで混ざって、ピッチが細かく揺れる）。入ってくる側が再合成した区間
+        （`full` を持つ）なら、出ていく側との相互相関が最大になるよう、その区間の中身を ±tau サンプルの範囲で
+        **丸ごと動かす**（再合成した続き `full` から切り直すので、長さは変わらず、マージンも続きのまま）。
+        相関が ALIGN_MIN_GAIN 以上よくならなければ動かさない。原音のままの区間は動かさない
+        （編集していない区間は元のサンプルのまま、が約束）。動かした量は used_lags に残し、lags で渡せば
+        同じ動かし方になる（多チャンネルでモノラルの結果をそろえる。rhos と同じ）。
         """
         chunks = [c for c in chunks if len(c["audio"]) > 0]
         if not chunks:
             return np.zeros(0)
         total = int(sum(len(c["audio"]) for c in chunks))
-        out = np.concatenate([np.asarray(c["audio"], dtype="float64") for c in chunks])
+        auds = [np.asarray(c["audio"], dtype="float64") for c in chunks]
+        shift = [0] * len(chunks)
+
+        def view(i, d):
+            """chunk i（再合成した区間）を d サンプル後ろへ動かした (audio, pre, post)。"""
+            y, npre = chunks[i]["full"]
+            n = len(auds[i])
+            return (y[npre - d:npre - d + n], y[npre - d - hx:npre - d],
+                    y[npre - d + n:npre - d + n + hx])
+
         posts, pres, hs = [], [], []
         for i in range(len(chunks) - 1):
             L, R = chunks[i], chunks[i + 1]
             # 挿入した無音には原音の端を足さない（隣の音がその中で短くフェードする）
             if L.get("kind") == "silence":
                 post = np.zeros(hx)
+            elif shift[i]:
+                post = view(i, shift[i])[2]
             else:
                 post = L.get("post")
                 if post is None:
@@ -612,15 +650,35 @@ class Renderer:
                 pre = R.get("pre")
                 if pre is None:
                     pre = self._cut(R["src"][0] - hx / self.sr, R["src"][0])
+            h = min(hx, len(post), len(pre), len(auds[i]), len(auds[i + 1]))
+            if tau > 0 and h > 0 and L.get("kind") != "silence" and R.get("full") is not None:
+                right = None
+                if i + 2 < len(chunks):                  # 次が動かせない区間なら、その側の相関も見る
+                    R2 = chunks[i + 2]
+                    if R2.get("full") is None and R2.get("kind") not in ("silence", "muted"):
+                        pre2 = R2.get("pre")
+                        if pre2 is None:
+                            pre2 = self._cut(R2["src"][0] - hx / self.sr, R2["src"][0])
+                        h2 = min(hx, len(pre2), len(auds[i + 2]), len(auds[i + 1]))
+                        if h2 > 0:
+                            right = (np.concatenate([np.asarray(pre2[-h2:]), auds[i + 2][:h2]]), h2)
+                d = self._align(auds[i], post, R, h, hx, tau,
+                                None if lags is None or i >= len(lags) else lags[i], right)
+                if d:
+                    auds[i + 1], pre, _ = view(i + 1, d)
+                    shift[i + 1] = d
+            if used_lags is not None:
+                used_lags.append(int(shift[i + 1]))
             posts.append(post)
             pres.append(pre)
-            hs.append(min(hx, len(post), len(pre), len(L["audio"]), len(R["audio"])))
+            hs.append(min(hx, len(post), len(pre), len(auds[i]), len(auds[i + 1])))
+        out = np.concatenate(auds)
         for _ in range(len(hs) + 2):              # 頭 + 尻 > chunk の長さ を比例して縮める（収束するまで）
             changed = False
-            for i, c in enumerate(chunks):
+            for i in range(len(chunks)):
                 lh = hs[i - 1] if i > 0 else 0
                 rh = hs[i] if i < len(hs) else 0
-                n = len(c["audio"])
+                n = len(auds[i])
                 if lh + rh > n:
                     nl = min(lh, n * lh // (lh + rh))
                     nr = min(rh, n - nl)
@@ -633,14 +691,13 @@ class Renderer:
                 break
         pos = 0
         for i in range(len(chunks) - 1):
-            L, R = chunks[i], chunks[i + 1]
-            pos += len(L["audio"])
+            pos += len(auds[i])
             h = hs[i]
             if h <= 0:
                 continue
             post, pre = posts[i], pres[i]
-            a = np.concatenate([np.asarray(L["audio"][-h:]), np.asarray(post[:h])])
-            b = np.concatenate([np.asarray(pre[-h:]), np.asarray(R["audio"][:h])])
+            a = np.concatenate([auds[i][-h:], np.asarray(post[:h])])
+            b = np.concatenate([np.asarray(pre[-h:]), auds[i + 1][:h]])
             k = len(used) if used is not None else 0
             r = rhos[k] if rhos is not None and k < len(rhos) else None
             ga, gb, r = _xfade_gains(a, b, r)
@@ -648,6 +705,52 @@ class Renderer:
                 used.append(r)
             out[pos - h:pos + h] = a * ga + b * gb
         return out[:total]
+
+    def _align(self, l_audio, l_post, R, h, hx, tau, given=None, right=None):
+        """入ってくる再合成の区間 R を何サンプル後ろへ動かせば、出ていく側 [l_audio の最後 h | l_post] と
+        そろうか（相互相関が最大になる量。動かさないなら 0）。given があればそれ（動かせる範囲に丸める）。
+
+        right: R の次が動かせない区間（原音のまま）のとき、そのつなぎ目の [pre の最後 h2 | 先頭 h2]。
+        R の尻の側の相関も（ALIGN_RIGHT_WEIGHT 倍で）足して、頭と尻の折り合いのよい量を選ぶ。再合成した区間の
+        位相は中でずれていく（無声をまたぐ・ピッチを変える）ので、両端が同時にそろうとは限らない。頭の側を優先する。
+        相関の差が小さい量の中では、動かす量の小さい方を選ぶ。"""
+        y, npre = R["full"]
+        n = len(R["audio"])
+        te = min(tau, npre - hx, len(y) - (npre + n + hx))     # 動かしても pre・post が hx 取れる範囲
+        if te <= 0:
+            return 0
+        if given is not None:
+            return int(np.clip(given, -te, te))
+        a = np.concatenate([l_audio[-h:], np.asarray(l_post[:h])])
+        score = _ncc(y[npre - h - te:npre + h + te], a, te)
+        if score is None:
+            return 0
+        if right is not None:
+            ref, h2 = right
+            s2 = _ncc(y[npre + n - h2 - te:npre + n + h2 + te], ref, te)
+            if s2 is not None:
+                score = score + ALIGN_RIGHT_WEIGHT * s2
+        best = float(np.max(score))
+        if best < float(score[te]) + ALIGN_MIN_GAIN:
+            return 0
+        cand = np.flatnonzero(score >= best - ALIGN_TIE)
+        j = int(cand[np.argmin(np.abs(cand - te))])
+        return te - j                                               # j = te - d
+
+
+def _ncc(seg, ref, te):
+    """seg を ref に対して j = 0..2te サンプルずらしたときの正規化相互相関（j = te がずらさない）。足りなければ None。"""
+    m = len(ref)
+    if len(seg) < m + 2 * te:
+        return None
+    er = float(np.dot(ref, ref))
+    if er < 1e-12:
+        return None
+    from scipy.signal import fftconvolve
+    c = fftconvolve(seg, ref[::-1], mode="valid")                  # c[j] = sum ref[k] * seg[j + k]
+    cs = np.concatenate([[0.0], np.cumsum(seg * seg)])
+    es = cs[m:m + 2 * te + 1] - cs[:2 * te + 1]
+    return c / np.sqrt(er * np.maximum(es, 1e-12))
 
 
 def build_renderer(project, backend=None):

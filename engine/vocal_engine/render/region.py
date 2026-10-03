@@ -104,14 +104,15 @@ class RegionRenderer:
             return y, {"warnings": warnings, "backend": self.actual_backend}
         sr = self.sr
         want_sec = n / sr
-        rhos = None
+        rhos = lags = None
         ref = self._get_ref()
-        if ref is not None:                  # クロスフェードの相関もモノラルで決めてそろえる
-            rhos = ref.render_range(ia / sr, ib / sr, segs, fit_out_sec=want_sec)[1]["xfade_rhos"]
+        if ref is not None:                  # クロスフェードの相関・位相をそろえた量もモノラルで決めてそろえる
+            ref_info = ref.render_range(ia / sr, ib / sr, segs, fit_out_sec=want_sec)[1]
+            rhos, lags = ref_info["xfade_rhos"], ref_info["xfade_lags"]
         for ch in range(self.n_ch):
             r = self._get(ch)
             yc, meta = r.render_range(ia / sr, ib / sr, segs, fit_out_sec=want_sec,
-                                      xfade_rhos=rhos)
+                                      xfade_rhos=rhos, xfade_lags=lags)
             warnings += [w for w in meta["warnings"] if w not in warnings]   # チャンネル間の重複は 1 つに
             if len(yc) != n:                  # 念のため（fit_out_sec が効いていれば通らない）
                 yc = yc[:n] if len(yc) > n else np.concatenate([yc, np.zeros(n - len(yc))])

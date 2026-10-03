@@ -227,3 +227,79 @@ def test_join_crossfades_do_not_overlap_in_short_chunk(gap):
     assert len(y) == 4000 + gap and len(used) == 2
     # 200 Hz・振幅 1 の正弦波の最大の傾きは 0.052。重なって上書きすると 0.27〜0.5 の段差が出た
     assert np.abs(np.diff(y)).max() < 0.06
+
+
+def _junction_rhos(voice, backend, monkeypatch, align_ms):
+    monkeypatch.setattr(P, "ALIGN_MAX_MS", align_ms)
+    segs = _chain(np.random.default_rng(11), _durs(), 0.7, 1.4)
+    y, info = _render(voice, backend, segs)
+    return y, info, segs
+
+
+def _durs():
+    return np.random.default_rng(12).uniform(0.035, 0.07, 14)
+
+
+@pytest.mark.parametrize("backend", _backends())
+def test_phase_alignment_raises_junction_correlation(voice, backend, monkeypatch):
+    """接して並ぶ再合成の区間は、つなぎ目で位相がそろう（そろえないと相関 rho が 0 に近く、等パワーで混ざって痩せる）。"""
+    _, off, _ = _junction_rhos(voice, backend, monkeypatch, 0.0)
+    y, on, segs = _junction_rhos(voice, backend, monkeypatch, 5.0)
+    rho_off, rho_on = np.array(off["xfade_rhos"]), np.array(on["xfade_rhos"])
+    assert np.median(rho_on) >= 0.9
+    assert np.median(rho_on) - np.median(rho_off) >= 0.2
+    tau = int(round(5.0 / 1000 * SR))
+    assert len(on["xfade_lags"]) == on["chunks"] - 1
+    assert max(abs(v) for v in on["xfade_lags"]) <= tau and any(on["xfade_lags"])
+    assert set(off["xfade_lags"]) == {0}
+    _assert_clean(voice, y, segs)
+    # 6 ms（持続音の 1 周期ぶん）の RMS が痩せていない
+    w = int(0.006 * SR)
+    c = np.cumsum(np.concatenate([[0.0], y * y]))
+    rms = np.sqrt((c[w:] - c[:-w]) / w)
+    assert rms.min() > 0.6 * np.median(rms)
+
+
+@pytest.mark.parametrize("backend", _backends())
+def test_alignment_lags_can_be_shared_across_channels(voice, backend):
+    """モノラルで決めた rho・lags を渡すと、別のレンダラ（別のチャンネル）でも同じ動かし方・混ぜ方になる。"""
+    x, f0, v = voice
+    segs = _chain(np.random.default_rng(13), _durs(), 0.7, 1.4)
+    r = Renderer(x, SR, f0, v, HOP, backend=backend)
+    y1, i1 = r.render_range(T0, T1, segs)
+    r2 = Renderer(x, SR, f0, v, HOP, backend=backend)
+    y2, i2 = r2.render_range(T0, T1, segs, xfade_rhos=i1["xfade_rhos"], xfade_lags=i1["xfade_lags"])
+    np.testing.assert_allclose(y2, y1)
+    assert i2["xfade_lags"] == i1["xfade_lags"] and any(i1["xfade_lags"])
+
+
+@pytest.mark.parametrize("backend", _backends())
+def test_alignment_never_moves_unedited_samples(voice, backend):
+    """原音のままの区間は動かさない（位相をそろえるのは再合成した区間だけ）。範囲外はサンプル一致。"""
+    x = voice[0]
+    edits = [(1.0, 1.06, 150.0), (1.5, 1.52, -200.0)]
+    segs = [Segment(a, b, cents=c) for a, b, c in edits]
+    y, _ = _render(voice, backend, segs)
+    assert len(y) == int(round((T1 - T0) * SR))
+    ref = x[int(round(T0 * SR)):int(round(T1 * SR))]
+    pad = 2 * HX + int(0.006 * SR)             # クロスフェード（片側 10 ms）と、区間を動かす最大（5 ms）の外
+    mask = np.ones(len(y), dtype=bool)
+    for a, b, _ in edits:
+        mask[int(round((a - T0) * SR)) - pad:int(round((b - T0) * SR)) + pad] = False
+    assert mask.sum() > 0.9 * len(y)
+    np.testing.assert_array_equal(y[mask], ref[mask])
+
+
+def test_align_finds_known_lag():
+    """再合成した区間が既知のサンプル数だけ位相のずれた正弦波なら、そのずれを返す。"""
+    z = lambda m: np.sin(2 * np.pi * 300.0 * np.asarray(m) / SR)         # 周期 80 サンプル
+    n, npre, ahead = 1000, 600, 20
+    y = z(np.arange(2000) - npre + 5000 + ahead)                        # core の先頭が 20 サンプル先の位相
+    R = {"full": (y, npre), "audio": np.zeros(n)}
+    l_audio, l_post = z(np.arange(5000 - 2400, 5000)), z(np.arange(5000, 5000 + HX))
+    r = Renderer(z(np.arange(SR)), SR, np.full(101, 300.0), np.ones(101, dtype=bool), HOP,
+                 backend="psola")
+    d = r._align(l_audio, l_post, R, HX, HX, 60, None)
+    assert abs(d - ahead) <= 1               # 正弦波は相関が平らなので 1 サンプルは許す
+    assert r._align(l_audio, l_post, R, HX, HX, 60, 7) == 7              # 渡された量はそのまま
+    assert r._align(l_audio, l_post, R, HX, HX, 60, 10_000) <= 60        # 動かせる範囲に丸める
