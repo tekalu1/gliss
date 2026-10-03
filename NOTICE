@@ -26,6 +26,15 @@ Third-party software:
   packages is attached to each GitHub Release (scripts/gpl-sources.mjs).
 - Electron's licenses (LICENSE.electron.txt, LICENSES.chromium.html) are placed
   in the installation directory.
+- The DAW plug-in (Gliss.vst3, VST3 + ARA 2; plugin/) combines Gliss with JUCE,
+  which Gliss uses under the GNU Affero General Public License version 3. As
+  permitted by section 13 of the GNU GPL v3 and of the GNU AGPL v3, the plug-in
+  binary is distributed under the terms of the GNU AGPL v3; the Gliss source
+  code itself remains GPL-3.0-or-later. The plug-in also contains the ARA SDK
+  (Apache-2.0), the VST3 SDK (MIT), the WebView2 loader (BSD-3-Clause) and
+  third-party code bundled with JUCE. Their licenses are in
+  THIRD_PARTY_NOTICES.txt and in Gliss.vst3/Contents/Resources (NOTICE.txt,
+  LICENSE-AGPL-3.0.txt, THIRD_PARTY_NOTICES.txt).
 - The Gliss F0 model (prototype; engine/vocal_engine/analysis/models/gliss-f0.onnx) is included. It was trained by
   Gliss, using the SwiftF0 training code (MIT) and openly licensed datasets only (CC BY 4.0, ODbL, CMU Arctic terms);
   the attributions are in gliss-f0.NOTICE.txt next to it and in THIRD_PARTY_NOTICES.txt.
