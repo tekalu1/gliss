@@ -13,11 +13,12 @@
     "test": "playwright test",
     "test:headed": "playwright test --headed",
     "build:engine": "node ../scripts/build-engine.mjs",
+    "build:plugin": "node ../scripts/build-plugin.mjs",
     "dist:dir": "pnpm prepack:files && electron-builder --dir",
-    "dist": "pnpm build:engine && pnpm prepack:files && electron-builder",
+    "dist": "pnpm build:engine && pnpm build:plugin && pnpm prepack:files && electron-builder",
     "test:unit": "playwright test tests/unit",
     "build:addons": "node ../scripts/build-addon.mjs --all",
-    "prepack:files": "node ../scripts/release-notes.mjs && node ../scripts/addon-catalog.mjs && node ../scripts/third-party-notices.mjs"
+    "prepack:files": "node ../scripts/build-plugin.mjs --check && node ../scripts/release-notes.mjs && node ../scripts/addon-catalog.mjs && node ../scripts/third-party-notices.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.21.0",

@@ -4,6 +4,7 @@ Gliss を DAW の中で使うためのプラグイン（`plugin/`）。DAW の�
 issue は [tekalu1/gliss#1](https://github.com/tekalu1/gliss/issues/1)。作業の手順は [AGENTS.md](../AGENTS.md)。
 
 状態（2026-10-03）: **段階 1（最小の ARA プラグイン）まで**。ホストの音を素通しで返し、アーカイブ（版つきの空の JSON）を保存・復元し、エディタに WebView2 で静的な HTML を出す。
+配布（インストーラがユーザーごとの VST3 の置き場に入れる・配布版のエンジンの見つけ方・ライセンスの表示）は段階 4 の一部として済み（下の「配布」）。
 エンジン（Python）との接続・編集・再生への反映は段階 2 以降（下の「段階」）。実物の DAW（Fender Studio Pro 8 など）での確認はまだ。
 
 ## 決まった形
@@ -74,7 +75,7 @@ issue は [tekalu1/gliss#1](https://github.com/tekalu1/gliss/issues/1)。作業�
 
 ## ビルド
 
-必要なもの: Visual Studio 2022（C++ のデスクトップ開発。Community でよい）、CMake 3.22 以上、git。管理者権限は要らない（プラグインはどこにもインストールしない）。
+必要なもの: Visual Studio 2022（C++ のデスクトップ開発。Community でよい）、CMake 3.22 以上、git。管理者権限は要らない（ここの手順はプラグインをどこにもインストールしない。配布用のビルドは `pnpm build:plugin`。下の「配布」）。
 
 ```powershell
 cmake -S plugin -B plugin/build -G "Visual Studio 17 2022" -A x64
@@ -87,6 +88,95 @@ cmake --build plugin/build --config Release --target GlissARA_VST3
 
 DAW に載せて試すときは、`Gliss.vst3` を DAW が探す場所に置く（Fender Studio Pro 8 の VST3 の追加の場所に `plugin\build\GlissARA_artefacts\Release\VST3` を足すか、`%CommonProgramFiles%\VST3` へ管理者権限でコピーする。どちらも未確認で、段階 1 の完了後に実機で確かめる）。
 Cubase は ARA のプラグインを `%CommonProgramFiles%\ARA` に置く必要があるという報告がある（Steinberg のフォーラムの報告。現行の条件は未確認）。
+
+## 配布
+
+決めた日: 2026-10-03。Gliss のインストーラ（NSIS・ユーザーごと・管理者権限なし。[release-plan.md](release-plan.md) §3-1）がプラグインも入れる。
+
+### 作り方
+
+```powershell
+cd app
+pnpm build:plugin     # = node ../scripts/build-plugin.mjs
+pnpm dist             # build:engine → build:plugin → prepack:files → electron-builder（プラグインのビルドに失敗すれば止まる）
+```
+
+`scripts/build-plugin.mjs` は `plugin/build` を構成し（まだなら、vswhere で見つけた Visual Studio の generator と `-A x64`。構成済みならその generator のまま）、`GlissARA_VST3` を Release でビルドして、`plugin/build/dist/Gliss.vst3` に写す。
+写した `Contents/Resources` に、ライセンスの文書 `NOTICE.txt`・`LICENSE-AGPL-3.0.txt`・`LICENSE-GPL-3.0.txt`・`THIRD_PARTY_NOTICES.txt` を足す（`Gliss.vst3` だけを別の場所へ写しても文書が付いていく）。
+`plugin/CMakeLists.txt` の末尾が `plugin/build/gliss-plugin-<構成>.json`（DLL の場所・依存の置き場と版）を書き、`build-plugin.mjs` がそれを `plugin/build/dist/gliss-plugin.json` に写す。`scripts/third-party-notices.mjs` はそれを見て依存のライセンス文を集める。
+`node scripts/build-plugin.mjs -- <cmake の引数>` で構成に引数を足せる（手元で取得済みの依存を使う `-DFETCHCONTENT_SOURCE_DIR_JUCE=<置き場>` など）。`--check` は `plugin/build/dist` にあるかだけを見る（`pnpm prepack:files` の最初の一手。無ければ `dist:dir` も止まる）。
+CI（`release.yml`）はランナーの Visual Studio と CMake で同じスクリプトを呼ぶ。手元では依存の取得を含めて約 5 分。
+
+### 置き場
+
+| 場所 | 中身 |
+|---|---|
+| `<インストール先>\resources\plugin\Gliss.vst3` | electron-builder が同梱する写し（`app/electron-builder.yml` の `extraResources`）。インストール先の既定は `%LOCALAPPDATA%\Programs\Gliss` |
+| `%LOCALAPPDATA%\Programs\Common\VST3\Gliss.vst3` | インストーラ（`app/build/installer.nsh` の `customInstall`）が写す。VST3 の仕様の**ユーザーごとの置き場**（`FOLDERID_UserProgramFilesCommon`。仕様では優先 1、管理者権限が要らない） |
+| 両方の `Contents\Resources\gliss-install.json` | インストーラが書く `{"format":"gliss-install","version":1,"installDir":"<インストール先>","appVersion":"<版>"}`。NSIS は UTF-8 で書けないので **UTF-16LE（BOM 付き）** |
+
+管理者の `C:\Program Files\Common Files\VST3` には入れない。
+
+**ユーザーごとの置き場を探さない DAW がある**（VST3 の仕様は「主に開発の用途」と書いている。Renoise のフォーラムに `Common Files\VST3` の外を認識しない報告がある）。Studio Pro・Cubase・Reaper が既定で探すかは**未確認**。探さない DAW では、DAW の設定で `%LOCALAPPDATA%\Programs\Common\VST3` を探す場所に足すか、下の手順で管理者の置き場に写す。
+
+### 配布版のプラグインがエンジンを見つける順（`plugin/src/engine/EngineConfig.cpp`）
+
+1. 環境変数 `GLISS_ENGINE_PYTHON`（と `GLISS_ENGINE_CWD`）: 開発版。`python -m vocal_engine.mcp`。
+2. `Gliss.vst3\Contents\Resources\gliss-install.json` の `installDir` の `resources\engine\vocal-engine\vocal-engine.exe`（インストール先を変えても見つかる）。指す先にエンジンが無ければ次へ。
+3. プラグインの祖先のフォルダ: `<祖先>\engine\vocal-engine\vocal-engine.exe`（インストール先の中の写しと、展開版 `dist\win-unpacked\resources`）、`<祖先>\engine\vocal-engine.exe`、開発の `.mcp.json`。
+4. レジストリ `HKCU\Software\a4620d0b-b9f5-551f-81ff-214a8d76afd2` の `InstallLocation`（electron-builder がインストール先を書くキー。appId の UUID v5 で、appId を変えない限り変わらない。`app/tests/unit/release.spec.js` の R11 が照らす）。
+5. 現在の作業ディレクトリの祖先の `.mcp.json`。
+
+作業ディレクトリはエンジン exe のフォルダ。重みはエンジンの既定（`%LOCALAPPDATA%\Gliss\models`）のまま。見つけ方は `EngineConfig::source`（`env`・`install-file`・`bundled`・`mcp.json`・`registry`・`cwd-mcp.json`）に残る。
+
+### 更新とアンインストール
+
+- **更新**（アプリの自動更新・手動の上書き）: `customInstall` が VST3 の置き場の `Gliss.vst3` を消してから写し直す（古い版の余計なファイルを残さない）。
+  **DAW がプラグインを読み込んでいる**と DLL は消せず上書きもできないが、改名はできる。そこで DLL を `Gliss.vst3.<数>.old` に改名して新しい版を隣に置く。DAW は起動し直すまで古い版のまま動き、`.old` は次のインストールで消える。
+  画面のあるインストールでは「DAW を起動し直すと新しい版になる」と出す（静かなモード＝アプリからの更新では出さない）。
+- 更新の前に `customCheckAppRunning` が `<インストール先>\resources\engine\` の下のエンジンを止める。**DAW のプラグインが起動したエンジンも止まる**（プラグインは次の呼び出しで起動し直す）。
+- **アンインストール**（`--updated` が付かないとき）: `gliss-install.json` のある `Gliss.vst3` だけを消す（手で置いたものは残す）。DAW が掴んでいれば「DAW を閉じて再試行」の確認を出す（キャンセルと静かなモードでは残す）。
+- `Gliss.vst3` がリンク（ジャンクション）なら、リンクだけを外し、指す先は消さない（開発のビルドを指していても消えない）。
+
+### 管理者の置き場に入れたいとき
+
+DAW がユーザーごとの置き場を探さないときの手順（管理者の PowerShell で）。
+
+```powershell
+Copy-Item -Recurse "$env:LOCALAPPDATA\Programs\Gliss\resources\plugin\Gliss.vst3" "$env:CommonProgramFiles\VST3\"
+```
+
+インストール先の写しには `gliss-install.json` が入っているので、写した先でもエンジンが見つかる。Gliss の更新・アンインストールは管理者の置き場の写しを**更新も削除もしない**（更新のたびに写し直す。要らなくなったら手で消す）。
+ユーザーごとの置き場にも同じプラグインがあると、DAW によっては 2 つ並ぶ。管理者の置き場に写したら、`%LOCALAPPDATA%\Programs\Common\VST3\Gliss.vst3` は消してよい（Gliss の次の更新でまた入る）。
+
+### DAW ごとの置き場の癖
+
+| DAW | 癖 |
+|---|---|
+| Fender Studio Pro 8 | ユーザーごとの置き場を既定で探すかは未確認。探さなければ、設定の VST3 の探す場所に足す |
+| Cubase 15 / Nuendo | ARA のプラグインは `C:\Program Files\Common Files\ARA` に置く必要があった（Steinberg の担当者の 2022-01 の書き込み。そこへのシンボリックリンクでよい）。VST3 フォルダの直下でないと認識しない（ベンダーのサブフォルダ不可）という 2021 年の報告もある。**現行の条件は未確認**。必要なら管理者の PowerShell で `New-Item -ItemType SymbolicLink -Path "$env:CommonProgramFiles\ARA\Gliss.vst3" -Target <Gliss.vst3 の場所>`。ARA の拡張は「オーディオ > 拡張」から開く |
+| Reaper 7 | VST の探す場所は設定で足せる。ARA を認識せず普通の VST3 として載ったら、ARA の設定を確かめる（`ARA_DOCUMENT_ARCHIVE_ID` は設定済み） |
+
+### ライセンス
+
+- JUCE 9（AGPLv3 か商用。Gliss は AGPLv3 の側で使う）と結合した `Gliss.vst3` は **AGPLv3 の条件で配る**。Gliss 自身のソースは GPL-3.0-or-later のまま（GPLv3 §13 と AGPLv3 §13 が結合を認める）。
+- 対応するソースは、このリポジトリの同じ版のタグの `plugin/` と、`plugin/CMakeLists.txt` が版を固定して取る依存（JUCE・ARA SDK・`Microsoft.Web.WebView2` の NuGet）。`Gliss.vst3` の `NOTICE.txt` に場所を書いている。
+- 依存のライセンス文: JUCE（`LICENSE.md` と AGPLv3 の全文）・ARA SDK（Apache-2.0。`NOTICE.txt` も）・WebView2 のローダ（BSD-3-Clause）・JUCE が同梱してリンクされる第三者のコード（zlib・HarfBuzz・SheenBidi・LunaSVG・PlutoVG・libpng・jpeglib・libwebp・FLAC・Ogg Vorbis・Opus・VST3 SDK（MIT）・PreSonus の拡張ヘッダ）。
+  `scripts/third-party-notices.mjs` が JUCE の SBOM（`JUCE.spdx.json`）を、`GlissARA` にリンクするモジュールから辿って集める。リンクしないもの（ASIO SDK・Oboe・AudioUnitSDK・AAX SDK・LV2 一式）は理由つきで外し、SBOM に知らない同梱物が増えたら載せる（JUCE を上げたら `JUCE_NOT_LINKED` を見直す）。
+- インストール先の `resources\THIRD_PARTY_NOTICES.txt` の「DAW のプラグイン」の節と、`Gliss.vst3\Contents\Resources\THIRD_PARTY_NOTICES.txt` は同じ中身。
+
+### 配布の確かめ方
+
+| 確かめること | 手順 |
+|---|---|
+| 同梱・置き場・レジストリのキー・ライセンス文の集め方 | `pnpm test:unit`（`release.spec.js` の R6b・R11・R11b） |
+| 展開版にプラグインとライセンスの文書がある | `pnpm dist:dir` → `node scripts/smoke-packaged.mjs` |
+| 見つけ方（UTF-16 の `gliss-install.json`・日本語と空白を含むパス・インストール先の中の写し・消えたインストール先） | `GlissPluginTests.exe` の「Engine discovery (distribution)」 |
+| 展開版のエンジンを見つけて起動できる（重みは要らない） | `GLISS_TEST_PACKAGED_RESOURCES=<dist\win-unpacked\resources>` を付けて `GlissPluginTests.exe` |
+| インストーラが VST3 の置き場に写したプラグインからエンジンを起動できる | `GLISS_TEST_INSTALLED_PLUGIN=<VST3 の置き場の Gliss.vst3\Contents\x86_64-win\Gliss.vst3>` を付けて `GlissPluginTests.exe` |
+
+インストーラの `customInstall` / `customUnInstall` の中身（`glissInstallPlugin`・`glissRemovePlugin`）は、本物のインストーラを走らせずに確かめられる: 2 つのマクロだけを呼ぶ小さな NSIS の試験用の exe を、electron-builder の makensis で作り、一時フォルダに向けて流す（`!include` で `app/build/installer.nsh` を読み、`/VST3=<一時フォルダ>`・`/D=<一時のインストール先>`）。
+本物のインストーラは利用者の `%LOCALAPPDATA%`・レジストリ・スタートメニューに書き、入っている Gliss を上書きするので、開発機では走らせない。
 
 ## 検証
 
@@ -149,7 +239,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 1. 最小の ARA プラグイン（このリポジトリの状態）。残り: **Fender Studio Pro 8 で ARA の拡張として開き、鳴るか・保存して開き直せるか・エディタが出るか**（人の許可を取って、親が行う）。
 2. エンジンとの接続: DocumentController がエンジンを子プロセスで起動し、`AudioSource` ごとに裏のスレッドでホストの音を読み、`open_project`（offset・length・source_id）→ 解析。編集を当てた音をキャッシュに持ち、PlaybackRenderer はそれを読む。サンプリング周波数の変換。
 3. 編集と再生: WebView の `window.gliss` を JUCE のネイティブ関数・イベントで作り直し、画面からの編集 → エンジン → `render_region` → キャッシュの差し替え。アーカイブに編集リスト（`to_archive` / `from_archive`）。リージョンの移動・トリムへの追従。
-4. DAW に返すもの・配布: content reader（ノート）、インストーラ（`Common Files\VST3`・Cubase 用の ARA フォルダ）、エンジンの exe とモデルの場所、THIRD_PARTY_NOTICES（JUCE・ARA SDK・VST3 SDK・WebView2）。
+4. DAW に返すもの・配布: content reader（ノート）。配布（インストーラ・エンジンの exe とモデルの場所・THIRD_PARTY_NOTICES）は済み（上の「配布」。Cubase 用の ARA フォルダは文書の手順だけ）。
 
 ### 既知の制約・未解決（段階 1）
 
@@ -157,4 +247,4 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 - ホストが音声ソースへのアクセスを外して戻したとき（`enableAudioSourceSamplesAccess`）、先読みのリーダーは作り直さない（リージョンの追加・削除と同じく、ARA の規則ではレンダラーが準備されている間は変わらない前提）。段階 2 で `AudioSource` ごとのキャッシュを DocumentController が持つ形にして直す。
 - 再生の開始直後（途中から再生を始めたとき）は、その位置の先読みができるまで、最初の 1 ブロック分（32768 サンプル以内）が無音になりうる。
 - WebView2 の 2 つ同時・開閉の 20 回の繰り返しは GlissHostCheck `--editor`（JUCE のホストの中・偽の DocumentBridge）で通る（2026-10-03）。保存と再読み込み・2 つの DAW の同時起動・実物の DAW の中での開閉は、確かめていない（JUCE のフォーラムなどに、複数の DAW や複数のインスタンスで固まる報告がある）。危ないと分かったら、エディタをプラグインの窓に埋めず、別ウィンドウの Electron で出す形にする。
-- JUCE 9 は AGPLv3、Gliss は GPL-3.0-or-later（GPLv3 §13 と AGPLv3 §13 が結合を認める）。配布物は AGPLv3 の条件になる。THIRD_PARTY_NOTICES への記載は段階 4。
+- JUCE 9 は AGPLv3、Gliss は GPL-3.0-or-later（GPLv3 §13 と AGPLv3 §13 が結合を認める）。配布物は AGPLv3 の条件になる（上の「配布」の「ライセンス」）。

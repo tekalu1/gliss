@@ -62,7 +62,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 |---|---|
 | `engine/` | `<wt>\engine` で pytest（上の「作業開始」）。絞るなら `-k`。MCP のツールを変えたら `engine/docs/MCP.md` も直す |
 | `app/` の画面 | `pnpm test:unit` と、関係する `pnpm exec playwright test tests/<名前>.spec.js` |
-| 配布・更新・アドオン（`electron-builder.yml`・`build/installer.nsh`・`updates*.mjs`・`addons.mjs`・`scripts/build-*.mjs`） | `pnpm test:unit`（`release.spec.js` が NSIS のテンプレートの形を見る）。`pnpm build:engine` → `pnpm dist:dir` → `node scripts/smoke-packaged.mjs`。更新は `node scripts/smoke-update.mjs --old <古い展開版> --new <新しい出力>`、アドオンは `node scripts/build-addon.mjs --all` → `pnpm dist:dir` → `node scripts/smoke-addon.mjs --models <重み>` |
+| 配布・更新・アドオン（`electron-builder.yml`・`build/installer.nsh`・`updates*.mjs`・`addons.mjs`・`scripts/build-*.mjs`） | `pnpm test:unit`（`release.spec.js` が NSIS のテンプレートの形を見る）。`pnpm build:engine` → `pnpm build:plugin`（`dist:dir` の前に要る。VS の MSVC と CMake）→ `pnpm dist:dir` → `node scripts/smoke-packaged.mjs`。更新は `node scripts/smoke-update.mjs --old <古い展開版> --new <新しい出力>`、アドオンは `node scripts/build-addon.mjs --all` → `pnpm dist:dir` → `node scripts/smoke-addon.mjs --models <重み>` |
 | `plugin/` | `powershell -NoProfile -File plugin\scripts\test-plugin.ps1`（ビルドと、ARA の TestHost・GlissHostCheck。`-SkipBuild` で流すだけ。詳しくは `docs/ara-plugin.md`）。ビルドの出力と依存は `plugin/build/`（git 管理外）。プラグインを `Common Files\VST3` などシステムの場所に置かない（実物の DAW での確認は人の許可を取って行う） |
 | 版・リリースノート・`scripts/release-*.mjs` | `node scripts/sync-version.mjs --check`・`node scripts/release-check.mjs`・`pnpm test:unit` |
 | `.github/workflows/` | actionlint |
@@ -107,6 +107,7 @@ PR の前に gitleaks（公式 Release のバイナリ）で `gitleaks git <wt>`
 - 試験で `%APPDATA%\Gliss`・`%LOCALAPPDATA%\Gliss` を汚さない（開発版と配布版が同じ場所を使う）。スモークは `LOCALAPPDATA` と userData を一時フォルダに差し替えている。
 - 配布版は前回開いていた曲を起動時に開き直す（利用者の実データを開いてしまう）。配布版を試すときはユーザーデータを差し替える。
 - 配布版の自動更新は `--dir` の展開版では動かない（`app-update.yml` は NSIS の出力にだけ入る）。
+- 本物のインストーラは開発機で走らせない。NSIS の `$LOCALAPPDATA` は環境変数ではなく既知フォルダから取るので差し替えられず、HKCU・スタートメニュー・入っている Gliss に書く。`installer.nsh` のマクロだけを試す方法は `docs/ara-plugin.md` の「配布の確かめ方」。
 - Windows PowerShell 5.1 の `.Count` は、該当が 1 件のとき `$null` になる。NSIS の既定の `CHECK_APP_RUNNING` がこれでエンジンを見逃していた（`app/build/installer.nsh`）。
 - GitHub の Release の配信は、複数範囲の Range に 501 を返す。差分更新は electron-updater の GitHub provider が 1 範囲ずつ取るので効いている。provider を変えると全体の取得に落ちる。
 - 展開版の main プロセスはイベントループが遅くなることがある。大きな zip の展開は worker スレッドで行う（`app/unzip.mjs`）。

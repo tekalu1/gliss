@@ -12,6 +12,10 @@ namespace gliss
 {
 namespace
 {
+// electron-builder's registry key of the Gliss installation: UUID v5 of the appId (io.github.tekalu1.gliss) in
+// electron-builder's namespace. It does not change as long as the appId does not (app/tests/unit/release.spec.js checks it).
+constexpr const wchar_t* installRegistryKey = L"Software\\a4620d0b-b9f5-551f-81ff-214a8d76afd2";
+
 juce::File moduleFile()
 {
     HMODULE module = nullptr;
@@ -55,12 +59,13 @@ EngineConfig fromMcpFile (const juce::File& file)
     if (auto* e = gliss.getProperty ("env", {}).getDynamicObject())
         for (const auto& property : e->getProperties())
             config.environment.set (property.name.toString(), property.value.toString());
+    config.source = "mcp.json";
     return config;
 }
 
-juce::File repositoryEngineDirectory()
+juce::File repositoryEngineDirectory (const juce::File& module)
 {
-    auto directory = moduleFile().getParentDirectory();
+    auto directory = module.getParentDirectory();
     for (int depth = 0; depth < 10; ++depth)
     {
         auto engine = directory.getChildFile ("engine");
@@ -72,9 +77,72 @@ juce::File repositoryEngineDirectory()
     }
     return {};
 }
+
+/** The engine exe that belongs to an ancestor `directory` of the plug-in, if any. */
+EngineConfig bundledEngine (const juce::File& directory)
+{
+    // <installDir>/resources: the copy of Gliss.vst3 inside a Gliss installation (resources/plugin/Gliss.vst3)
+    // or the unpacked build (dist/win-unpacked/resources). Then a folder layout with engine/vocal-engine.exe.
+    for (auto exe : { directory.getChildFile ("engine").getChildFile ("vocal-engine").getChildFile ("vocal-engine.exe"),
+                      directory.getChildFile ("engine").getChildFile ("vocal-engine.exe") })
+    {
+        if (exe.existsAsFile())
+        {
+            EngineConfig config;
+            config.executable = exe;
+            config.workingDirectory = exe.getParentDirectory();
+            config.source = "bundled";
+            return config;
+        }
+    }
+    return {};
+}
 } // namespace
 
+EngineConfig EngineConfig::forInstallation (const juce::File& installDirectory)
+{
+    EngineConfig config;
+    if (installDirectory == juce::File())
+        return config;
+    config.executable = installDirectory.getChildFile ("resources").getChildFile ("engine")
+                                        .getChildFile ("vocal-engine").getChildFile ("vocal-engine.exe");
+    config.workingDirectory = config.executable.getParentDirectory();
+    return config;
+}
+
+juce::File EngineConfig::installDirectoryFromFile (const juce::File& installJson)
+{
+    if (! installJson.existsAsFile())
+        return {};
+    // The NSIS installer writes UTF-16LE with a BOM (it cannot write UTF-8); loadFileAsString reads both.
+    const auto root = juce::JSON::parse (installJson.loadFileAsString());
+    if (root.getProperty ("format", {}).toString() != "gliss-install")
+        return {};
+    const auto directory = root.getProperty ("installDir", {}).toString();
+    if (! juce::File::isAbsolutePath (directory))
+        return {};
+    return juce::File (directory);
+}
+
+juce::File EngineConfig::installDirectoryFromRegistry()
+{
+    DWORD bytes = 0;
+    if (::RegGetValueW (HKEY_CURRENT_USER, installRegistryKey, L"InstallLocation", RRF_RT_REG_SZ, nullptr, nullptr, &bytes) != ERROR_SUCCESS
+        || bytes < sizeof (wchar_t))
+        return {};
+    std::wstring value (bytes / sizeof (wchar_t), L'\0');
+    if (::RegGetValueW (HKEY_CURRENT_USER, installRegistryKey, L"InstallLocation", RRF_RT_REG_SZ, nullptr, value.data(), &bytes) != ERROR_SUCCESS)
+        return {};
+    const juce::String directory (value.c_str());
+    return juce::File::isAbsolutePath (directory) ? juce::File (directory) : juce::File();
+}
+
 EngineConfig EngineConfig::discover()
+{
+    return discoverFor (moduleFile());
+}
+
+EngineConfig EngineConfig::discoverFor (const juce::File& module)
 {
     EngineConfig config;
     const auto python = env (L"GLISS_ENGINE_PYTHON");
@@ -83,20 +151,22 @@ EngineConfig EngineConfig::discover()
     {
         config.executable = juce::File (python);
         config.arguments.addArray ({ "-m", "vocal_engine.mcp" });
-        config.workingDirectory = cwd.isNotEmpty() ? juce::File (cwd) : repositoryEngineDirectory();
+        config.workingDirectory = cwd.isNotEmpty() ? juce::File (cwd) : repositoryEngineDirectory (module);
+        config.source = "env";
     }
     else
     {
-        auto directory = moduleFile().getParentDirectory();
-        for (int depth = 0; depth < 10; ++depth)
+        // Gliss.vst3/Contents/x86_64-win/Gliss.vst3 -> Gliss.vst3/Contents/Resources/gliss-install.json
+        const auto installJson = module.getParentDirectory().getSiblingFile ("Resources").getChildFile ("gliss-install.json");
+        config = forInstallation (installDirectoryFromFile (installJson));
+        config.source = "install-file";
+
+        auto directory = module.getParentDirectory();
+        for (int depth = 0; depth < 10 && ! config.executable.existsAsFile(); ++depth)
         {
-            const auto bundled = directory.getChildFile ("engine").getChildFile ("vocal-engine.exe");
-            if (bundled.existsAsFile())
-            {
-                config.executable = bundled;
-                config.workingDirectory = bundled.getParentDirectory();
+            config = bundledEngine (directory);
+            if (config.executable.existsAsFile())
                 break;
-            }
             config = fromMcpFile (directory.getChildFile (".mcp.json"));
             if (config.executable.existsAsFile())
                 break;
@@ -107,10 +177,16 @@ EngineConfig EngineConfig::discover()
         }
         if (! config.executable.existsAsFile())
         {
+            config = forInstallation (installDirectoryFromRegistry());
+            config.source = "registry";
+        }
+        if (! config.executable.existsAsFile())
+        {
             directory = juce::File::getCurrentWorkingDirectory();
             for (int depth = 0; depth < 10; ++depth)
             {
                 config = fromMcpFile (directory.getChildFile (".mcp.json"));
+                config.source = "cwd-mcp.json";
                 if (config.executable.existsAsFile())
                     break;
                 const auto parent = directory.getParentDirectory();
@@ -119,6 +195,8 @@ EngineConfig EngineConfig::discover()
                 directory = parent;
             }
         }
+        if (! config.executable.existsAsFile())
+            config.source = {};
     }
     if (cwd.isNotEmpty())
         config.workingDirectory = juce::File (cwd);

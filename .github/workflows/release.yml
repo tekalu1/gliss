@@ -3,7 +3,7 @@
 #
 #   1. 確かめる: 所有者が走らせた・タグの形（v0.1.0 / v0.1.0-beta.N）・タグが main の上・
 #      タグと app/package.json の版と engine 側の版とリリースノート（releases/<版>.json）がそろう・同じ Release がまだ無い
-#   2. 作る: エンジン exe（scripts/build-engine.mjs）→ 任意のアドオン（scripts/build-addon.mjs。exe に無い依存の zip。
+#   2. 作る: エンジン exe（scripts/build-engine.mjs）→ DAW のプラグイン（scripts/build-plugin.mjs）→ 任意のアドオン（scripts/build-addon.mjs。exe に無い依存の zip。
 #      作った exe に読ませて確かめる）→ 単体テスト → リリースノート・アドオンの目録（アプリに埋める）・THIRD_PARTY_NOTICES →
 #      electron-builder（--publish never。アップロードはさせない）→ 展開版のスモーク（重みなしで起動してエンジンにつながる）
 #   3. そろえる: インストーラ・.blockmap・latest.yml の SHA-512 を確かめ、THIRD_PARTY_NOTICES と copyleft のパッケージの
@@ -35,7 +35,7 @@ jobs:
     # 所有者だけ。手で走らせるときは main から（PR の枝のワークフローの定義で走らせない）
     if: github.actor == github.repository_owner && (github.event_name == 'push' || github.ref == 'refs/heads/main')
     runs-on: windows-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     permissions:
       contents: write
     defaults:
@@ -86,6 +86,10 @@ jobs:
         run: |
           node scripts/build-engine.mjs
           if ($LASTEXITCODE -ne 0) { throw 'エンジン exe を作れない' }
+      - name: DAW のプラグイン（VST3 + ARA 2。ランナーの Visual Studio の MSVC と CMake。依存は CMake が版を固定して取る）
+        run: |
+          node scripts/build-plugin.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'DAW のプラグインを作れない' }
       - name: 任意のアドオン（漢字の歌詞の読みなど。exe の固定を制約にした zip。作った exe で import を確かめる）
         run: |
           node scripts/build-addon.mjs --all
