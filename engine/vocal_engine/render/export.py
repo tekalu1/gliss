@@ -38,6 +38,7 @@ QUIET_SEARCH_SEC = 1.0          # 窓の端をさがす幅
 QUIET_MARGIN_SEC = 0.06         # 編集からこれ以上は離す
 QUIET_WIN_SEC = 0.03            # 静けさを測る窓
 CLUSTER_GAP_SEC = 0.5           # これより近い編集は 1 つの窓にまとめる
+MUTE_FADE_SEC = 0.005           # クリップで消した区間の前後のフェード（再生と同じ 5 ms）
 
 INT_SUBTYPES = {"PCM_16": 16, "PCM_24": 24, "PCM_32": 32, "PCM_U8": 8}
 FLOAT_SUBTYPES = {"FLOAT": "float32", "DOUBLE": "float64"}
@@ -186,8 +187,37 @@ def _windows(project, segs, t0, t1):
     return out
 
 
+def apply_mutes(out, sr, mutes, kind, offset_frames=0):
+    """クリップで消した区間（トラックの頭が 0 の秒）を 0 にし、前後 `MUTE_FADE_SEC` をフェードにする。
+
+    区間の**外側**にフェードを置くので、区間の中は完全な 0、フェードより外は元のサンプルのまま。
+    返り値は実際に 0 にした区間（秒）。`out` を書き換える。"""
+    n_frames = out.shape[0]
+    fade = max(1, int(round(MUTE_FADE_SEC * sr)))
+    spans = []
+    for a, b in mutes or []:
+        ia = max(0, min(n_frames, offset_frames + int(round(float(a) * sr))))
+        ib = max(0, min(n_frames, offset_frames + int(round(float(b) * sr))))
+        if ib - ia < 1:
+            continue
+        spans.append([ia, ib])
+    for ia, ib in spans:
+        f0 = max(0, ia - fade)
+        if ia > f0:                        # 手前: 1 → 0
+            g = np.linspace(1.0, 0.0, ia - f0 + 1)[:-1]
+            seg = _to_float(out[f0:ia], kind) * g[:, None]
+            out[f0:ia] = _to_store(seg, kind)
+        f1 = min(n_frames, ib + fade)
+        if f1 > ib:                        # 後ろ: 0 → 1
+            g = np.linspace(0.0, 1.0, f1 - ib + 1)[1:]
+            seg = _to_float(out[ib:f1], kind) * g[:, None]
+            out[ib:f1] = _to_store(seg, kind)
+        out[ia:ib] = 0
+    return [[round(ia / sr, 4), round(ib / sr, 4)] for ia, ib in spans]
+
+
 def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
-               full_source=False, position_shift_sec=0.0, cancel=None, progress=None,
+               full_source=False, position_shift_sec=0.0, mutes=None, cancel=None, progress=None,
                commit=None):
     """編集を当てた WAV を書く。**元と同じ長さ・開始位置**で、編集区間だけ差し替える。
 
@@ -199,6 +229,9 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
     `position_shift_sec`: トラックの位置をずらした量（セッションの `offset_sec`。issue #7）。中身・長さは
     変えず、BWF の TimeReference（DAW 上の位置）だけをこの量だけ動かす（元に bext が無ければ足す）。
     前へずらして 0 より前になるときは 0 にして警告を返す（DAW では手で合わせる）。
+
+    `mutes`: クリップで消した区間 [[始め, 終わり]…]（セッションのトラックの `mutes`。トラックの頭＝クリップの頭が 0 の秒）。
+    その区間を 0 にし、前後 5 ms をフェードにする（聞こえているとおりに書く）。返り値の `muted_spans_sec`。
     """
     from .region import RegionRenderer
     def advance(value):
@@ -261,6 +294,7 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
         for ch in range(n_ch):
             out[ia:ib, ch] = _to_store(y[:, ch], kind)
         replaced.append([round(ia / sr, 4), round(ib / sr, 4)])
+    muted = apply_mutes(out, sr, mutes, kind)
     advance(0.84)
 
     clip = off != 0 or n_clip != full.shape[0]
@@ -269,6 +303,8 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
         whole = full.copy()
         whole[off:off + n_clip] = out
         out = whole
+    if muted:
+        warnings.append("クリップで消した区間 %d か所を 0 にして書いた" % len(muted))
     start = 0.0 if full_source else off / sr
     expect_frames = out.shape[0]
 
@@ -372,6 +408,7 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
         "edits": len(project.edits),
         "replaced_spans_sec": replaced,
         "replaced_sec": round(replaced_sec, 3),
+        "muted_spans_sec": muted,
         "range_sec": [round(t0, 3), round(t1, 3)],
         "source_id": take.get("source_id"),
         "source_offset_sec": round(off / sr, 6),

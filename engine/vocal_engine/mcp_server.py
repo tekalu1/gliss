@@ -179,7 +179,8 @@ HISTORY_TOOLS = {
     "set_lyrics", "import_lyrics", "shift_pitch", "set_pitch_curve", "set_transition", "split_note", "merge_notes",
     "move_note", "stretch", "move_boundary", "correct_to_guide", "apply_plan", "set_connection",
     "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
-    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "open_project",
+    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "split_track", "join_track",
+    "mute_track_range", "open_project",
     "new_project", "load_project", "save_project",
 }
 
@@ -1853,6 +1854,8 @@ def export_wav(path: str = None, start_sec: float = None, end_sec: float = None,
     （元に bext が無くても、クリップなら TimeReference = 開始位置の bext を足す）。
     **トラックの位置をずらしていれば（set_track の offset_sec）、TimeReference もその量だけ動かす**
     （中身・長さは元のまま。DAW で「元の位置へ」を押すと、ずらした位置に来る。返り値の `timeline_offset_sec`）。
+    **トラックビューで消した区間（mute_track_range）は 0 にして書く**（前後 5 ms をフェード。返り値の `muted_spans_sec`。
+    ノートの無音とは別。編集対象のトラックの区間だけ）。
 
     返り値の `replaced_spans_sec` が実際に差し替えた区間。その外は元のサンプルのまま。
     """
@@ -1861,13 +1864,14 @@ def export_wav(path: str = None, start_sec: float = None, end_sec: float = None,
     if background is None:
         background = p.duration_sec > 60.0
 
-    from .mcp_tracks import current_offset_sec
+    from .mcp_tracks import current_mutes, current_offset_sec
     shift = current_offset_sec()
+    mutes = current_mutes()
 
     def work(cancel=None, report=None, commit=None):
         with _prep_yield():
             r = _export(p, path=path, start_sec=start_sec, end_sec=end_sec, backend=backend,
-                        full_source=full_source, position_shift_sec=shift,
+                        full_source=full_source, position_shift_sec=shift, mutes=mutes,
                         cancel=cancel, progress=report, commit=commit)
         r["timeline_offset_sec"] = round(shift, 6)
         return r
