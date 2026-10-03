@@ -68,8 +68,11 @@ function load({ natives = {}, files = {}, readyState = 'loading', dom = false } 
     }),
     fetch: async (url) => {
       calls.push(['fetch', url]);
-      const body = files[url];
+      const entry = files[url];
+      const body = entry && typeof entry === 'object' ? entry.body : entry;
+      const type = entry && typeof entry === 'object' ? entry.type : 'application/json';
       return { ok: body !== undefined, status: body !== undefined ? 200 : 404,
+        headers: { get: (k) => (String(k).toLowerCase() === 'content-type' ? type : null) },
         json: async () => JSON.parse(body), arrayBuffer: async () => new TextEncoder().encode(body).buffer };
     },
     addEventListener: (t, fn) => { (winListeners[t] ||= []).push(fn); },
@@ -140,6 +143,11 @@ test('(B3) readFile・readJson は /fs/ を fetch する', async () => {
   const failure = (pr) => Promise.resolve(pr).then(() => null, (e) => e.message);
   expect(await failure(h.api.readFile('C:\\Windows\\win.ini'))).toBe('読み取りを許していない場所: C:\\Windows\\win.ini');
   expect(await failure(h.api.readJson('C:\\x.json'))).toBe('読み取りを許していない場所: C:\\x.json');
+  // C++（JUCE の resource provider）は 404 を返せないので、読ませないものは 200 と印の MIME で来る
+  const denied = 'D:\\outside.json';
+  const h2 = load({ files: { [`/fs/${encodeURIComponent(denied)}`]: { body: 'not found', type: 'application/x-gliss-not-found' } } });
+  expect(await failure(h2.api.readJson(denied))).toBe(`読み取りを許していない場所: ${denied}`);
+  expect(await failure(h2.api.readFile(denied))).toBe(`読み取りを許していない場所: ${denied}`);
 });
 
 test('(B4) bootstrap は既定を足す', async () => {
