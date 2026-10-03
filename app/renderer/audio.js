@@ -2,7 +2,8 @@
 //
 //  - エンジンの `render_tracks` がトラックごとの音のファイルを返す（編集のあるボーカルは編集を当てた音、
 //    他は元のファイル）。main 経由で読み、Web Audio でタイムライン上の位置（start_sec）に置いて鳴らす。
-//  - **ミュート／ソロはトラックごとの GainNode**（再生中に押しても、その場で聞こえ方が変わる）。
+//  - **ミュート／ソロ・音量はトラックごとの GainNode、パンはその次の StereoPannerNode**（再生中に動かしても、
+//    その場で聞こえ方が変わる）。**再生だけに効く**（書き出し・render_tracks の音には入らない）。
 //    ガイドのトラックも他と同じく鳴る（テイクと重ねる・ソロで切り替える）。
 //  - 再生位置 S.head とループ S.loop はタイムラインの秒（上下で共通）。ループは区間の終わりの少し前に
 //    次の周回を AudioContext の時刻で予約する（どのトラックも同じ時刻に頭へ戻る）。
@@ -14,12 +15,13 @@
 //  - **テストの起動では音を一切出さない**（--mute。出力の音量 0）。プレビューは「鳴らそうとしたもの」を記録する。
 import { call, callJob, status } from './engine.js';
 import { S, audible, timelineRange } from './state.js';
+import { dbToGain, gainOf, panOf } from './mixer.js';
 import { follow, movePlayhead, renderToolbar } from './draw.js';
 import { waitFor } from './edits.js';
 
 let ctx = null;
 let raf = null;
-let P = null;                 // 再生中: { list, gains, sources, a, b, loop, segs: [[ctx 時刻, タイムラインの秒], ...] }
+let P = null;                 // 再生中: { list, gains, pans, sources, a, b, loop, segs: [[ctx 時刻, タイムラインの秒], ...] }
 let loading = false;
 let sched = null;             // ループの次の周回の予約（requestAnimationFrame はウィンドウが隠れると止まるので使わない）
 const MIN_LOOP = 0.05;
@@ -76,15 +78,28 @@ async function stems() {
   return out;
 }
 
-/** ミュート／ソロを今の音に当てる（再生中に押したときも呼ぶ）。 */
+// モノラルの音は StereoPannerNode の等パワーで中央が −3 dB になる（ステレオの音は中央で変わらない）。
+// パンを触る前と同じ音量で鳴らすため、モノラルだけ √2 を掛けて中央を 0 dB にそろえる
+const monoComp = (st) => (st.buf.numberOfChannels === 1 ? Math.SQRT2 : 1);
+
+/** ミュート／ソロ・音量・パンを今の音に当てる（再生中に動かしたときも呼ぶ）。 */
 export function setGains() {
   if (!P) return;
+  const now = ctx.currentTime;
   for (const [id, g] of P.gains) {
     const t = S.tracks.find((x) => x.id === id);
-    const v = t && audible(t) ? 1 : 0;
-    g.gain.cancelScheduledValues(ctx.currentTime);
-    g.gain.setTargetAtTime(v, ctx.currentTime, 0.004);   // 数 ms かけて（プチッと鳴らさない）
+    const v = t && audible(t) ? dbToGain(gainOf(t)) : 0;
+    const comp = P.comp.get(id) || 1;
+    g.gain.cancelScheduledValues(now);
+    g.gain.setTargetAtTime(v * comp, now, 0.006);   // 数 ms かけて（プチッと鳴らさない）
     g.target = v;
+    const pn = P.pans.get(id);
+    if (pn) {
+      const pan = t ? panOf(t) : 0;
+      pn.pan.cancelScheduledValues(now);
+      pn.pan.setTargetAtTime(pan, now, 0.006);
+      pn.target = pan;
+    }
   }
 }
 
@@ -94,7 +109,7 @@ export function playState() {
   return {
     loop: P.loop, range: [P.a, P.b],
     tracks: P.list.map((s) => ({ id: s.id, path: s.path, start: s.start_sec, edited: s.edited,
-      duration: s.buf.duration, gain: P.gains.get(s.id)?.target ?? null })),
+      duration: s.buf.duration, gain: P.gains.get(s.id)?.target ?? null, pan: P.pans.get(s.id)?.target ?? null })),
   };
 }
 
@@ -135,11 +150,15 @@ export async function play() {
   const loop = S.loop && S.loop[1] - S.loop[0] >= MIN_LOOP ? S.loop : null;
   const [a, b] = loop || timelineRange();
   const from = S.head >= a && S.head < b ? S.head : a;
-  P = { list, gains: new Map(), sources: [], a, b, loop: !!loop, segs: [] };
+  P = { list, gains: new Map(), pans: new Map(), comp: new Map(), sources: [], a, b, loop: !!loop, segs: [] };
   for (const st of list) {
     const g = c.createGain();
-    g.connect(output());
+    const pn = c.createStereoPanner();
+    g.connect(pn);
+    pn.connect(output());
     P.gains.set(st.id, g);
+    P.pans.set(st.id, pn);
+    P.comp.set(st.id, monoComp(st));
   }
   setGains();
   const t0 = c.currentTime + 0.03;
@@ -189,6 +208,7 @@ export function stop() {
   if (P) {
     for (const s of P.sources) { try { s.stop(); } catch { /* 既に止まっている */ } }
     for (const g of P.gains.values()) { try { g.disconnect(); } catch { /* noop */ } }
+    for (const pn of P.pans.values()) { try { pn.disconnect(); } catch { /* noop */ } }
   }
   P = null;
   renderToolbar();

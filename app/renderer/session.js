@@ -21,17 +21,18 @@ export function adoptSession(sess) {
   for (const fn of hooks) fn(sess);
 }
 
-/** ミュート・ソロ・名前などを変える（位置は tracks.js の offset の確定で）。 */
+/** ミュート・ソロ・音量・パン・名前などを変える（位置は tracks.js の offset の確定で）。 */
 export async function setTrack(id, patch) {
-  const ms = Object.keys(patch).every((k) => k === 'mute' || k === 'solo');
+  const ms = Object.keys(patch).every((k) => k === 'mute' || k === 'solo' || k === 'gain_db' || k === 'pan');
   if (!ms) {
     const r = await call('set_track', { track_id: id, ...patch });
     adoptSession(r.session);
     return r;
   }
-  // ミュート／ソロ: 聴き比べの操作なので順番待ちに入れず、すぐ効かせる（取り消しの履歴にも入らない）。
+  // ミュート／ソロ・音量・パン: 聴き比べの操作なので順番待ちに入れず、すぐ効かせる（取り消しの履歴にも入らない）。
   // 返ってきたセッションは丸ごとは取り込まない（順番待ちの操作 = 編集対象の切り替えなどと入れ違うと、
-  // 古い編集対象に戻ってしまう）。ミュート／ソロだけ写す
+  // 古い編集対象に戻ってしまう）。ミュート／ソロだけ写す。音量・パンは画面の値が真（ドラッグ中に
+  // 前の応答が届いて、動かした値を古い値に戻さない）
   const t = S.tracks.find((x) => x.id === id);
   if (t) { Object.assign(t, patch); setGains(); for (const fn of hooks) fn(S.session); }
   const r = await call('set_track', { track_id: id, ...patch });
@@ -43,6 +44,44 @@ export async function setTrack(id, patch) {
   setGains();
   for (const fn of hooks) fn(S.session);
   return r;
+}
+
+// 音量・パンをドラッグしている間は、画面の値をすぐ当て（音も変わる）、エンジンへは 1 本ずつ・最後の値だけ送る
+// （毎回 session.json を書くので、動かした分だけは送らない）。離したときの値までは必ず送る
+const mixSend = new Map();      // トラック id → { busy, want }
+
+/** 音量・パンを今すぐ当て、エンジンに保存する（取り消しの履歴には入らない）。送り終わるまでの Promise。 */
+export function setMix(id, patch) {
+  const t = S.tracks.find((x) => x.id === id);
+  if (!t) return Promise.resolve(false);
+  Object.assign(t, patch);
+  setGains();
+  for (const fn of hooks) fn(S.session);
+  const m = mixSend.get(id) || { busy: false, want: null, done: [] };
+  mixSend.set(id, m);
+  m.want = { ...m.want, ...patch };
+  return new Promise((resolve, reject) => {
+    m.done.push({ resolve, reject });
+    if (!m.busy) pump(id, m);
+  });
+}
+
+async function pump(id, m) {
+  m.busy = true;
+  while (m.want) {
+    const patch = m.want;
+    const waiters = m.done;
+    m.want = null;
+    m.done = [];
+    try {
+      await call('set_track', { track_id: id, ...patch });
+      for (const w of waiters) w.resolve(true);
+    } catch (err) {
+      for (const w of waiters) w.reject(err);
+    }
+  }
+  m.busy = false;
+  if (!m.want) mixSend.delete(id);
 }
 
 // ---------------------------------------------------------------- ガイドが重ならない理由（issue #32）

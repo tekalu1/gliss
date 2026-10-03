@@ -23,7 +23,7 @@ from . import log
 from . import mcp_server as _srv
 from . import prep
 from .project import Project, ProjectError
-from .project.session import SessionError
+from .project.session import SessionError, norm_gain_db, norm_pan
 
 _ok = _srv._ok
 _tool = _srv._tool
@@ -336,9 +336,13 @@ def remove_track(track_id: str, author: str = "ai") -> dict:
 @_guarded
 def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = None,
               solo: bool = None, offset_sec: float = None, index: int = None,
-              author: str = "ai") -> dict:
-    """トラックの名前・種類・ミュート／ソロ・**位置**・**並び順**を変える（渡したものだけ）。
-    名前・種類・位置・並び順は取り消せる（undo）。ミュート／ソロは取り消しの対象外（聴き比べの操作。DAW と同じ）。
+              gain_db: float = None, pan: float = None, author: str = "ai") -> dict:
+    """トラックの名前・種類・ミュート／ソロ・**音量・パン**・**位置**・**並び順**を変える（渡したものだけ）。
+    名前・種類・位置・並び順は取り消せる（undo）。ミュート／ソロ・音量・パンは取り消しの対象外（聴き比べの操作。DAW と同じ）。
+
+    gain_db: トラックの音量（dB。既定 0。−60〜+6 に丸め、−60 以下は無音 = −∞）。**再生（画面）だけに効く**
+      （書き出し・render_tracks の音のファイルには入らない）。session（.gliss）には保存する
+    pan: トラックのパン（−1 = 左いっぱい 〜 +1 = 右いっぱい、既定 0）。再生だけに効く
 
     offset_sec: タイムライン上の位置（秒。負も可）。**音源全体を非破壊でずらす**（ファイルは書き換えない）。
       編集は音と一緒に動く（編集の秒はトラックの頭が 0 のまま）。ガイドとの対応はタイムライン上の位置で
@@ -362,6 +366,9 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
         s.tracks = order
     if offset_sec is not None and not np.isfinite(float(offset_sec)):
         raise SessionError("offset_sec が数ではない")
+    for key, val in (("gain_db", gain_db), ("pan", pan)):
+        if val is not None and not np.isfinite(float(val)):
+            raise SessionError("%s が数ではない" % key)
     if kind is not None:
         if kind not in ("vocal", "inst"):
             raise SessionError("kind は vocal か inst")
@@ -378,6 +385,10 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
         t["mute"] = bool(mute)
     if solo is not None:
         t["solo"] = bool(solo)
+    if gain_db is not None:
+        t["gain_db"] = norm_gain_db(gain_db)
+    if pan is not None:
+        t["pan"] = norm_pan(pan)
     if offset_sec is not None:
         v = float(offset_sec)
         if not np.isfinite(v):
