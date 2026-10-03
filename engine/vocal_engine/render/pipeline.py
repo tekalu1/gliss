@@ -9,6 +9,9 @@
     原音のままの側は原音の続きを使う。
     （段階3で修正: 以前は再合成した区間の後ろに原音を直に継ぎ足してから等パワーで重ねていたので、
      境界に段差（クリック）と最大 +3 dB の膨らみが出ていた。）
+  - クロスフェードが縮まないように、**出力が 20 ms 未満の区間は隣と束ねるか、隣の隙間から借りて広げる**
+    （`bundle_short_segments`）。1 つの chunk の頭と尻のクロスフェードは chunk の中で重ならない（`_join`）。
+    縮んだり重なったりすると、再合成の端と次の音が 1 サンプルの段差（クリック）でつながる。
   - フェードの形は、重ねる 2 つの音の相関 rho に合わせて振幅を補正する
     （rho=1 → 振幅の和が 1、rho=0 → 等パワー）。同じ原音どうしでも、ピッチの違う音どうしでも
     膨らまない・痩せない。
@@ -28,7 +31,7 @@
 （chunk ごとに丸めると誤差が積もり、編集の後ろの原音が 1〜2 サンプルずれて
 「範囲外はサンプル一致」が崩れるため）。
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -195,6 +198,144 @@ def _coalesce(segs, barriers=()):
 FIT_HOLD_MAX = 3        # `_fit` が最後のサンプルを保持して埋める最大の長さ（それ以上の不足は 0 で埋める）
 
 
+def _bundleable(sg):
+    """束ねられる区間（時間を伸縮・移動するかピッチを変えるだけの、ふつうの区間）。"""
+    return sg.silence_sec <= 0.0 and sg.ratio > 0.0 and sg.gain > 0.0
+
+
+def _dur(g):
+    return g.end_sec - g.start_sec
+
+
+def _olen(g):
+    return _dur(g) * g.ratio
+
+
+def _shift_curve(cp, dt):
+    """曲線（区間の頭からの相対秒）を、頭が dt 手前へ伸びたぶん後ろへずらす。"""
+    return [[float(t) + dt, float(c)] for t, c in cp] if cp else cp
+
+
+def bundle_short_segments(segs, t0, t1, min_out_sec, min_gap_sec=MIN_GAP_MS / 1000.0):
+    """出力の長さが min_out_sec 未満の区間を、隣り合うものと束ねて 1 つの再合成にする。
+
+    `_join` のクロスフェードは両側とも**区間の出力の長さ**を超えられない（超えるとつなぐ相手が足りない）ので、
+    極短い区間（「ガイドへ寄せる」の細かい伸縮は 0.5 ms まである）は 0.1〜0.2 ms のクロスフェードに縮み、
+    前の再合成の端と次の音が段差でつながって 1 サンプルのクリックになる。次の順で長さを稼ぐ
+    （どちらも**出力の長さの合計は変えない**ので、後ろの位置は動かない）:
+
+      1. **接している**（隙間が無い）隣の区間の長い方へ束ねる。束ねた区間は長い方のピッチ（cents・曲線）・
+         移動・編集 id を引き継ぎ、伸縮比だけを「束ねた出力の長さ ÷ 束ねた元の長さ」にする
+         （短い側の中の伸縮・ピッチの細かい違いは隣に溶ける。20 ms 未満の中身なので耳には届かない）。
+      2. 孤立していて（前後に原音のままの隙間がある）まだ短い区間は、その隙間から前後へ足りない分だけ
+         借りて広げる（広げた分は等倍で、区間のピッチ・伸縮比に畳む）。隙間は MIN_GAP_MS を割らない
+         （割るときは隙間ごと取り込む）。
+
+    無音の挿入・切り取り・無音にする・フェードの印は束ねない（境目として残す）。
+    渡した Segment は書き換えない（束ねた・広げた区間は新しく作る）。
+    """
+    segs = [replace(g, start_sec=max(t0, g.start_sec), end_sec=min(t1, g.end_sec))
+            if g.silence_sec <= 0.0 and (g.start_sec < t0 or g.end_sec > t1) else g
+            for g in segs]
+    for _ in range(4):
+        segs, c1 = _merge_touching(segs, min_out_sec)
+        segs, c2 = _borrow_from_gaps(segs, t0, t1, min_out_sec, min_gap_sec)
+        if not (c1 or c2):
+            break
+    return segs
+
+
+def _merge_touching(segs, min_out_sec):
+    runs, cur = [], []
+    for sg in segs:
+        if _bundleable(sg):
+            if cur and abs(cur[-1].end_sec - sg.start_sec) < 1e-9:
+                cur.append(sg)
+            else:
+                if cur:
+                    runs.append(cur)
+                cur = [sg]
+        else:
+            if cur:
+                runs.append(cur)
+            cur = []
+            runs.append([sg])
+    if cur:
+        runs.append(cur)
+    result, changed = [], False
+    for run in runs:
+        run = list(run)
+        while len(run) > 1:
+            k = min(range(len(run)), key=lambda i: _olen(run[i]))
+            if _olen(run[k]) >= min_out_sec:
+                break
+            j = max((i for i in (k - 1, k + 1) if 0 <= i < len(run)), key=lambda i: _olen(run[i]))
+            a, b = (run[j], run[k]) if j < k else (run[k], run[j])
+            keep, tiny = run[j], run[k]
+            src = _dur(a) + _dur(b)
+            ratio = (_olen(a) + _olen(b)) / src if src > 0 else keep.ratio
+            merged = replace(keep, start_sec=a.start_sec, end_sec=b.end_sec, ratio=ratio,
+                             curve_points=_shift_curve(keep.curve_points, _dur(tiny)) if tiny is a
+                             else keep.curve_points,
+                             edit_ids=list(keep.edit_ids) + [i for i in tiny.edit_ids
+                                                              if i not in keep.edit_ids])
+            lo = min(j, k)
+            run[lo:lo + 2] = [merged]
+            changed = True
+        result.extend(run)
+    return result, changed
+
+
+def _borrow_from_gaps(segs, t0, t1, min_out_sec, min_gap_sec):
+    """孤立した短い区間を、前後の原音のままの隙間から借りて min_out_sec まで広げる（`bundle_short_segments` の 2）。"""
+    segs = list(segs)
+    changed = False
+    cursor, m_prev = t0, 0.0         # `render_range` のループと同じ数え方（累積の位置と、移動の繰り越し）
+    for i, sg in enumerate(segs):
+        if sg.silence_sec > 0:
+            cursor = max(cursor, sg.start_sec)
+            continue
+        s, e = max(t0, sg.start_sec), min(t1, sg.end_sec)
+        if _bundleable(sg) and _olen(sg) < min_out_sec:
+            need = min_out_sec - _olen(sg)
+            # 手前の隙間
+            l_src = s - cursor
+            l_out = l_src + (sg.move_ms - m_prev) / 1000.0
+            # 後ろの隙間（次が無ければ末尾）
+            nxt = segs[i + 1] if i + 1 < len(segs) else None
+            if nxt is None:
+                r_src = t1 - e
+                r_out = r_src - sg.move_ms / 1000.0
+            elif nxt.silence_sec > 0:
+                r_src = r_out = nxt.start_sec - e
+            else:
+                r_src = max(t0, nxt.start_sec) - e
+                r_out = r_src + (nxt.move_ms - sg.move_ms) / 1000.0
+
+            def room(src, out):
+                a = min(src, out)
+                if a <= 1e-9:
+                    return 0.0
+                if abs(src - out) < 1e-9 and src <= need + min_gap_sec:
+                    return src                  # 取り込んだ残りが MIN_GAP を割るなら隙間ごと
+                return max(0.0, a - min_gap_sec)
+
+            lm, rm = room(l_src, l_out), room(r_src, r_out)
+            dl = min(need / 2.0, lm)
+            dr = min(need - dl, rm)
+            dl = min(need - dr, lm)
+            if dl + dr > 1e-9:
+                total = _dur(sg) + dl + dr
+                sg = replace(sg, start_sec=s - dl, end_sec=e + dr,
+                             ratio=(_olen(sg) + dl + dr) / total,
+                             curve_points=_shift_curve(sg.curve_points, dl))
+                segs[i] = sg
+                s, e = s - dl, e + dr
+                changed = True
+        cursor, m_prev = e, sg.move_ms
+    return segs, changed
+
+
 def _fit(y, want):
     """合成結果を want サンプルに合わせる（丸めの差 1〜2 サンプルを詰める／足す）。
 
@@ -278,6 +419,7 @@ class Renderer:
                 and ((s.end_sec > t0 and s.start_sec < t1)
                      or (s.silence_sec > 0 and t0 <= s.start_sec <= t1))]
         segs.sort(key=lambda s: (s.start_sec, s.end_sec))
+        segs = bundle_short_segments(segs, t0, t1, fade / float(sr))
 
         chunks = []          # (kind, core_audio, src_start_sec, src_end_sec, out_len)
         warnings = []
@@ -444,16 +586,19 @@ class Renderer:
         境界ごとに、出ていく側の [core の最後 h | post h] と、入ってくる側の
         [pre h | core の最初 h] を重ねる（h <= hx。どちらかのマージンや core が短ければ短い方に合わせる）。
         pre / post は chunk が持っていればそれ（再合成した続き）、無ければ原音の続き。
+
+        **1 つの chunk の頭と尻のクロスフェードは、その chunk の中で重ならない**（頭の h + 尻の h <= chunk の長さ）。
+        重なると、後から書く方が先に書いた混ぜ具合を途中から上書きして、そこが 1 サンプルの段差になる
+        （20 ms 未満の隙間や短い区間で起きた）。足りないときは両側を比例して縮める。
         """
         chunks = [c for c in chunks if len(c["audio"]) > 0]
         if not chunks:
             return np.zeros(0)
         total = int(sum(len(c["audio"]) for c in chunks))
         out = np.concatenate([np.asarray(c["audio"], dtype="float64") for c in chunks])
-        pos = 0
+        posts, pres, hs = [], [], []
         for i in range(len(chunks) - 1):
             L, R = chunks[i], chunks[i + 1]
-            pos += len(L["audio"])
             # 挿入した無音には原音の端を足さない（隣の音がその中で短くフェードする）
             if L.get("kind") == "silence":
                 post = np.zeros(hx)
@@ -467,9 +612,33 @@ class Renderer:
                 pre = R.get("pre")
                 if pre is None:
                     pre = self._cut(R["src"][0] - hx / self.sr, R["src"][0])
-            h = min(hx, len(post), len(pre), len(L["audio"]), len(R["audio"]))
+            posts.append(post)
+            pres.append(pre)
+            hs.append(min(hx, len(post), len(pre), len(L["audio"]), len(R["audio"])))
+        for _ in range(len(hs) + 2):              # 頭 + 尻 > chunk の長さ を比例して縮める（収束するまで）
+            changed = False
+            for i, c in enumerate(chunks):
+                lh = hs[i - 1] if i > 0 else 0
+                rh = hs[i] if i < len(hs) else 0
+                n = len(c["audio"])
+                if lh + rh > n:
+                    nl = min(lh, n * lh // (lh + rh))
+                    nr = min(rh, n - nl)
+                    if i > 0:
+                        hs[i - 1] = nl
+                    if i < len(hs):
+                        hs[i] = nr
+                    changed = True
+            if not changed:
+                break
+        pos = 0
+        for i in range(len(chunks) - 1):
+            L, R = chunks[i], chunks[i + 1]
+            pos += len(L["audio"])
+            h = hs[i]
             if h <= 0:
                 continue
+            post, pre = posts[i], pres[i]
             a = np.concatenate([np.asarray(L["audio"][-h:]), np.asarray(post[:h])])
             b = np.concatenate([np.asarray(pre[-h:]), np.asarray(R["audio"][:h])])
             k = len(used) if used is not None else 0

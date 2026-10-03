@@ -7,12 +7,15 @@
 
   E1  区間の長さ（累積の秒を丸めた want）と、再合成の core の長さ（区間を個別に丸めたもの）が 1 サンプル
       ずれると、core の末尾に 0 が足されて、クロスフェードの中央の 1 サンプルが半分ほどに落ちる
+  E2  出力が 20 ms 未満の区間（「ガイドへ寄せる」の細かい伸縮は 0.5 ms まである）は、クロスフェードが
+      区間の長さまで縮んで、前の再合成の端と次の音が段差でつながる。20 ms 未満の隙間で頭と尻の
+      クロスフェードが重なって上書きし合うのも同じ段差になる
 """
 import numpy as np
 import pytest
 
 from vocal_engine.render import pipeline as P
-from vocal_engine.render.pipeline import Renderer, Segment
+from vocal_engine.render.pipeline import Renderer, Segment, bundle_short_segments
 
 SR = 24000
 HOP = 0.01
@@ -111,6 +114,45 @@ def test_stretch_chain_with_rounding_mismatch_has_no_click(voice, backend):
     _assert_clean(voice, y, segs)
 
 
+@pytest.mark.parametrize("backend", _backends())
+def test_stretches_between_gaps_have_no_click(voice, backend):
+    """原音のままの隙間（長さが毎回違う）をはさんだ伸縮。隙間の長さの丸めも 1 サンプルずれる。"""
+    rng = np.random.default_rng(2)
+    segs = _chain(rng, rng.uniform(0.02, 0.06, 30), 0.6, 1.8, gap_lo=0.0153, gap_hi=0.07)
+    y, _ = _render(voice, backend, segs)
+    _assert_clean(voice, y, segs)
+
+
+@pytest.mark.parametrize("backend", _backends())
+def test_tiny_touching_stretches_have_no_step(voice, backend):
+    """0.5〜10 ms の極短い伸縮が接して並ぶ（「ガイドへ寄せる」の細かい伸縮）。"""
+    rng = np.random.default_rng(3)
+    durs = rng.choice([0.0005, 0.001, 0.002, 0.005, 0.008, 0.03], 60)
+    segs = _chain(rng, durs, 0.5, 2.0)
+    y, _ = _render(voice, backend, segs)
+    _assert_clean(voice, y, segs)
+
+
+@pytest.mark.parametrize("backend", _backends())
+def test_tiny_isolated_stretches_have_no_step(voice, backend):
+    """0.5〜8 ms の伸縮が、15〜60 ms の隙間をはさんで孤立している（隙間から借りて広げる）。"""
+    rng = np.random.default_rng(5)
+    durs = rng.choice([0.0005, 0.001, 0.002, 0.005, 0.008], 30)
+    segs = _chain(rng, durs, 0.5, 2.5, gap_lo=0.015, gap_hi=0.06)
+    y, _ = _render(voice, backend, segs)
+    _assert_clean(voice, y, segs)
+
+
+@pytest.mark.parametrize("backend", _backends())
+def test_tiny_stretches_with_pitch_have_no_step(voice, backend):
+    """ピッチの違う極短い区間と長い区間が接して並ぶ。"""
+    rng = np.random.default_rng(7)
+    durs = rng.choice([0.002, 0.005, 0.03, 0.05], 30)
+    segs = _chain(rng, durs, 0.6, 1.6, cents=[0, 200, -300])
+    y, _ = _render(voice, backend, segs)
+    _assert_clean(voice, y, segs)
+
+
 def test_fit_pads_with_last_sample_not_zero():
     """足りない 1〜2 サンプルは 0 でなく最後のサンプルで埋める（0 はクロスフェードの中央でクリックになる）。"""
     y = np.array([0.1, 0.2, -0.3])
@@ -120,3 +162,68 @@ def test_fit_pads_with_last_sample_not_zero():
     far = P._fit(y, 10)                        # 大きな不足（バックエンドの異常）は 0 のまま
     assert far[3:].tolist() == [0.0] * 7
     assert len(P._fit(np.zeros(0), 3)) == 3
+
+
+def test_bundle_merges_short_touching_into_longer_neighbour():
+    min_out = 0.02
+    a = Segment(1.0, 1.1, cents=200.0, ratio=1.0, edit_ids=["a"])
+    b = Segment(1.1, 1.103, cents=0.0, ratio=3.0, edit_ids=["b"])      # 出力 9 ms
+    c = Segment(1.103, 1.2, cents=-100.0, ratio=1.0, edit_ids=["c"])
+    out = bundle_short_segments([a, b, c], 0.0, 5.0, min_out)
+    assert len(out) == 2
+    # b は長い方（出力 100 ms の a か 97 ms の c。a の方が長い）へ。ピッチ・id は a、伸縮比だけ変わる
+    m = out[0]
+    assert (m.start_sec, m.end_sec) == (1.0, 1.103) and m.cents == 200.0
+    assert m.edit_ids == ["a", "b"]
+    assert m.ratio == pytest.approx((0.1 + 0.009) / 0.103)
+    assert out[1] is c
+    # 出力の長さの合計は変わらない
+    tot = lambda segs: sum((s.end_sec - s.start_sec) * s.ratio for s in segs)
+    assert tot(out) == pytest.approx(tot([a, b, c]))
+    # 渡した区間は書き換えない
+    assert (b.start_sec, b.ratio, a.end_sec) == (1.1, 3.0, 1.1)
+
+
+def test_bundle_shifts_curve_when_tiny_precedes():
+    tiny = Segment(1.0, 1.002, ratio=2.0)
+    big = Segment(1.002, 1.2, ratio=1.0, curve_points=[[0.0, 0.0], [0.1, 100.0]])
+    (m,) = bundle_short_segments([tiny, big], 0.0, 5.0, 0.02)
+    assert m.start_sec == 1.0 and m.end_sec == 1.2
+    assert [t for t, _ in m.curve_points] == [pytest.approx(0.002), pytest.approx(0.102)]
+    assert big.curve_points == [[0.0, 0.0], [0.1, 100.0]]
+
+
+def test_bundle_keeps_barriers_and_borrows_from_gaps():
+    mute = Segment(1.0, 1.1, gain=0.0)
+    tiny = Segment(1.1, 1.102, ratio=2.0)                       # 出力 4 ms。左は無音にした区間に接している
+    sil = Segment(1.5, 1.5, silence_sec=0.05)
+    out = bundle_short_segments([mute, tiny, sil], 0.0, 5.0, 0.02)
+    assert out[0] is mute and out[2] is sil                     # 境目は束ねない
+    g = out[1]
+    assert g.start_sec == pytest.approx(1.1)                    # 左は接しているので借りない
+    assert g.end_sec > 1.102                                    # 右の隙間から借りる
+    assert (g.end_sec - g.start_sec) * g.ratio == pytest.approx(0.02)
+    # 出力の長さの合計は変わらない（借りたぶんは等倍で足す）
+    assert (g.end_sec - g.start_sec) * g.ratio - 0.004 == pytest.approx(g.end_sec - 1.102)
+
+
+@pytest.mark.parametrize("gap", [300, 200, 100])
+def test_join_crossfades_do_not_overlap_in_short_chunk(gap):
+    """短い chunk（20 ms 未満の隙間）の頭と尻のクロスフェードは重ならない（重なると後から書く方が段差で上書きする）。"""
+    x = np.sin(2 * np.pi * 200 * np.arange(SR) / SR)
+    r = Renderer(x, SR, np.full(101, 200.0), np.ones(101, dtype=bool), HOP, backend="psola")
+
+    def ch(a, n, edited):
+        # 再合成した音のつもりで符号を逆にする（原音とは相関 −1。混ぜ具合の違いが段差に出る）
+        c = {"kind": "edited" if edited else "gap", "src": (a / SR, (a + n) / SR),
+             "audio": (-x[a:a + n] if edited else x[a:a + n]).copy()}
+        if edited:
+            c["pre"], c["post"] = -x[a - HX:a], -x[a + n:a + n + HX]
+        return c
+
+    chunks = [ch(1010, 2000, True), ch(3010, gap, False), ch(3010 + gap, 2000, True)]
+    used = []
+    y = r._join(chunks, HX, 2 * HX, used=used)
+    assert len(y) == 4000 + gap and len(used) == 2
+    # 200 Hz・振幅 1 の正弦波の最大の傾きは 0.052。重なって上書きすると 0.27〜0.5 の段差が出た
+    assert np.abs(np.diff(y)).max() < 0.06
