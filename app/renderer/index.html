@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob:; connect-src 'self'">
 <link rel="icon" href="data:,">
 <title>Gliss</title>
 <style>
@@ -39,6 +39,42 @@ body{display:flex;flex-direction:column}
 .busy-line[hidden],.busy-scrim[hidden],.busy-pop[hidden],.busy-clip[hidden]{display:none}
 .busy-line span,.busy-clip span{display:block;height:100%;background:#d6d6d6;transition:width .18s linear}
 .busy-line.unknown span,.busy-clip.unknown span,.busy-pop .rail.unknown span{animation:busy-slide 1.5s ease-in-out infinite}
+/* プラグイン（ARA）のモード（ara-bridge.js / ara.js が html に data-mode="ara" を付ける）。Electron では何も変わらない。
+   単体アプリのもの（ロゴ・更新の知らせ・初回の画面）と、DAW が決めるもの（ミュート／ソロ）は隠す。再生ボタンは DAW の再生の制御へ
+   （ホストが制御を持たなければ data-transport="none" で隠す）。解析中も DAW の操作を止めないので、止める処理の覆いは
+   暗くせず、ポップアップも出さない（札とヘッダー下の線で知らせる。入力は透明の覆いが止める） */
+html[data-mode=ara] .titlebar .logo,html[data-mode=ara] #updNote,html[data-mode=ara] #firstRun,
+html[data-mode=ara] #heads button[data-act=m],html[data-mode=ara] #heads button[data-act=s]{display:none}
+html[data-mode=ara][data-transport=none] #bPlay{display:none}
+html[data-mode=ara] .titlebar{-webkit-app-region:no-drag;app-region:no-drag}
+html[data-mode=ara] .busy-scrim::before,html[data-mode=ara] #busyCenter{display:none}
+#araChip{display:none}
+html[data-mode=ara] #araChip{display:flex;align-items:center;margin-left:auto;min-width:0}
+html[data-mode=ara] .tb .clock{margin-left:14px}
+/* 状態の札（モック 03）: 色だけでなく形（輪・チェック・切れた線・三角）と文字で区別する */
+.chip{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 8px 0 6px;border-radius:3px;font-size:11.5px;white-space:nowrap;border:1px solid transparent;color:var(--fg);max-width:100%;overflow:hidden}
+.chip svg{width:14px;height:14px;flex:none}
+.chip .pc{font-variant-numeric:tabular-nums}
+.chip .d{color:var(--fg2);overflow:hidden;text-overflow:ellipsis}
+.chip.an{background:#202024;border-color:#34343a}
+.chip.ok{background:#1d2a1f;border-color:#3b5a3f;color:#9fd49f}
+.chip.off{background:#2a2016;border:1px dashed var(--orig);color:#f0b27a}
+.chip.off .d{color:#c99a6e}
+.chip.err{background:#2c1a19;border-color:#c0574c;color:#f39b90}
+.chip button{font:inherit;font-size:11px;border:0;background:#2f2f34;color:var(--fg);border-radius:2px;padding:0 7px;height:17px;cursor:pointer;margin-left:2px}
+.chip button:hover{background:#3a3a40}
+/* エラーと未接続のときだけ、ピアノロールの中央に小さな箱 */
+#araBox{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;z-index:6}
+#araBox[hidden]{display:none}
+#araBox .bx{pointer-events:auto;background:#232326;box-shadow:0 8px 28px #0009;border-radius:4px;padding:12px 14px;max-width:330px;font-size:12px;line-height:1.6;color:var(--fg)}
+#araBox .t{font-weight:600;display:flex;align-items:center;gap:6px}
+#araBox .t svg{width:14px;height:14px}
+#araBox .t.off{color:#f0b27a}
+#araBox .t.err{color:#f39b90}
+#araBox .m{color:var(--fg2);font-size:11.5px;margin:4px 0 8px}
+#araBox .a{display:flex;gap:8px;justify-content:flex-end}
+#araBox .a button{font:inherit;font-size:11.5px;border:0;border-radius:3px;padding:2px 10px;background:#2f2f34;color:var(--fg);cursor:pointer}
+#araBox .a button.pri{background:var(--take);color:#151517;font-weight:600}
 @keyframes busy-slide{from{transform:translateX(-110%)}to{transform:translateX(340%)}}
 .mock.is-busy{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='32' height='32'><path d='M2 2L2 22L8 17L12 26L15 24L11 16L18 16Z' fill='%23f2f2f2' stroke='%23111' stroke-width='1.5'/><path d='M20 5H28M20 25H28M21 7C21 13 27 13 27 16C27 19 21 19 21 23M27 7C27 13 21 13 21 16C21 19 27 19 27 23' fill='none' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 2 2,progress}
 .busy-clip{position:absolute;height:2px;z-index:5;pointer-events:none;overflow:hidden}
@@ -317,6 +353,7 @@ body{display:flex;flex-direction:column}
     <button id="bSnapT" aria-label="時間スナップ（N）" title="時間スナップ（N）。ドラッグ中 Shift で解除" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14"/><path d="M7 12h12"/></svg></button>
     <button id="bSnapP" aria-label="音程スナップ（Shift+N）" title="音程スナップ: 平均の音程を半音に（Shift+N）。ドラッグ中 Shift で解除" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h5M3 12h5M3 18h5"/><rect x="11" y="10" width="10" height="4" rx="2"/></svg></button>
     <select id="gridDiv" class="div" aria-label="グリッドの細かさ" title="グリッドの細かさ（スナップの刻み）"></select>
+    <span id="araChip" role="status" aria-live="polite"></span>
     <span class="clock" id="clock">0:00.000</span>
     <span class="tempo" id="tempo"><span class="src" id="tSrc" hidden>iXML</span><span class="v none" id="tBpm">—</span><span class="u">BPM</span><span class="v none" id="tSig">4/4</span><input id="tIn" hidden aria-label="テンポ・拍子の入力"></span>
   </div>
@@ -403,6 +440,7 @@ body{display:flex;flex-direction:column}
     <div class="ad-body" id="addonsBody"></div>
     <div class="ad-foot">追加の機能は %LOCALAPPDATA%\Gliss\addons に入ります。入れるとすぐに使えます（AI クライアントから使っているエンジンは、つなぎ直すと使えます）。</div>
   </div>
+  <div id="araBox" hidden></div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 </div>
 <div id="busyScrim" class="busy-scrim" hidden>

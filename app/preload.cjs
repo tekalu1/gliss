@@ -2,6 +2,33 @@
 // renderer からエンジンの内部関数は呼べない（画面も AI も同じ MCP ツールを通す）。
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
+// 試験の口（GLISS_TEST_ARA=1 のときだけ）: Electron の画面を「プラグインのモード」（window.api.mode === 'ara'。tests/ara-mode.spec.js）で起動する。
+// 本物の DAW・C++ の代わりに、DAW の再生の制御（transport・preview・setCompare）の呼び出しを記録し、C++ のイベント（playhead・selection・
+// cache・engine・session-changed・project-changed）を __araEmit で差し込む。本番のプラグインでは ara-bridge.js が同じ形の window.api を作る。
+const TEST_ARA = process.env.GLISS_TEST_ARA === '1';
+const araCalls = [];
+const araHost = { selection: null, playhead: null, tracks: [], engine: { state: 'ready' } };
+const araListeners = { playhead: [], selection: [], cache: [], engine: [], 'session-changed': [], 'project-changed': [] };
+const araOn = (name) => (fn) => { araListeners[name].push(fn); };
+const araTest = TEST_ARA ? {
+  mode: 'ara',
+  transport: async (op, arg) => { araCalls.push({ kind: 'transport', op, arg: arg ?? null }); return { ok: true }; },
+  preview: async (op, arg) => { araCalls.push({ kind: 'preview', op, arg: arg ?? null }); return { ok: true }; },
+  setCompare: async (on) => { araCalls.push({ kind: 'setCompare', on: !!on }); return true; },
+  hostState: async () => JSON.parse(JSON.stringify(araHost)),
+  restartEngine: async () => { araCalls.push({ kind: 'restartEngine' }); return { ok: true }; },
+  onPlayhead: araOn('playhead'),
+  onSelection: araOn('selection'),
+  onCacheState: araOn('cache'),
+  onEngineState: araOn('engine'),
+  /** C++ のイベントを差し込む（session-changed・project-changed も）。 */
+  __araEmit: (name, data) => { for (const fn of araListeners[name] || []) fn(data); },
+  __araCalls: () => araCalls.map((c) => ({ ...c })),
+  __araClear: () => { araCalls.length = 0; },
+  /** hostState() が返す値を変える（regions・cache・engine・selection）。 */
+  __araSetHost: (patch) => { Object.assign(araHost, patch); },
+} : {};
+
 contextBridge.exposeInMainWorld('api', {
   /** 音を出さない起動（テスト。`--mute` か VOCAL_EDITOR_MUTE=1。main が環境変数に入れる）。
    * renderer は出力の音量を 0 にする（Chromium の --mute-audio・setAudioMuted と三重。issue #27）。 */
@@ -102,10 +129,14 @@ contextBridge.exposeInMainWorld('api', {
   /** 外部（Claude Code）が project.json を書き換えたときに呼ばれる。 */
   onProjectChanged: (fn) => {
     ipcRenderer.on('project-changed', (_e, info) => fn(info));
+    araListeners['project-changed'].push(fn);
   },
 
   /** 外部（Claude Code）が session.json（トラック）を書き換えたときに呼ばれる。 */
   onSessionChanged: (fn) => {
     ipcRenderer.on('session-changed', (_e, info) => fn(info));
+    araListeners['session-changed'].push(fn);
   },
+
+  ...araTest,
 });

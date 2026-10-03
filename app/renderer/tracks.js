@@ -21,6 +21,9 @@
 //    右クリックのメニュー（menus.js。issue #17）から 名前を変える（F2）・ガイド・元の位置に戻す・伴奏／ボーカル・外す。
 //  - **見出しを上下にドラッグ → トラックの並び順**（DAW と同じ。issue #38）。ドラッグ中から行が入れ替わって見え、
 //    離したら `set_track(index)`（取り消しの履歴に入る）。当たるまで見かけの並び（pendingOrder）を残す。
+//  - **プラグイン（ARA。ara.js）**: 位置・名前・種類・外すは DAW が決める（クリップの下半分のドラッグ・メニューは無し）。トラック
+//    1 行 = AudioModification。ソースの波形は薄く全体に出し、鳴る範囲（DAW のリージョン）だけ枠と普通の明るさで描く。
+//    ルーラーのクリック・ドラッグは DAW の再生位置・ループ（ホストの再生の制御）へも送る。
 //  - **表示範囲はエディターと別**（issue #39）: 横ズーム（既定 Ctrl+Shift+ホイール）・横スクロール（Shift+ホイール）で
 //    上だけ動く。既定（ズームしていない間）は全体表示で、曲の長さに合わせて広がる。表示 > ズームを戻すで全体表示に。
 import { $, analyzeTake, call, onAbandon, status } from './engine.js';
@@ -36,6 +39,7 @@ import { dropBuffers, play, stop } from './audio.js';
 import { closeMenu, openClipMenu, openRulerMenu, openTrackMenu } from './menus.js';
 import { wheelAction } from './commands.js';
 import { G, currentDiv, snapStep, snapTime, tempo, ticks, timeSnapOn } from './grid.js';
+import { ARA, araCacheOf, araExtent, araLoop, araLoopHold, araRegions, araSeek, araSig, araToRep } from './ara.js';
 
 // トラックの高さ（全トラック共通）。縦ズーム（既定 Ctrl+ホイール。issue #27）で 28〜96 px（v3 §9）
 export const TRACK_H = { MIN: 28, MAX: 96, DEF: 44 };
@@ -151,11 +155,11 @@ async function ensureOverviews() {
 }
 
 /** 1 行ぶんの波形の path（行の左上 = クリップの頭が原点）。 */
-function wavePaths(t) {
+function wavePaths(t, shift = 0) {
   const ov = overviews.get(t.id);
   if (!ov) return [];
   const k = pps();
-  const x0 = tvX(offsetOf(t));
+  const x0 = tvX(offsetOf(t) + shift);
   const start = Math.max(0, Math.floor(-x0));
   const end = Math.min(Math.ceil((t.duration_sec || 0) * k), Math.ceil(laneW - x0));
   if (end < start) return [];
@@ -299,7 +303,7 @@ export function renderTracks() {
   // 上の目盛り: タイムライン（ドラッグ中の見かけの位置を含む）＋後ろに 4% の余白（DAW の曲の終わりの後の空き）。
   // 同じトラックの並びの間は広がるだけ（自動では縮めない）。ドラッグ中も同じ規則で決めるので、
   // 離した後に目盛りが伸び縮みしない（ドラッグ中の見た目 = 離した後）。トラックを足す・外すと付け直す
-  const tl = timelineRange();
+  const tl = ARA ? araExtent(timelineRange()) : timelineRange();   // プラグインは複製したリージョンの位置まで含める
   const want = [tl[0], tl[1] + (tl[1] - tl[0]) * 0.04];
   const dir = S.session?.dir || null;
   if (dir !== tvDir) { tvDir = dir; tvView = null; }      // 別のプロジェクト: 全体表示から
@@ -321,7 +325,8 @@ export function renderTracks() {
   const sig = JSON.stringify([laneW, TH, range, vr, S.loop, S.session?.current, S.session?.guide,
     rows().map((t) => [t.id, offsetOf(t), t.kind, t.mute, t.solo, t.duration_sec]),
     overviews.size, dr && [dr.type, dr.row, dr.a, dr.b, dr.moved, dr.off],
-    tempo(), G.fmt, currentDiv()]);
+    tempo(), G.fmt, currentDiv(), araSig()]);
+  if (ARA) paintPrep();
   if (sig !== lastSig) {
     lastSig = sig;
     drawLanes(vr);
@@ -346,11 +351,34 @@ function drawLanes(vr) {
       + `<line x1="0" y1="${y + 0.5}" x2="${laneW}" y2="${y + 0.5}" stroke="#232326"/>`;
     const off = offsetOf(t);
     const x0 = tvX(off); const x1 = tvX(off + (t.duration_sec || 0));
-    s += `<rect data-clip="${esc(t.id)}" x="${f1(x0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, x1 - x0))}" height="${clipH()}" rx="2" fill="${cur ? '#202024' : '#1b1b1e'}"/>`;
     // 色相 = トラックの種類（issue #37。モック v4）: 編集中 = 黄、ガイド = エディターと同じ濃いグレー、
     // ほかのボーカル = 暗い黄、伴奏 = 背景に近い薄いグレー。聞こえないトラックは薄く
     const col = cur ? TAKE : isG ? GUIDE : t.kind === 'vocal' ? VOCAL : INST;
     const op = (cur ? 0.75 : 1) * (audible(t) ? 1 : 0.35);
+    const rs = ARA ? araRegions(t) : null;
+    if (rs && rs.length) {
+      // プラグイン: ソースの波形は薄く全体に、鳴る範囲（DAW のリージョン）だけ枠と普通の明るさで
+      s += `<rect x="${f1(x0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, x1 - x0))}" height="${clipH()}" rx="2" fill="#151518"/>`;
+      for (const d of wavePaths(t)) {
+        s += `<path d="${d}" fill="${col}" opacity="${(op * 0.25).toFixed(3)}" transform="translate(${f1(x0)},${y})" pointer-events="none"/>`;
+      }
+      rs.forEach((r, ri) => {
+        const rx0 = tvX(r.song_start); const rx1 = tvX(r.song_end);
+        const rw = f1(Math.max(1, rx1 - rx0));
+        const cid = `rc-${i}-${ri}`;
+        const shift = (r.song_start - r.mod_start) - off;          // 代表の位置からのずれ（複製・移動したリージョン）
+        s += `<clipPath id="${cid}"><rect x="${f1(rx0)}" y="${y}" width="${rw}" height="${TH}"/></clipPath>`
+          + `<rect data-clip="${esc(t.id)}" data-region="${esc(r.id)}" x="${f1(rx0)}" y="${y + CLIP_T}" width="${rw}" height="${clipH()}" rx="2" fill="${cur ? '#202024' : '#1b1b1e'}" stroke="${cur ? '#56565c' : '#2e2e33'}"/>`;
+        // clip-path は要素の transform の後の座標で効くので、g に掛けて（ずらさない座標で）切る
+        s += `<g clip-path="url(#${cid})" pointer-events="none">`;
+        for (const d of wavePaths(t, shift)) {
+          s += `<path d="${d}" fill="${col}" opacity="${op.toFixed(3)}" transform="translate(${f1(tvX(off + shift))},${y})"/>`;
+        }
+        s += '</g>';
+      });
+      return;
+    }
+    s += `<rect data-clip="${esc(t.id)}" x="${f1(x0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, x1 - x0))}" height="${clipH()}" rx="2" fill="${cur ? '#202024' : '#1b1b1e'}"/>`;
     for (const d of wavePaths(t)) {
       s += `<path d="${d}" fill="${col}" opacity="${op.toFixed(3)}" transform="translate(${f1(x0)},${y})" pointer-events="none"/>`;
     }
@@ -571,11 +599,33 @@ function prepMark(p) {
   return ['failed', `準備に失敗した: ${err || '理由は不明'}。選ぶともう一度解析する`, BANG];
 }
 
+/** プラグイン: DAW の音の読み込み・編集の反映・照合の失敗の印（ara.js のキャッシュの状態）。無ければ null。 */
+function araMark(id) {
+  const c = araCacheOf(id);
+  if (!c) return null;
+  const ring = (v) => '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4" class="bg"/>'
+    + `<circle cx="6" cy="6" r="4" class="fg" stroke-dasharray="${(Math.max(0.04, Math.min(1, v)) * RING).toFixed(2)} ${RING.toFixed(2)}" transform="rotate(-90 6 6)"/></svg>`;
+  if (c.state === 'reading') {
+    const v = Number.isFinite(c.progress) ? c.progress : 0;
+    return ['preparing', `DAW の音を読み込んでいる ${Math.round(v * 100)}%`, ring(v)];
+  }
+  if (c.state === 'syncing') return ['preparing', '編集を DAW の再生に反映している', ring(0.5)];
+  if (c.state === 'waiting') {
+    return ['queued', '解析の順番待ち（その間は原音が鳴る）', '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4" class="dot"/></svg>'];
+  }
+  if (c.state === 'mismatch') return ['failed', 'DAW の音が変わったので、編集を当てていない（元の音に戻すと当たる）', BANG];
+  if (c.state === 'failed') return ['failed', `準備に失敗した${c.error ? `: ${c.error}` : ''}`, BANG];
+  return null;
+}
+
+/** プラグイン（ara.js）の札が使う: トラックの裏の準備の今の状態。 */
+export const prepOf = (id) => prep.get(id) || null;
+
 /** 見出しの印を今の状態に合わせる（見出しは作り直さずに中身だけ。ツールチップを出している間に消さない）。 */
 function paintPrep(force = false) {
   if (!heads) return;
   for (const el of heads.querySelectorAll('.pp')) {
-    const m = prepMark(prep.get(el.dataset.pp));
+    const m = (ARA && araMark(el.dataset.pp)) || prepMark(prep.get(el.dataset.pp));
     if (!m) {
       if (!force && !el.dataset.state) continue;
       delete el.dataset.state;
@@ -710,6 +760,7 @@ function redrawAwaited(aw) {
 /** トラックの位置を確定する（離したとき・Ctrl+Z / Ctrl+Y）。確定するまで見かけの位置（S.trackOff）を残す
  * （ドラッグ中の見た目 = 離した後。エンジンの値が返ってから見かけを外す）。 */
 export function commitOffset(id, from, to) {
+  if (ARA) return Promise.resolve(false);          // プラグイン: 位置は DAW が決める
   S.trackOff.set(id, to);
   if (id === S.session?.current) S.off = to;
   renderTracks();
@@ -994,9 +1045,11 @@ function laneHit(e) {
   let inClip = false; let move = false;
   if (t) {
     const off = offsetOf(t);
-    inClip = tl >= off && tl <= off + (t.duration_sec || 0);
+    const rs = ARA ? araRegions(t) : null;
+    inClip = rs && rs.length ? rs.some((r) => tl >= r.song_start && tl <= r.song_end)    // プラグイン: どのリージョンの枠でも同じトラック
+      : tl >= off && tl <= off + (t.duration_sec || 0);
     const yy = y - row * TH;
-    move = inClip && yy >= CLIP_T + clipH() / 2 && yy <= CLIP_T + clipH();   // 下半分 = 位置
+    move = !ARA && inClip && yy >= CLIP_T + clipH() / 2 && yy <= CLIP_T + clipH();   // 下半分 = 位置（プラグインは DAW が決める）
   }
   return { x, y, row, t, tl, inClip, move };
 }
@@ -1068,13 +1121,16 @@ function endMove() {
 /** クリップ・レーンのクリック（上半分でも下半分でも）。 */
 function clickAt(t, tl) {
   const off = offsetOf(t);
-  const inClip = tl >= off && tl <= off + (t.duration_sec || 0);
+  const rs = ARA ? araRegions(t) : null;
+  const inClip = rs && rs.length ? rs.some((r) => tl >= r.song_start && tl <= r.song_end)
+    : tl >= off && tl <= off + (t.duration_sec || 0);
   if (t.kind === 'vocal' && inClip) {
-    selectTrack(t.id, { view: soundRegion(t, tl) });
+    selectTrack(t.id, { view: soundRegion(t, ARA ? araToRep(t, tl) : tl) });
     return;
   }
-  // 伴奏・クリップの外: 再生位置が動くだけ
+  // 伴奏・クリップの外: 再生位置が動くだけ（プラグインは DAW の再生位置も動かす）
   S.head = tl;
+  if (ARA) araSeek({ song_sec: tl });
   if (S.playing) stop();
   render();
 }
@@ -1158,6 +1214,7 @@ function onRulerDown(e) {
     if (moved) {
       const t1 = toT(ev);
       S.loop = [Math.min(t0, t1), Math.max(t0, t1)];
+      if (ARA) araLoopHold();
       render();
     }
   };
@@ -1172,9 +1229,12 @@ function onRulerDown(e) {
   const up = () => {
     off();
     if (!moved) {
-      S.loop = null;
+      if (!ARA) S.loop = null;                     // プラグインのループは DAW のもの（クリックでは解除しない。解除はルーラーのメニュー）
       S.head = t0;
+      if (ARA) araSeek({ song_sec: t0 });
       if (S.playing) stop();
+    } else if (ARA && S.loop) {
+      araLoop({ a: S.loop[0], b: S.loop[1] });      // ソングの秒（トラックビューの時間軸）
     }
     render();
   };
@@ -1325,7 +1385,7 @@ function onLanesContext(e) {
   if (dr) return;
   const h = laneHit(e);
   if (!h.t) return;
-  if (h.inClip) openClipMenu(e, h.t, h.tl); else openTrackMenu(e, h.t);
+  if (h.inClip) openClipMenu(e, h.t, ARA ? araToRep(h.t, h.tl) : h.tl); else openTrackMenu(e, h.t);
 }
 
 // ---------------------------------------------------------------- トラックの高さ（v3 §9）

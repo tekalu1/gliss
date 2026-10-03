@@ -11,7 +11,7 @@ import {
   toEdited, utterances,
 } from './state.js';
 import {
-  attach, corrText, edStep, edgeInfo, fadeInfo, focusRange, hasConnFocus, nearPair, render, renderToolbar,
+  attach, corrText, edStep, edgeInfo, fadeInfo, focusRange, follow, hasConnFocus, movePlayhead, nearPair, render, renderToolbar,
 } from './draw.js';
 import {
   G as GRID, barsMode, loadGrid, snapTime, tempo as curTempo, ticks,
@@ -42,10 +42,11 @@ import { f0State, onF0Change, refreshF0 } from './f0.js';
 import { addonsOpen, addonsState, closeAddons, installAddons, openAddons } from './addons.js';
 import { adoptDoc, adoptSession, guideSuffix, loadSession, onDoc, phonemeSuffix, setTrack } from './session.js';
 import {
-  addTrackFile, installTracks, isDragging, removeTrack, renameTrack, renderTracks, selectTrack, setGuide,
+  addTrackFile, installTracks, isDragging, prepOf, removeTrack, renameTrack, renderTracks, selectTrack, setGuide,
   setKind, setTrackHeight, setViewTimeline, soundRegion, TRACK_H, trackHeight, tracksState, tvT, tvX,
   commitOrder, panTracks, setTracksView, tracksView, zoomTracks,
 } from './tracks.js';
+import { ARA, araAfterSession, araBoot, araFeatures } from './ara.js';
 
 const root = $('#mock');
 const svg = $('#roll');
@@ -337,7 +338,13 @@ export function zoomReset() {
  * ファイルの操作はここで、それ以外はコマンドの表（commands.js）で実行する。 */
 const FILE_CMDS = new Set(['new-project', 'open-take', 'save', 'save-as', 'open-guide', 'add-track', 'open-recent',
   'load-lyrics', 'import-lyrics', 'export', 'export-as']);
+// プラグイン（ARA）では、プロジェクトの開く・保存・書き出し・トラックの追加は DAW が持つ
+const ARA_BLOCKED = new Set(['new-project', 'open-take', 'open-recent', 'save', 'save-as', 'add-track', 'export', 'export-as']);
 async function onMenu({ cmd, arg }) {
+  if (ARA && (ARA_BLOCKED.has(cmd) || (cmd === 'open-guide' && !araFeatures().fileGuide))) {
+    status('DAW のプラグインでは使えない操作（イベントの追加・保存・書き出しは DAW で）');
+    return false;
+  }
   // 止める処理（開く・書き出し・準備の待ち）の間は受けない（覆いの外から来る。ポップアップを揺らして伝える）
   if (refuseWhileBlocking()) return false;
   const reservesOpen = ['new-project', 'open-take', 'open-recent', 'add-track', 'open-guide'].includes(cmd);
@@ -472,7 +479,7 @@ async function reloadSessionExternal() {
           S.opening -= 1;
         }
       }
-      status('外部の変更（トラック）を読み込んだ');
+      if (!ARA) status('外部の変更（トラック）を読み込んだ');
     } catch (err) {
       if (!await handleEngineError(err)) status(`トラックの再読込に失敗: ${err.message}`);
     } finally {
@@ -603,19 +610,57 @@ function installDrop(el) {
   });
 }
 
+/** DAW が位置・ガイドを動かした・やり直す: 編集対象を解析し直して描き直す（解析のキャッシュがあれば一瞬）。
+ * 開く操作（open_project）は DAW が持つので、プラグインのモードで要るのはこれと selectTrack だけ。 */
+function reopenCurrent() {
+  return enqueue(async () => {
+    S.busy = true;
+    try {
+      const hold = laterBusy({ label: 'トラックを読み直している', target: S.take?.name || '' });
+      try {
+        await analyzeTake({ hold, onProgress: (sec) => status(`解析している… ${sec} 秒`) });
+        await refresh({ keepView: true });
+      } finally {
+        hold.finish();
+      }
+    } catch (err) {
+      if (!await handleEngineError(err)) status(`読み直せなかった: ${err.message}`);
+    } finally {
+      S.busy = false;
+      render();
+      renderTracks();
+      wake();
+    }
+  });
+}
+
+/** プラグインのモード（ara.js）に渡す画面の部品。 */
+function araHost() {
+  return {
+    status, render, renderTracks, renderToolbar, follow, movePlayhead, waitFor, idle, isDragging,
+    selectTrack, loadSession, busyState, prepOf, syncMenu: syncAppMenu, reopen: reopenCurrent,
+    clearEmpty: () => { clearProject(); render(); renderTracks(); renderToolbar(); },
+  };
+}
+
 async function boot() {
   attach(svg);
-  installDrop(root);
-  installFirstRun({ onOpen: () => onMenu({ cmd: 'open-take' }), onAi: (cmd) => onMenu({ cmd }) });
+  // ドロップ・初回の画面・自動更新・アドオン・AI とつなぐは単体アプリのもの（プラグインでは要らない）
+  if (!ARA) {
+    installDrop(root);
+    installFirstRun({ onOpen: () => onMenu({ cmd: 'open-take' }), onAi: (cmd) => onMenu({ cmd }) });
+  }
   setHost({ menu: onMenu, saveView, openKeys, zoomReset, openAi, openUpdates, openAddons });
   installMenus(root);
   installKeysDialog(root);
-  installAiDialog(root);
-  // 自動更新（ヘルプ > 更新を確認…）。再起動して更新の前に「保存しますか」を通す
-  installUpdates(root, { confirmDiscard });
-  // 任意機能のアドオン（初回画面の行・ヘルプ > モデルと追加の機能…）
-  installAddons(root);
-  const dialogOpen = () => keysOpen() || aiOpen() || updatesOpen() || addonsOpen();
+  if (!ARA) {
+    installAiDialog(root);
+    // 自動更新（ヘルプ > 更新を確認…）。再起動して更新の前に「保存しますか」を通す
+    installUpdates(root, { confirmDiscard });
+    // 任意機能のアドオン（初回画面の行・ヘルプ > モデルと追加の機能…）
+    installAddons(root);
+  }
+  const dialogOpen = () => keysOpen() || (!ARA && (aiOpen() || updatesOpen() || addonsOpen()));
   installKeys({ dialogOpen });
   installAsr({ dialogOpen });   // 聞き取りの候補の Enter / Esc（issue #54）
   // ダイアログを開いている間は Alt でメニューバーへ移らない
@@ -626,10 +671,13 @@ async function boot() {
   new ResizeObserver(() => render()).observe(svg);
   window.api.onMenu(onMenu);
   window.api.onProjectChanged(reloadExternal);
-  window.api.onSessionChanged(reloadSessionExternal);
+  window.api.onSessionChanged(async (info) => {
+    await reloadSessionExternal(info);
+    if (ARA) await araAfterSession();       // 開いていなければ開く・DAW が位置を動かしたら開き直す・リージョンの枠を引き直す
+  });
   // プロジェクトのファイル（issue #33）: ツールの返り値の document を取り込む・閉じる前の「保存しますか」
   onDocument(adoptDoc);
-  onDoc(() => { syncAppMenu(); showFirstRun(!S.doc && !S.tracks.length); });
+  onDoc(() => { syncAppMenu(); if (!ARA) showFirstRun(!S.doc && !S.tracks.length); });
   let closing = false;           // 「保存しますか」を出している間にもう一度閉じようとしても、2 つ目は出さない
   window.api.onConfirmClose(async () => {
     if (closing) return;
@@ -644,14 +692,23 @@ async function boot() {
   });
 
   const b = await window.api.bootstrap();
-  setModelSizes(b.modelSizes);
+  if (!ARA) setModelSizes(b.modelSizes);
   loadOverrides(b.keys);          // キーボードショートカットの設定（ユーザー設定。issue #22）
   loadGrid(b.grid);               // スナップのオン・オフとグリッドの細かさ（ユーザー設定。issue #18）
-  setPreviewEnabled(b.preview !== false, { save: false });   // つかんだノートを鳴らす（ユーザー設定。issue #27）
+  // つかんだノートを鳴らす（ユーザー設定。issue #27）。プラグインは EditorRenderer が音を出せるようになるまで既定でオフ
+  setPreviewEnabled(ARA ? b.preview === true : b.preview !== false, { save: false });
   renderToolbar();                // ツールチップとメニューバーの表記を設定に合わせる
   syncAppMenu();
   savedView = (b.view && b.view.span > 0) ? b.view : null;   // 前回のズーム・スクロール位置
   if (savedView?.trackH) setTrackHeight(savedView.trackH);
+  if (ARA) {
+    // プラグイン: 開く操作は DAW が持つ。DAW の選択のトラックを選んで解析し、描く（ara.js の araBoot）
+    onF0Change(syncAppMenu);
+    if (!b.engineError) { try { await refreshF0(); } catch { /* メニューのチェックが付かないだけ */ } }
+    await araBoot(araHost(), b);
+    renderToolbar();
+    return;
+  }
   if (b.engineError) {
     status('エンジンに接続できていない。ログを確認すること。');
     renderToolbar();
