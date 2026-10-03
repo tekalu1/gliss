@@ -112,6 +112,8 @@ def test_every_tool_is_classified():
         "get_lyrics", "list_utterances", "inspect_lyrics_score", "analyze_take", "get_pitch", "list_notes",
         "list_deviations", "get_phonemes", "plan_edit", "list_connections", "render_audition", "render_view",
         "remeasure", "list_changes", "get_job", "cancel_job", "engine_info",
+            # ピッチ検出の方式を選ぶ（そのエンジンの既定。曲は変えない）
+            "set_f0_estimator",
             # 裏の準備（issue #63）: 状態を見る・一時停止（曲は変えない）
             "prep_status", "pause_prep",
         "list_tracks", "select_track", "track_overview", "render_tracks",

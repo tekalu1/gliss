@@ -66,6 +66,7 @@ import time
 
 from . import log
 from . import media as M
+from .analysis import f0 as F0
 from .analysis.align import DEFAULT_METHOD as ALIGN_METHOD
 from .phoneme import lyrics as LY
 from .project import store as _store
@@ -167,7 +168,7 @@ class Incomplete(ProjectError):
 
 # ---------------------------------------------------------------- 署名と済みの印
 def track_sig(s, t):
-    """準備の組み合わせの署名（テイクの素材・範囲・セッションのガイドの切り出し・方式）。"""
+    """準備の組み合わせの署名（テイクの素材・範囲・セッションのガイドの切り出し・方式・ピッチ検出の方式）。"""
     gd = None
     try:
         g, _why = s.guide_clip_for(t)
@@ -180,6 +181,9 @@ def track_sig(s, t):
               bool(c.pad)]
     d = [PREP_VERSION, _norm(t["path"]), t.get("sha256"), t.get("clip"), t.get("source_id"), gd,
          ALIGN_METHOD]
+    est = F0.resolve_estimator()
+    if est != "rmvpe":
+        d.append([est, F0.estimator_version(est)])   # ピッチ検出の方式（RMVPE は前と同じ署名のまま）
     return hashlib.sha1(json.dumps(d, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 

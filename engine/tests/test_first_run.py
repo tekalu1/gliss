@@ -18,6 +18,9 @@ def test_engine_info_reports_missing_and_ready_models(tmp_path):
     assert missing["models_dir"] == str(tmp_path)
     assert not missing["rmvpe_model_found"]
     assert not missing["phonemes"]["model_found"]
+    # RMVPE の重みが無くても、同梱の Gliss の F0 モデルで解析できる
+    assert missing["gliss_f0_model_found"]
+    assert missing["f0_estimator"] == "rmvpe" and missing["f0_estimator_effective"] == "gliss"
 
     (tmp_path / "rmvpe.onnx").write_bytes(b"fake")
     hubert = tmp_path / "hubertfa" / "1218_hfa_model_new_dict"
@@ -27,3 +30,4 @@ def test_engine_info_reports_missing_and_ready_models(tmp_path):
     ready = _info(tmp_path)
     assert ready["rmvpe_model_found"]
     assert ready["phonemes"]["model_found"]
+    assert ready["f0_estimator_effective"] == "rmvpe"

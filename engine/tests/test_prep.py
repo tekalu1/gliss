@@ -20,7 +20,7 @@ import pytest
 import soundfile as sf
 
 from vocal_engine.analysis.align import Alignment
-from vocal_engine.analysis.f0 import F0Result
+from vocal_engine.analysis.f0 import F0Result, estimator_version
 
 FREQ = {"take": 220, "b": 440, "c": 550, "g1": 330, "g2": 660}
 
@@ -64,7 +64,8 @@ class Fake:
         return F0Result(np.full(n, float(f)), np.ones(n), np.ones(n, dtype=bool),
                         np.full(n, -20.0), sr=sr, estimator=estimator,
                         meta={"sweep": sweep, "threshold": 0.03,
-                              "vuv_rule": "%s f0>0 AND rms > -55.0 dBFS" % estimator})
+                              "vuv_rule": "%s f0>0 AND rms > -55.0 dBFS" % estimator,
+                              "version": estimator_version(estimator)})
 
     def align(self, project, method):
         key = (int(project.take_f0.f0[0]), int(project.guide_f0.f0[0]))
