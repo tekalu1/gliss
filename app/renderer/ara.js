@@ -38,6 +38,12 @@ export const araRegions = (t) => (ARA ? A.regions.get(t.id) || null : null);
 /** トラックビュー・見出しを描き直すかの判定に足す（リージョンとキャッシュの状態）。 */
 export const araSig = () => (ARA ? JSON.stringify([[...A.regions], [...A.cache].map(([k, v]) => [k, v.state])]) : '');
 
+/** リージョンの伸縮の比（ソングの長さ ÷ 修飾の長さ。DAW がテンポに合わせて伸ばしたとき 1 でない）。 */
+export function araScale(r) {
+  const song = r.song_end - r.song_start; const mod = r.mod_end - r.mod_start;
+  return song > 0 && mod > 0 ? song / mod : 1;
+}
+
 /** ソングの秒 tl（どれかのリージョンの中）を、トラックの「代表の位置」のタイムラインに置き直す
  * （波形・soundRegion は代表の位置を基準にしている。複製したリージョンの上でクリックしても同じ編集の秒になる）。 */
 export function araToRep(t, tl) {
@@ -45,7 +51,7 @@ export function araToRep(t, tl) {
   if (!rs || !rs.length) return tl;
   const r = rs.find((x) => tl >= x.song_start && tl <= x.song_end);
   if (!r) return tl;
-  return (t.offset_sec || 0) + (tl - (r.song_start - r.mod_start));
+  return (t.offset_sec || 0) + r.mod_start + (tl - r.song_start) / araScale(r);
 }
 
 /** タイムラインの範囲 [頭, 終わり] を、リージョンの範囲まで広げる（複製したリージョンが代表の位置より後ろにあるとき）。 */

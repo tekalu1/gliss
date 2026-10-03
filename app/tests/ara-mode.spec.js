@@ -349,8 +349,9 @@ test('(A8) selection: DAW で選んだリージョンのトラックに切り替
 
 test('(A9) リージョンの枠・キャッシュの状態の印と札・エンジンが落ちた箱', async () => {
   const [a, b] = await tracks();
+  // r2 は DAW がテンポに合わせて 2 倍に伸ばしたリージョン（ソングの 4 秒に修飾の 2 秒）
   const rA = [{ id: 'r1', song_start: 0.5, song_end: 2.5, mod_start: 0.5, mod_end: 2.5 },
-    { id: 'r2', song_start: 6, song_end: 8, mod_start: 0.5, mod_end: 2.5 }];
+    { id: 'r2', song_start: 6, song_end: 10, mod_start: 0.5, mod_end: 2.5 }];
   await win.evaluate(([x, y, rs]) => window.api.__araSetHost({ tracks: [
     { track_id: x, ara_id: 'mod-a', regions: rs, cache: { state: 'ready' } },
     { track_id: y, ara_id: 'mod-b', regions: [], cache: { state: 'ready' } }] }), [a.id, b.id, rA]);
@@ -358,7 +359,13 @@ test('(A9) リージョンの枠・キャッシュの状態の印と札・エン
   // 枠: 複製したリージョンも別の枠（どれも同じトラックを選ぶ）。全体の薄い波形の上に、枠の中だけ明るく
   await expect.poll(() => win.evaluate((id) => document.querySelectorAll(`#lanes [data-clip="${id}"][data-region]`).length, a.id)).toBe(2);
   const st = await win.evaluate(() => window.__app.tracksState());
-  expect(st.range[1]).toBeGreaterThan(8);                          // 複製したリージョンまで目盛りが伸びる
+  expect(st.range[1]).toBeGreaterThan(10);                         // 複製したリージョンまで目盛りが伸びる
+  // 伸ばしたリージョンの枠は 2 倍の幅で、中の波形も横に 2 倍に伸ばして描く（伸ばしていない枠はそのまま）
+  const boxes = await win.evaluate((id) => ['r1', 'r2'].map((r) => document.querySelector(`#lanes [data-clip="${id}"][data-region="${r}"]`).getBoundingClientRect().width), a.id);
+  expect(boxes[1] / boxes[0]).toBeCloseTo(2, 1);
+  const scales = await win.evaluate(() => [...document.querySelectorAll('#lanes g[clip-path] path')].map((x) => /scale\(([\d.]+),1\)/.exec(x.getAttribute('transform'))?.[1] || '1'));
+  expect(scales).toContain('2.000000');
+  expect(scales).toContain('1');
   // 2 つ目の枠（代表の位置より後ろ）をクリック → 同じトラック。下の表示は編集の秒（0.5〜2.5 付近）
   const second = await win.locator(`#lanes [data-clip="${a.id}"][data-region="r2"]`).boundingBox();
   await clearCalls();

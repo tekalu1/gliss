@@ -47,7 +47,7 @@ import { CUT_MIN_EDGE, covered, joinAt, normCuts, paintPiece, pieces } from './c
 import { closeMenu, openClipMenu, openRulerMenu, openTrackMenu } from './menus.js';
 import { wheelAction } from './commands.js';
 import { G, currentDiv, snapStep, snapTime, tempo, ticks, timeSnapOn } from './grid.js';
-import { ARA, araCacheOf, araExtent, araLoop, araLoopHold, araRegions, araSeek, araSig, araToRep } from './ara.js';
+import { ARA, araCacheOf, araExtent, araLoop, araLoopHold, araRegions, araScale, araSeek, araSig, araToRep } from './ara.js';
 import {
   GAIN_MAX_DB, GAIN_MIN_DB, dbToPos, fmtDb, fmtPan, gainOf, knobSvg, panFromUi, panOf, panSpeech, panUi, posToDb,
 } from './mixer.js';
@@ -189,13 +189,14 @@ async function ensureOverviews() {
 }
 
 /** 1 行ぶんの波形の path（行の左上 = クリップの頭が原点）。 */
-function wavePaths(t, shift = 0) {
+function wavePaths(t, shift = 0, scale = 1) {
   const ov = overviews.get(t.id);
   if (!ov) return [];
   const k = pps();
+  // scale: 描くときに横へ掛ける倍率（プラグインで DAW が伸縮したリージョン）。見える範囲は掛ける前の座標で切る
   const x0 = tvX(offsetOf(t) + shift);
-  const start = Math.max(0, Math.floor(-x0));
-  const end = Math.min(Math.ceil((t.duration_sec || 0) * k), Math.ceil(laneW - x0));
+  const start = Math.max(0, Math.floor(-x0 / scale));
+  const end = Math.min(Math.ceil((t.duration_sec || 0) * k), Math.ceil((laneW - x0) / scale));
   if (end < start) return [];
   const key = `${t.id}|${k.toFixed(5)}|${t.kind}|${TH}|${start}|${end}`;
   if (waveCache.has(key)) return waveCache.get(key);
@@ -472,13 +473,15 @@ function drawLanes(vr) {
         const rx0 = tvX(r.song_start); const rx1 = tvX(r.song_end);
         const rw = f1(Math.max(1, rx1 - rx0));
         const cid = `rc-${i}-${ri}`;
-        const shift = (r.song_start - r.mod_start) - off;          // 代表の位置からのずれ（複製・移動したリージョン）
+        const sc = araScale(r);                                      // DAW の伸縮（テンポに合わせて伸ばしたリージョン）
+        const shift = (r.song_start - r.mod_start * sc) - off;     // 代表の位置からのずれ（複製・移動したリージョン）
         s += `<clipPath id="${cid}"><rect x="${f1(rx0)}" y="${y}" width="${rw}" height="${TH}"/></clipPath>`
           + `<rect data-clip="${esc(t.id)}" data-region="${esc(r.id)}" x="${f1(rx0)}" y="${y + CLIP_T}" width="${rw}" height="${clipH()}" rx="2" fill="${cur ? '#202024' : '#1b1b1e'}" stroke="${cur ? '#56565c' : '#2e2e33'}"/>`;
         // clip-path は要素の transform の後の座標で効くので、g に掛けて（ずらさない座標で）切る
         s += `<g clip-path="url(#${cid})" pointer-events="none">`;
-        for (const d of wavePaths(t, shift)) {
-          s += `<path d="${d}" fill="${col}" opacity="${op.toFixed(3)}" transform="translate(${f1(tvX(off + shift))},${y})"/>`;
+        for (const d of wavePaths(t, shift, sc)) {
+          const scl = Math.abs(sc - 1) > 1e-9 ? ` scale(${sc.toFixed(6)},1)` : '';
+          s += `<path d="${d}" fill="${col}" opacity="${op.toFixed(3)}" transform="translate(${f1(tvX(off + shift))},${y})${scl}"/>`;
         }
         s += '</g>';
       });
