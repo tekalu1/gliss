@@ -2,6 +2,7 @@
 // ARA SDK の TestHost の部品（TestHost・ARADocumentController・CompanionAPIs・TestCases）を使い、main だけをこのファイルに差し替える。
 //
 //   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -workB <作業場所 B> [-rate <描画 C の周波数>]
+//   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -relay <relay_client.py>   （外部の AI からの編集の通し。下の runRelay）
 //
 //   N. 合成の歌声もどき（44.1 kHz・モノラル・6.2 秒）を 1 つの AudioSource にし、リージョンを 2 つ（ソース全体をソングの 0 秒、
 //      ソースの 1.5〜4.2 秒をソングの 10 秒）置いたドキュメントを、編集なし（GLISS_TEST_EDIT を消す）で作り、ホストとして解析を頼んで
@@ -307,6 +308,119 @@ bool writeText (const std::string& path, const std::string& text)
     out << text << "\n";
     return out.good ();
 }
+
+#if defined (_WIN32)
+std::wstring widen (const std::string& s)
+{
+    if (s.empty ())
+        return {};
+    const auto n { MultiByteToWideChar (CP_UTF8, 0, s.data (), static_cast<int> (s.size ()), nullptr, 0) };
+    std::wstring w (static_cast<size_t> (n), L'\0');
+    MultiByteToWideChar (CP_UTF8, 0, s.data (), static_cast<int> (s.size ()), w.data (), n);
+    return w;
+}
+
+/** 外部の AI の代わり（relay_client.py）を起動し、終わるまで待つ（その間もホストのメインスレッドの仕事を回す）。終了コードを返す。 */
+int runExternalClient (PlugInEntry* plugInEntry, const std::string& script, const std::string& outDir, int timeoutMs)
+{
+    const auto* python { std::getenv ("GLISS_ENGINE_PYTHON") };
+    const auto* cwd { std::getenv ("GLISS_ENGINE_CWD") };
+    if (python == nullptr || cwd == nullptr)
+    {
+        ARA_LOG ("relay: GLISS_ENGINE_PYTHON and GLISS_ENGINE_CWD are required");
+        return -1;
+    }
+
+    auto commandLine { L"\"" + widen (python) + L"\" \"" + widen (script) + L"\" \"" + widen (outDir) + L"\"" };
+    const auto workDir { widen (cwd) };
+    STARTUPINFOW si {};
+    si.cb = sizeof (si);
+    PROCESS_INFORMATION pi {};
+    if (! CreateProcessW (nullptr, commandLine.data (), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, workDir.c_str (), &si, &pi))
+    {
+        ARA_LOG ("relay: could not start the external client (%lu)", GetLastError ());
+        return -1;
+    }
+
+    CloseHandle (pi.hThread);
+    DWORD code { STILL_ACTIVE };
+    for (int waited { 0 }; waited < timeoutMs; waited += 50)
+    {
+        if (WaitForSingleObject (pi.hProcess, 0) == WAIT_OBJECT_0)
+            break;
+        plugInEntry->idleThreadForDuration (50);
+    }
+
+    if (WaitForSingleObject (pi.hProcess, 0) != WAIT_OBJECT_0)
+    {
+        ARA_LOG ("relay: the external client did not finish in %i ms", timeoutMs);
+        TerminateProcess (pi.hProcess, 1);
+        WaitForSingleObject (pi.hProcess, 5000);
+    }
+
+    GetExitCodeProcess (pi.hProcess, &code);
+    CloseHandle (pi.hProcess);
+    return static_cast<int> (code);
+}
+#endif
+
+/** -relay: 外部の AI（別のプロセスの vocal_engine.mcp）から、開いているドキュメントの修飾を編集する通し。
+    R0. ドキュメントを作って編集なしで描画 → render-r0.f32（原音のはず）
+    外部のクライアント（relay_client.py）が ara_documents → ara_attach → analyze_take → shift_pitch（+100 セント）→ relay-client.json
+    R1. プラグインが 1 秒ごとの ara_revs で拾うのを、ノートが adjusted になるまで待って描画 → render-r1.f32
+    保存 → archive-r.json（外部の編集が DAW のソングに入るか）。比べるのは plugin/tests/verify_ara_relay.py。 */
+int runRelay (PlugInEntry* plugInEntry, const AudioFileList& files, const VoiceAudioFile& voice,
+              const ARA::ARAFactory* factory, const std::string& script, const std::string& outDir)
+{
+#if defined (_WIN32)
+    setEnv ("GLISS_TEST_EDIT", nullptr);
+    MemoryArchive archive { factory->documentArchiveID };
+    std::vector<float> render0, render1;
+    int clientCode { -1 };
+    {
+        std::unique_ptr<TestHost> testHost;
+        auto dc { createHostAndBasicDocument (plugInEntry, testHost, "GlissARATest R", false, files) };
+        render0 = renderDocument (plugInEntry, dc, voice.getSampleRate ());
+
+        clientCode = runExternalClient (plugInEntry, script, outDir, 300000);
+        ARA_LOG ("relay: the external client exited with %i", clientCode);
+        if (clientCode != 0)
+            return 1;
+
+        // 外部の編集は ara_revs（1 秒ごと）で拾われる: 編集の後のノート（adjusted）になるまで待ってから描く
+        if (! waitForRegionNotes (plugInEntry, dc, ARA::kARAContentGradeAdjusted, 60000))
+            return 1;
+        render1 = renderDocument (plugInEntry, dc, voice.getSampleRate ());
+        writeText (outDir + "/notes-r.json", describeDocumentNotes (dc));
+
+        if (! dc->supportsPartialPersistency () || ! dc->storeObjectsToArchive (&archive))
+        {
+            ARA_LOG ("storing the archive failed");
+            return 1;
+        }
+    }
+
+    const std::string archiveData = archive;
+    {
+        std::ofstream out (outDir + "/archive-r.json", std::ios::binary);
+        out << archiveData;
+    }
+    writeFloats (outDir + "/render-r0.f32", render0);
+    writeFloats (outDir + "/render-r1.f32", render1);
+    {
+        std::ofstream out (outDir + "/summary-r.json", std::ios::binary);
+        out << "{\"source_id\": \"" << sourceID << "\", \"modification_id\": \"" << modificationID << "\", "
+            << "\"source_rate\": " << voice.getSampleRate () << ", \"source_frames\": " << voice.getSampleCount () << ", "
+            << "\"frames_r0\": " << render0.size () << ", \"frames_r1\": " << render1.size () << "}\n";
+    }
+    plugInEntry->uninitializeARA ();
+    ARA_LOG ("relay: done");
+    return 0;
+#else
+    ARA_LOG ("-relay is only implemented on Windows");
+    return 2;
+#endif
+}
 } // namespace
 
 int main (int argc, const char* argv[])
@@ -316,12 +430,13 @@ int main (int argc, const char* argv[])
 
     const auto outDir { argument (args, "-out") };
     const auto workB { argument (args, "-workB") };
+    const auto relayScript { argument (args, "-relay") };
     const auto otherRate { std::atof (argument (args, "-rate", "48000").c_str ()) };
 
     auto plugInEntry { PlugInEntry::parsePlugInEntry (args) };
-    if (! plugInEntry || outDir.empty () || workB.empty ())
+    if (! plugInEntry || outDir.empty () || (workB.empty () && relayScript.empty ()))
     {
-        ARA_LOG ("usage: GlissARATest -vst3 <Gliss.vst3> -out <folder> -workB <work folder for document B> [-rate <Hz>]");
+        ARA_LOG ("usage: GlissARATest -vst3 <Gliss.vst3> -out <folder> (-workB <work folder for document B> [-rate <Hz>] | -relay <relay_client.py>)");
         return 2;
     }
 
@@ -337,6 +452,9 @@ int main (int argc, const char* argv[])
     auto voice { std::make_shared<VoiceAudioFile> (44100.0) };
     AudioFileList files { voice };
     writeFloats (outDir + "/source.f32", voice->samples ());
+
+    if (! relayScript.empty ())
+        return runRelay (plugInEntry.get (), files, *voice, factory, relayScript, outDir);
 
     // ---- N: 編集なしで、ホストが解析を頼んで待つ → ノート（detected）。リージョンは 2 つ（2 つ目はソースの途中を別の位置に） ----
     const std::string testEdit { std::getenv ("GLISS_TEST_EDIT") != nullptr ? std::getenv ("GLISS_TEST_EDIT") : "" };

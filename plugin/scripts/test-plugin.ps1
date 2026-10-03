@@ -17,7 +17,10 @@
 #   8. GlissARATest (plugin/tests/aratest): a test edit (GLISS_TEST_EDIT) -> render -> archive -> restore in another work
 #      folder -> render, compared with the engine's render_region by plugin/tests/verify_ara_engine.py
 #   9. GlissHostCheck --ara-editor: a real ARA document (JUCE ARA hosting), the editor bound to it, the page's engine calls
-#   10. no engine process is left behind
+#   10. GlissARATest -relay: an external AI (another vocal_engine.mcp process, plugin/tests/relay_client.py) lists the open
+#       documents, attaches to the modification and shifts it by +100 cents through the relay; the plug-in picks it up
+#       (render, notes, archive), checked by plugin/tests/verify_ara_relay.py; the relay record is removed at the end
+#   11. no engine process is left behind
 # The engine checks are skipped (reported) when no engine python is found (-EnginePython, GLISS_ENGINE_PYTHON, or the
 # .venv of the main worktree).
 # Nothing is written outside plugin\build and the temp folder (the engine's work and log folders, the plug-in state file
@@ -223,6 +226,34 @@ try {
         $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
         Report 'GlissHostCheck --ara-editor (real document and engine)' ($code -eq 0) "exit=$code $summary"
         if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+        # 10. an external AI edits the open document through the relay (engine/vocal_engine/ara_relay.py)
+        $outR = Join-Path $work 'aratest-relay'
+        $workR = Join-Path $work 'aratest-relay-work'
+        $traceR = Join-Path $work 'trace-relay'
+        $sessR = Join-Path $work 'relay-sessions'
+        foreach ($d in @($outR, $workR, $traceR, $sessR)) { New-Item -ItemType Directory -Force $d | Out-Null }
+        $env10 = $engineEnv.Clone()
+        $env10.VOCAL_ENGINE_WORK_DIR = $workR
+        $env10.GLISS_ARA_SESSIONS_DIR = $sessR
+        $env10.GLISS_ARA_SYNC_WAIT_MS = '120000'
+        $env10.GLISS_ARA_READ_TIMEOUT_MS = '3000'
+        $env10.GLISS_ARA_TRACE_DIR = $traceR
+        $code = Invoke-Checked $araTest @('-vst3', $gliss, '-out', $outR, '-relay', (Join-Path $plugin 'tests\relay_client.py')) 'aratest-relay' $env10
+        Report 'GlissARATest -relay (external AI: list, attach, edit)' ($code -eq 0) "exit=$code"
+        if ($code -eq 0) {
+            Push-Location $engineEnv.GLISS_ENGINE_CWD
+            try {
+                $verify = & $EnginePython (Join-Path $plugin 'tests\verify_ara_relay.py') $outR $workR $traceR 2>&1
+                $verifyCode = $LASTEXITCODE
+            } finally { Pop-Location }
+            $verify | Where-Object { $_ -match '^(PASS|FAIL|RESULT)' } | ForEach-Object { Write-Host "    $_" }
+            Report 'external edit is played, saved and noticed (verify_ara_relay.py)' ($verifyCode -eq 0) "exit=$verifyCode"
+        } elseif (Test-Path (Join-Path $outR 'relay-client.json')) {
+            Get-Content (Join-Path $outR 'relay-client.json') | Write-Host
+        }
+        $records = @(Get-ChildItem $sessR -Filter '*.json' -ErrorAction SilentlyContinue)
+        Report 'relay records removed when the document closed' ($records.Count -eq 0) ("left=" + $records.Count)
     }
 }
 finally {
