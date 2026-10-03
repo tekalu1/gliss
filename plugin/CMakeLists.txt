@@ -82,6 +82,17 @@ target_sources(GlissARA PRIVATE
     src/GlissProcessor.cpp
     src/ProcessUtils.cpp)
 
+# ---- 単位ごとのソース（段階 2〜） ----
+# 単位（src/engine・src/cache・src/ara・src/editor）は自分の sources.cmake だけを書き、
+# GLISS_UNIT_SOURCES に（plugin/ からの相対パスで）足す。プラグインと単体テストの両方に入る。
+set(GLISS_UNIT_SOURCES)
+foreach(unit engine cache ara editor)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/src/${unit}/sources.cmake" OPTIONAL)
+endforeach()
+if(GLISS_UNIT_SOURCES)
+    target_sources(GlissARA PRIVATE ${GLISS_UNIT_SOURCES})
+endif()
+
 target_compile_options(GlissARA PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 
 target_compile_definitions(GlissARA PUBLIC
@@ -111,4 +122,10 @@ target_link_libraries(GlissARA
 option(GLISS_BUILD_HOSTCHECK "検証用の GlissHostCheck をビルドする" ON)
 if(GLISS_BUILD_HOSTCHECK)
     add_subdirectory(tests/hostcheck)
+endif()
+
+# ---- 単体テスト（GlissPluginTests。JUCE の UnitTest を console で流す） ----
+option(GLISS_BUILD_TESTS "単体テスト GlissPluginTests をビルドする" ON)
+if(GLISS_BUILD_TESTS)
+    add_subdirectory(tests/unit)
 endif()
