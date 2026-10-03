@@ -86,6 +86,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 
 PR の前に gitleaks（公式 Release のバイナリ）で `gitleaks git <wt>` をかける。CI の `test.yml` の `secrets` ジョブも全履歴を見る。
 `gitleaks dir` は git 管理外のテストの出力（`projects/` に残る Chromium の設定など）も拾うので、使うなら先にそれを消す。
+テストに `workKey = "<UUID>"` のような「key を含む名前に乱数らしい文字列」を書くと generic-api-key で止まる（2026-10-03）。全履歴を見るので後のコミットで消しても通らない。値は実行時に作るか、push 前にそのコミットを作り直す。
 
 ## コミットと PR
 
