@@ -188,6 +188,7 @@ private:
 
     Options options;
     Callbacks callbacks;
+    juce::String engineSource, engineExecutable;   // ログ用（EngineConfig::source と実行ファイルの名前）
 
     // ---- 共有（mutex で守る） ----
     mutable std::mutex mutex;

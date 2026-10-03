@@ -579,7 +579,10 @@ void GlissDocumentController::engineCall (const juce::String& tool, const juce::
 
     bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), tool, args, done = std::move (done)]
     {
+        const auto started = juce::Time::getMillisecondCounter();
         auto result = sync->callTool (tool, args, 300000);
+        diag::log ("bridge: engineCall " + tool + (isFailure (result) ? " failed: " + failureReason (result) : juce::String (" ok"))
+                   + " (" + juce::String ((int) (juce::Time::getMillisecondCounter() - started)) + " ms)");
 
         if (tools::shouldSyncAfter (tool, result))
             sync->requestSync();
@@ -606,6 +609,7 @@ juce::var GlissDocumentController::loadedState()
 juce::var GlissDocumentController::bootstrap()
 {
     sync->requestEngine();
+    diag::log ("bridge: bootstrap (engine " + sync->getEngineStatus().state + ")");
 
     const auto state = loadedState();
     const auto engine = sync->getEngineStatus();
@@ -810,7 +814,10 @@ bool GlissDocumentController::isReadableByEditor (const juce::File& file)
 
     for (auto f = file; f != root && f != f.getParentDirectory(); f = f.getParentDirectory())
         if (f.isSymbolicLink())
+        {
+            diag::log ("bridge: refused a path through a link: " + file.getFullPathName());
             return false;
+        }
 
     return true;
 }

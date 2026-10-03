@@ -34,6 +34,8 @@ DocumentSync::DocumentSync (EngineConfig config, Options optionsIn, Callbacks ca
     : juce::Thread ("Gliss ARA sync"),
       options (std::move (optionsIn)),
       callbacks (std::move (callbacksIn)),
+      engineSource (config.source.isNotEmpty() ? config.source : juce::String ("none")),
+      engineExecutable (config.executable.getFileName()),
       mcp (std::move (config))
 {
     if (options.engineDisabled)
@@ -384,6 +386,7 @@ void DocumentSync::resetEngineSession()
 bool DocumentSync::openEngine (const SyncModel& m)
 {
     setEngineState ("starting");
+    log ("sync: starting the engine (" + engineSource + ": " + (engineExecutable.isNotEmpty() ? engineExecutable : juce::String ("not found")) + ")");
 
     const auto info = call ("engine_info", object ({}), 120000);
 
