@@ -2,7 +2,7 @@
 // 架空データのところだけ `export_view_data` の実データに差し替えたもの。
 import {
   BLACK, COLORS, LAYOUT, PITCH_VIEW, S, bandOf, boundSec, boxOf, clamp, clampPitchView, editedCurve,
-  fadeGain, fadeOf, fmtTime, guideBandOf,
+  currentTrack, fadeGain, fadeOf, fmtTime, guideBandOf,
   guideFrames, isMuted, isSel, noteFrames, noteName, phSpan, pitchOf, planConnChanges, sign, spanOf, totalSec,
   toEdited, trHalves, warp,
 } from './state.js';
@@ -723,6 +723,26 @@ function corrTip() {
   return `${s}</g>`;
 }
 
+/** トラックビューで消している区間（クリップのミュート）を、斜線の帯で重ねる（ノートの無音とは別。トラックの頭が 0 の秒 =
+ * ピアノロールの秒なのでそのまま描ける）。 */
+function clipMuteBands(ROLL_T, ROLL_B) {
+  const t = currentTrack();
+  const ms = t?.mutes || [];
+  if (!ms.length) return '';
+  let s = '<defs><pattern id="clipMuteHatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+    + '<rect width="6" height="6" fill="#0d0d0f" fill-opacity=".55"/><line x1="0" y1="0" x2="0" y2="6" stroke="#3a3a3e" stroke-width="2"/></pattern></defs>';
+  for (const [a, b] of ms) {
+    const x0 = Math.max(KEYS_W, X(a)); const x1 = Math.min(W, X(b));
+    if (x1 <= x0) continue;
+    s += `<g data-clip-mute="${f1(a)}" pointer-events="none"><rect x="${f1(x0)}" y="${ROLL_T}" width="${f1(x1 - x0)}" height="${f1(ROLL_B - ROLL_T)}" fill="url(#clipMuteHatch)"/>`
+      + `<line x1="${f1(X(a))}" y1="${ROLL_T}" x2="${f1(X(a))}" y2="${ROLL_B}" stroke="#5c5c62" stroke-dasharray="3 2"/>`
+      + `<line x1="${f1(X(b))}" y1="${ROLL_T}" x2="${f1(X(b))}" y2="${ROLL_B}" stroke="#5c5c62" stroke-dasharray="3 2"/>`
+      + (x1 - x0 > 90 ? `<text x="${f1(x0 + 6)}" y="${ROLL_T + 14}" font-size="10" fill="#8f8f94">クリップで消している</text>` : '')
+      + '</g>';
+  }
+  return s;
+}
+
 // ---------------------------------------------------------------- 本体
 export function render() {
   if (!svg) return;
@@ -1010,6 +1030,7 @@ export function render() {
   }
 
   s += connGlyphs();
+  s += clipMuteBands(ROLL_T, ROLL_B);
 
   if (dr && dr.type === 'box' && dr.moved) {
     s += `<rect x="${f1(Math.min(dr.x0, dr.x1))}" y="${f1(Math.min(dr.y0, dr.y1))}" width="${f1(Math.abs(dr.x1 - dr.x0))}" height="${f1(Math.abs(dr.y1 - dr.y0))}" fill="${SEL}" fill-opacity=".06" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;

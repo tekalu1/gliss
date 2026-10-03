@@ -36,6 +36,7 @@ import { status } from './engine.js';
 import { closeMenu, editorMenu, menuOpen } from './menus.js';
 import { runCommand, wheelAction } from './commands.js';
 import { acceptCandidate, asrCandidate, inCandidate } from './asr.js';
+import { toolHint } from './tracks.js';
 
 const { KEYS_W } = LAYOUT;
 const AXIS_PX = 4;          // blob の中央: 最初にこれだけ動いた向きで ピッチ／移動 を決める
@@ -648,6 +649,7 @@ export function setTool(tool) {
   S.fadeHover = null;
   closeMenu();
   if (S.drag?.type === 'stroke') { S.drag = null; S.stroke = null; }
+  status(toolHint(tool));                 // 下と上（トラックビュー）での働きを 1 行で
   render();
 }
 
