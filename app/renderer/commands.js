@@ -11,7 +11,7 @@ import { S, histLabel, isSel, spanOf, targets, toSource, totalSec } from './stat
 import { askAi, canAskAi } from './askai.js';
 import { render, renderToolbar } from './draw.js';
 import {
-  clearFades, idle, mergeMany, muteNotes, redo, resetOriginal, snapToSemitone, splitNote, undo,
+  clearFades, idle, mergeMany, muteNotes, redo, resetOriginal, snapToSemitone, splitNote, undo, unmuteNotes,
 } from './edits.js';
 import { G, saveGrid } from './grid.js';
 import { openTempoInput } from './tempo.js';
@@ -131,6 +131,7 @@ export const COMMANDS = [
   ['tool-main', 'メインツール', GR.play, ['1'], () => setTool('main'), null, () => S.tool === 'main'],
   ['tool-draw', '鉛筆', GR.play, ['2'], () => setTool('draw'), null, () => S.tool === 'draw'],
   ['tool-cut', 'はさみ', GR.play, ['3'], () => setTool('cut'), null, () => S.tool === 'cut'],
+  ['tool-mute', 'ミュート', GR.play, ['4'], () => setTool('mute'), null, () => S.tool === 'mute'],
   // つかんだノートを鳴らす（Melodyne と同じ。issue #27）。ユーザー設定（取り消しの履歴に入れない）
   ['preview-notes', 'つかんだノートを鳴らす', GR.play, [], () => setPreviewEnabled(!previewEnabled()), null,
     () => previewEnabled()],
@@ -155,6 +156,8 @@ export const COMMANDS = [
   ['reset-original', 'オリジナルに戻す', GR.note, [], () => resetOriginal(targets()), hasNotes],
   ['mute', '無音にする', GR.note, ['Delete'], () => muteNotes(selectedNotes().map((n) => n.id)),
     () => selectedNotes().some((n) => !n.muted)],
+  ['unmute', '無音を戻す', GR.note, [], () => unmuteNotes(selectedNotes().filter((n) => n.muted).map((n) => n.id)),
+    () => selectedNotes().some((n) => n.muted)],
   ['clear-fade', 'フェードを消す', GR.note, [], () => clearFades(selectedNotes()
     .filter((n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0).map((n) => n.id)), hasFades],
   // 選んだノート・範囲を AI に頼む文をクリップボードへ（askai.js）
@@ -249,6 +252,7 @@ function typing(el) {
 
 const NEEDS = {
   semitone: 'ノートを選んでから', mute: 'ノートを選んでから（もう無音のノートは除く）',
+  unmute: '無音のノートを選んでから',
   merge: '隣り合って接しているノートを 2 つ以上選んでから', 'guide-match': guideWhy,
   'guide-view': guideWhy, transition: '接続された境目が無い', rename: 'トラックが無い',
   'clear-fade': 'フェードのあるノートを選んでから', tempo: 'トラックが無い',
@@ -294,7 +298,7 @@ const MENUBAR = [
     'add-track', 'open-guide', 'load-lyrics', 'import-lyrics', SEP, 'export', 'export-as', SEP, { role: 'quit', label: '終了' }]],
   ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes',
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
-  ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute',
+  ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute', 'unmute',
     SEP, 'ask-ai']],
   ['表示', ['guide-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
   // 名前・版・アイコン（main の app.setAboutPanelOptions。issue #29）

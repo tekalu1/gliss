@@ -2,7 +2,7 @@
 
 Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジンを MCP（stdio）で公開する。サーバーの名前は `gliss`（Python のパッケージは内部名の `vocal_engine` のまま）。
 Claude Code などの MCP クライアントから
-「測る／直す／確かめる」ができる。ツールは 58 個（うちトラック（複数トラックのセッション）・テンポの 9 個は §3-2、
+「測る／直す／確かめる」ができる。ツールは 59 個（うちトラック（複数トラックのセッション）・テンポの 9 個は §3-2、
 プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、区間の聞き取り（音声認識）の 3 個は §1-1）。
 
 起動:
@@ -30,7 +30,7 @@ open_project(take_path, guide_path?, lyrics?, guide_lyrics?)   ← テイクの 
      ├ shift_pitch / set_pitch_curve(mode=offset|draw)      ← 直す（ピッチ。draw = 鉛筆）
      ├ set_transition                                       ← ノートの変わり目のなだらかさ
      ├ split_note / merge_notes                             ← ノートを分ける / つなぐ
-     ├ mute_notes                                           ← ノートを無音にする（長さは変えない）
+     ├ mute_notes / unmute_notes                            ← ノートを無音にする（長さは変えない）/ 無音だけを戻す
      ├ set_fade                                             ← ノートのフェードイン／アウト（音量だけ）
      ├ move_boundary / stretch / move_note                  ← 直す（タイミング。後ろはずらさない）
      ├ list_connections / set_connection                    ← 隣との接続 / 切り離し（となだらかさ）
@@ -612,7 +612,14 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 ノートを**無音にする**（画面の右クリック「無音にする」・Del）。編集リストに `mute`（範囲 = ノートの頭〜尻）が入る。
 長さ・位置は変えず（後ろはずらさない）、その区間の音だけを消す。隣とは 20 ms で無音へフェードする。
 ピッチなどの編集は残る。もう無音のノートは飛ばす。`export_view_data` の `notes[].muted` が true になる。
-戻すのは `undo` か `reset_to_original`。
+戻すのは `undo`・`unmute_notes`（無音だけ）・`reset_to_original`（編集を全部）。
+
+#### `unmute_notes(note_ids?, start_sec?, end_sec?, author?)`
+
+`mute_notes` の逆（画面の右クリック「無音を戻す」・ミュートツール）。そのノートの区間の無音（`mute`）だけを外す。1 つの changeset（「無音を戻す」）。
+**ピッチ・タイミング・フェードの編集は残る**（`reset_to_original` は全部外す）。対象のノートの外へはみ出した無音は残す
+（範囲の無音をノートの端で切り分けて残す）。対象は `note_ids` か範囲（重なる音程ノート）。無音でないノートは飛ばし、
+どれも無音でなければ `changeset: null`。`export_view_data` の `notes[].muted` が false に戻る。
 
 #### `set_fade(note_ids, fade_in_sec?, fade_out_sec?, author?)`（issue #20）
 
@@ -1048,7 +1055,7 @@ Claude Code から: `load_project("D:/…/曲.gliss")` → `list_tracks` → `se
 
 | 許可 | ツール |
 |---|---|
-| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`set_fade`・`reset_to_original`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
+| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
 | **保存・書き出し** | `save_project`・`export_wav`・`prepare_asr_model`（聞き取り用の数 GB のモデルをダウンロードして書く）、`render_region(path=…)`・`export_view_data(path=…)`・`render_preview(name=<フォルダーを含むパス>)`（ユーザーが指定した場所に書くとき） |
 | 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info` |
 

@@ -128,6 +128,8 @@ function noteMenu(e, n, t) {
     { ...cmd('clear-fade', ctx), hidden: !isEnabled('clear-fade', ctx) },
     cmd('reset-original', ctx),
     cmd('mute', ctx),
+    // 無音のノートのときだけ（フェードを消すと同じ）
+    { ...cmd('unmute', ctx), hidden: !isEnabled('unmute', ctx) },
     SEP,
     cmd('ask-ai', ctx),
   ];

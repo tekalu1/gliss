@@ -340,7 +340,7 @@ test('(C7) メニューバーの名前・キーもコマンドの表から（ノ
   expect(note.map((x) => [x.label, x.accel])).toEqual([
     ['ガイドに合わせる…', 'G'], ['半音に合わせる', 'Q'], ['ここで分ける', 'Alt+X'], ['結合', 'CmdOrCtrl+J'],
     ['なだらかさ…', 'T'], ['フェードを消す', null], ['オリジナルに戻す', null], ['無音にする', 'Delete'],
-    ['AI に頼む', null],
+    ['無音を戻す', null], ['AI に頼む', null],
   ]);
   const edit = mb.find((m) => m.label === '編集').items;
   expect(edit.map((x) => x.label)).toContain('ショートカット（キー・ホイール）…');
@@ -362,7 +362,7 @@ test('(K1) 設定画面: 検索・ダブルクリックしてキー・重なり�
   await expect(win.locator('#keys .ks')).toBeFocused();
   // グループごとの一覧
   const groups = await win.locator('#keys .kg').allTextContents();
-  expect(groups).toEqual(['再生・ツール', '編集', 'ノート', '歌詞', '表示', 'トラック', 'ファイル', 'ヘルプ', 'ホイール']);
+  expect(groups).toEqual(['再生・ツール', '編集', 'ピッチ検出の方式', 'ノート', '歌詞', '表示', 'トラック', 'ファイル', 'ヘルプ', 'ホイール']);
   // 検索（名前・キー）
   await win.locator('#keys .ks').fill('結合');
   await expect(win.locator('#keys .kr')).toHaveCount(1);

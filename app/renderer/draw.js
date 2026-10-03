@@ -3,7 +3,7 @@
 import {
   BLACK, COLORS, LAYOUT, PITCH_VIEW, S, bandOf, boundSec, boxOf, clamp, clampPitchView, editedCurve,
   fadeGain, fadeOf, fmtTime, guideBandOf,
-  guideFrames, isSel, noteFrames, noteName, phSpan, pitchOf, planConnChanges, sign, spanOf, totalSec,
+  guideFrames, isMuted, isSel, noteFrames, noteName, phSpan, pitchOf, planConnChanges, sign, spanOf, totalSec,
   toEdited, trHalves, warp,
 } from './state.js';
 import { withKey } from './keys.js';
@@ -340,7 +340,7 @@ function edgeGrab(k, which, x0, x1, yc) {
 let npEdgeXs = [];            // 描き直し 1 回ぶん: 子音・息の端の位置とつかみ幅
 const NP_Y = 6;               // 帯の当たりの縦の最小（中心から ±px）
 
-/** 音程のない区間の当たり。はさみでは区間全体を切れる。 */
+/** 音程のない区間の当たり。はさみ・ミュートでは区間全体が対象。 */
 function noPitchHit(n, segs, conn) {
   const [s0, s1] = spanOf(n);
   const xa = X(s0); const xb = X(s1);
@@ -353,7 +353,7 @@ function noPitchHit(n, segs, conn) {
     }
   }
   if (!Number.isFinite(lo)) return '';
-  if (S.tool === 'cut') return `<rect data-note="${n.id}" x="${f1(xa)}" y="${f1(lo)}" width="${f1(Math.max(2, xb - xa))}" height="${f1(hi - lo)}" fill="transparent"/>`;
+  if (S.tool === 'cut' || S.tool === 'mute') return `<rect data-note="${n.id}" x="${f1(xa)}" y="${f1(lo)}" width="${f1(Math.max(2, xb - xa))}" height="${f1(hi - lo)}" fill="transparent"/>`;
   let out = `<rect data-nop="${n.id}" x="${f1(bx0)}" y="${f1(lo)}" width="${f1(Math.max(2, bx1 - bx0))}" height="${f1(hi - lo)}" fill="transparent" style="cursor:move"/>`;
   const inner = Math.min(EDGE_IN, Math.max(0, xb - xa) / 3);
   for (const [which, x, pts] of [['start', xa, segs[0]], ['end', xb, segs[segs.length - 1]]]) {
@@ -736,6 +736,7 @@ export function render() {
   const ROLL_T = rollTop(); const ROLL_B = rollBottom(); const ROLL_H = rollHeight();
   const dr = S.drag;
   const main = S.tool === 'main';
+  const hovTool = main || S.tool === 'mute';       // ノートに乗ったら濃くする（鉛筆・はさみは出さない）
   let s = '';
 
   // ---- 鍵盤
@@ -825,11 +826,11 @@ export function render() {
     const d = blobsSplit(segs, cxs);
     const grabbed = dr?.nop && dr.id === n.id;
     const bc = bandColor(n);             // 帯の色 = タイミングの補正（issue #37）
-    s += `<g class="npg${grabbed ? ' hov' : ''}${isSel(n.id) ? ' sel' : ''}">`;
+    s += `<g class="npg${grabbed ? ' hov' : ''}${isSel(n.id) ? ' sel' : ''}${isMuted(n) ? ' muted' : ''}${hovTool && !dr && S.noteHover === n.id ? ' hov' : ''}">`;
     const opacity = bc === TAKE ? '.14' : '.45';
     if (d.main) s += `<path data-nopitch="${n.id}" d="${d.main}" fill="${bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
     if (d.cons) s += `<path data-nopitch="${n.id}" data-cons="${n.id}" d="${d.cons}" fill="${bc === TAKE ? desat(bc) : bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
-    if (main || S.tool === 'cut') s += noPitchHit(n, segs, noPitchConn(n));
+    if (main || S.tool === 'cut' || S.tool === 'mute') s += noPitchHit(n, segs, noPitchConn(n));
     const [s0, s1] = spanOf(n);
     const first = segs[0][0]; const last = segs[segs.length - 1][segs[segs.length - 1].length - 1];
     if (isSel(n.id) && (Math.abs(n.start_sec - s0) > 0.0005 || Math.abs(n.end_sec - s1) > 0.0005)) {
@@ -874,7 +875,7 @@ export function render() {
     const dev = (n.deviation_cents ?? null) === null ? null
       : n.deviation_cents + (pitchOf(n) - (n.pitch_midi ?? 0)) * 100;
     // hov: フェードのつまみ（ノートの外に重ねて描く）に乗っている間もホバーの濃さのまま
-    s += `<g class="nb${sl ? ' sel' : ''}${n.muted ? ' muted' : ''}${main && !dr && S.noteHover === n.id ? ' hov' : ''}">`;
+    s += `<g class="nb${sl ? ' sel' : ''}${isMuted(n) ? ' muted' : ''}${hovTool && !dr && S.noteHover === n.id ? ' hov' : ''}">`;
     // 子音の区間は別の path（同じ .blob なので、選択・ホバーの濃さは同じ比でかかる）
     // 帯の色 = タイミングの補正（自動 = 黄 → 赤、手動 = 白。issue #37。corr.js）
     const bc = bandColor(n);
@@ -1181,6 +1182,7 @@ export function renderToolbar() {
   tip(q('#bToolMain'), withKey('メインツール', 'tool-main'));
   tip(q('#bToolDraw'), `${withKey('鉛筆', 'tool-draw')}: ピッチを描く`);
   tip(q('#bToolCut'), `${withKey('はさみ', 'tool-cut')}: ノートを分ける（境目をダブルクリックで結合）`);
+  tip(q('#bToolMute'), `${withKey('ミュート', 'tool-mute')}: クリックで無音にする／戻す（なぞるとまとめて）`);
   tip(q('#bGuide'), withKey('ガイドを重ねて表示', 'guide-view'));
   tip(q('#bMacro'), withKey('ガイドに合わせる…', 'guide-match'));
   // スナップ（issue #18）: 押している間は濃く。細かさのプルダウンは表示（小節・拍 / 分:秒）に合わせて中身を替える
@@ -1202,7 +1204,7 @@ export function renderToolbar() {
   // メニューバー（Electron）: 「元に戻す: ○○」とキーの表記（変わったときだけ main に送る）
   syncAppMenu();
   q('#clock').textContent = fmtTime(S.head);
-  for (const [id, tool] of [['#bToolMain', 'main'], ['#bToolDraw', 'draw'], ['#bToolCut', 'cut']]) {
+  for (const [id, tool] of [['#bToolMain', 'main'], ['#bToolDraw', 'draw'], ['#bToolCut', 'cut'], ['#bToolMute', 'mute']]) {
     const b = q(id);
     if (b) b.setAttribute('aria-pressed', S.tool === tool ? 'true' : 'false');
   }

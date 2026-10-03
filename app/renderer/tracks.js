@@ -26,8 +26,8 @@
 import { $, analyzeTake, call, onAbandon, status } from './engine.js';
 import { beginBusy, laterBusy } from './busy.js';
 import {
-  COLORS, LAYOUT, S, audible, buttonReleased, clamp, clearProject, currentTrack, fmtTime, offsetOf, setPlan,
-  timelineRange, totalSec,
+  COLORS, LAYOUT, S, audible, buttonReleased, clamp, clearProject, currentTrack, fmtTime, isMuted, offsetOf, setPlan,
+  spanOf, timelineRange, totalSec,
 } from './state.js';
 import { onPlayhead, onRender, render, renderToolbar } from './draw.js';
 import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setTrack } from './session.js';
@@ -320,7 +320,7 @@ export function renderTracks() {
   const vr = viewRange();
   const sig = JSON.stringify([laneW, TH, range, vr, S.loop, S.session?.current, S.session?.guide,
     rows().map((t) => [t.id, offsetOf(t), t.kind, t.mute, t.solo, t.duration_sec]),
-    overviews.size, dr && [dr.type, dr.row, dr.a, dr.b, dr.moved, dr.off],
+    overviews.size, dr && [dr.type, dr.row, dr.a, dr.b, dr.moved, dr.off], S.vd ? mutedSpans() : null,
     tempo(), G.fmt, currentDiv()]);
   if (sig !== lastSig) {
     lastSig = sig;
@@ -328,6 +328,20 @@ export function renderTracks() {
     drawRuler();
   }
   moveHead();
+}
+
+/** 編集中のトラックの無音の区間（ノートの無音。秒 = そのトラックの音の中。つながった分は 1 つにまとめる）。
+ * 無音にした直後（当たるまで）の見かけも含める。ほかのボーカルには出さない（エンジンが区間を返さない）。 */
+function mutedSpans() {
+  const out = [];
+  for (const n of S.notes) {
+    if (!isMuted(n)) continue;
+    const [a, b] = spanOf(n);
+    const last = out[out.length - 1];
+    if (last && a <= last[1] + 1e-4) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
 }
 
 function drawLanes(vr) {
@@ -353,6 +367,14 @@ function drawLanes(vr) {
     const op = (cur ? 0.75 : 1) * (audible(t) ? 1 : 0.35);
     for (const d of wavePaths(t)) {
       s += `<path d="${d}" fill="${col}" opacity="${op.toFixed(3)}" transform="translate(${f1(x0)},${y})" pointer-events="none"/>`;
+    }
+    // 無音のノート（ミュートツール・Del）: 波形を暗くして、点線の輪郭（ピアノロールの無音のノートと同じ見分け）
+    if (cur && S.vd) {
+      for (const [a, b] of mutedSpans()) {
+        const mx0 = tvX(off + a); const mx1 = tvX(off + b);
+        if (mx1 < 0 || mx0 > laneW) continue;
+        s += `<rect data-muted-span="${f1(a)}" x="${f1(mx0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, mx1 - mx0))}" height="${clipH()}" rx="2" fill="#161619" fill-opacity=".72" stroke="#8f8f94" stroke-opacity=".7" stroke-dasharray="3 2.5" pointer-events="none"/>`;
+      }
     }
   });
   // 下で表示している範囲（レーンをドラッグ中はその範囲）
