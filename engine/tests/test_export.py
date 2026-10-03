@@ -153,5 +153,6 @@ def test_export_tool_is_registered():
     assert m._mcp_asr.transcribe in m.TOOLS and m._mcp_asr.asr_status in m.TOOLS    # 聞き取り（#54）
     assert m.prep_status in m.TOOLS and m.pause_prep in m.TOOLS    # 裏の準備（#63）
     assert m.set_f0_estimator in m.TOOLS and m.unmute_notes in m.TOOLS
-    assert m.split_track in m.TOOLS and m.join_track in m.TOOLS and m.mute_track_range in m.TOOLS
+    names = [f.__name__ for f in m.TOOLS]
+    assert {"split_track", "join_track", "mute_track_range"} <= set(names)    # クリップの分割・部分のミュート
     assert len(m.TOOLS) == 65
