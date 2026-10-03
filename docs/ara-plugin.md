@@ -14,14 +14,14 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 
 | 項目 | 内容 |
 |---|---|
-| 手段 | JUCE **9.0.3**（AGPLv3 の側で使う）＋ ARA SDK **2.3.0**（Apache-2.0）＋ WebView2 SDK（NuGet の `Microsoft.Web.WebView2` **1.0.4258.31**、静的リンク）。退路は素の VST3 SDK ＋ ARA_Library |
+| 手段 | JUCE **9.0.3**（AGPLv3 の側で使う）＋ ARA SDK **2.3.0**（Apache-2.0）＋ WebView2 SDK（NuGet の `Microsoft.Web.WebView2` **1.0.4258.31**、静的リンク）＋ Signalsmith Stretch **1.4.0**・Signalsmith Linear **0.6.4**（ともに MIT）。退路は素の VST3 SDK ＋ ARA_Library |
 | 形式 | VST3 のみ（`Gliss.vst3`）。ARA 2（`IS_ARA_EFFECT`）。出力は `plugin/build/GlissARA_artefacts/<構成>/VST3/Gliss.vst3` |
 | 製品名・会社名 | `Gliss`・`Gliss`（ホストに見える名前） |
 | `BUNDLE_ID` | `io.github.tekalu1.gliss`（アプリの appId と同じ。変えない） |
-| `ARA_FACTORY_ID` | `io.github.tekalu1.gliss.arafactory.2`（能力＝解析の種類・再生の変形が変わったら末尾の版を上げる。ノートの解析を名乗ったので 2026-10-03 に `.1` から上げた） |
+| `ARA_FACTORY_ID` | `io.github.tekalu1.gliss.arafactory.3`（線形の時間伸縮を名乗ったので `.2` から上げた） |
 | `ARA_DOCUMENT_ARCHIVE_ID` | `io.github.tekalu1.gliss.aradocumentarchive.1`（保存の形が下位互換でなくなったら上げ、古い ID は `ARA_COMPATIBLE_ARCHIVE_IDS` に残す） |
 | ARA の API の世代 | JUCE の既定（`kARAAPIGeneration_2_0_Final`）。部分的な保存（2.3）は使わない |
-| 解析・変形の能力 | 解析はノートだけ（`ARA_ANALYSIS_TYPES kARAContentTypeNotes`。ホストが解析を頼める）。再生の変形（時間の伸縮・内容に合わせたフェード）は名乗らない（`ARA_TRANSFORMATION_FLAGS` は既定） |
+| 解析・変形の能力 | 解析はノートだけ（`ARA_ANALYSIS_TYPES kARAContentTypeNotes`）。再生は線形の時間伸縮（`kARAPlaybackTransformationTimestretch`）に対応。`TimestretchReflectingTempo` と内容に合わせたフェードは未対応 |
 | 実行時ライブラリ | 静的（`/MT`）。利用者の PC に VC++ 再頒布可能パッケージを要求しない |
 | WebView2 | ローダは静的リンク。ランタイムは Evergreen（Windows 11 に入っている）。無いときはエディタに文言を出す作り（ランタイムの無い環境では未確認） |
 | 依存の取得 | CMake の `FetchContent` が `plugin/build/_deps` にタグ固定で取る（リポジトリには入れない。`plugin/.gitignore`） |
@@ -48,6 +48,8 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 
 - オーディオスレッドは**キャッシュを読むだけ**: 修飾ごとの `EditedPcm`（編集した窓だけの PCM のスナップショット）を `tryLock` で取り、窓の中は窓の PCM、外は原音を返す。IPC・再合成・ホストの音の読み出し・確保・ロック待ちをしない。取れない・無い区間は原音。
 - リージョンごとに `RegionReader`（`plugin/src/cache`）を `prepareToPlay` で用意し、窓＋原音＋周波数の変換＋チャンネル数の変換を 1 ブロックずつ読む。**ソースとホストの周波数が違っても鳴らす**（原音と窓を合わせたソースの周波数の列を流しで変換する。継ぎ目が出ない）。
+- 伸縮フラグのあるリージョンは修飾の長さとソングの長さの比を一定の倍率として `StretchReader`（Signalsmith Stretch）で鳴らす。`RegionReader` が作った修飾の時間・ホストの周波数の音を伸縮し、シーク時は `outputSeek` で揃える。伸縮しないリージョンは従来の整数の切り出しと再生のまま。リージョンの途中でテンポが変わる場合の追従は未対応（`TimestretchReflectingTempo` は名乗らない）。
+- 伸縮用の作業領域は `prepareToPlay` で最大ブロック長と 8 倍までの入力を基準に確保する。8 倍を超える比は出力を小分けにして処理し、シークの先読みは確保した長さで切る。入力が 1 出力サンプル当たりの確保量を超える極端な比では無音になる。
 - 原音は**裏のスレッドが先読み**したもの（JUCE の `BufferingAudioReader`。全インスタンスで 1 本の `TimeSliceThread`。先読みは 4 秒）。先読みが間に合っていない範囲だけ無音にする。常にリアルタイムでないインスタンス（`alwaysNonRealtime`）は先読みせず直に読む。
 - ホストが「リアルタイムでない」描画（VST3 の `kOffline`＝バウンス）のときだけ、原音の先読みを最大 500 ms、**同期（ソースの読み込み・エンジン・差分の再合成）の完了を最大 10 秒**待つ（`prepareToPlay` ごとの持ち時間。待っても済まなければ原音のまま描き、ログに書く）。
 - 原音と比べる（`DocumentBridge::setCompare`）間は窓を当てない（全部の修飾の音が変わったとホストに知らせる）。
@@ -77,7 +79,7 @@ DAW がイベントの上に音符を描く・MIDI に書き出す・ほかの�
 |---|---|---|---|
 | `AudioSource` | 解析だけ（エンジンの `ara_notes` の `source_notes`。同じソースの修飾のうち解析の済んだ最初のもの） | ソースの秒 | `detected`（ARA の名前。DAW の画面では analyzed と出ることが多い） |
 | `AudioModification` | 編集を当てた後（`notes`） | ソースの秒 | 解析だけなら `detected`、編集リストが空でなければ `adjusted` |
-| `PlaybackRegion` | 修飾のノートを、リージョンの修飾の範囲（頭・長さ。ソングと修飾の長さの短い方）で**切り**、ソングの秒に写したもの（Gliss は時間を伸ばさないので `ソングの秒 = ソースの秒 − 修飾の頭 + ソングの頭`） | ソングの秒 | 修飾と同じ |
+| `PlaybackRegion` | 修飾のノートをリージョンの修飾の範囲で切り、位置と長さを `ソングの秒 = ソングの頭 + (修飾の秒 − 修飾の頭) / 伸縮比` で写す | ソングの秒 | 修飾と同じ |
 
 - 1 つのノート（`ARAContentNote`）: `frequency` = 中心の音程の Hz（画面の帯の中心 `edited_pitch_midi` と同じ定義）、`pitchNumber` = それを丸めた MIDI 番号、
   `volume` = ノートの音量の山（-60 dB → 0、0 dB → 1）、`startPosition`・`noteDuration` = 編集後の頭と長さ（画面の `edited_start_sec`・`edited_end_sec`）、
@@ -145,7 +147,7 @@ cmake --build plugin/build --config Release --target GlissARA_VST3
 # 出来るもの: plugin\build\GlissARA_artefacts\Release\VST3\Gliss.vst3\Contents\x86_64-win\Gliss.vst3
 ```
 
-最初の構成で JUCE（約 130 MB）・ARA SDK（サブモジュール込み）・WebView2 の NuGet パッケージ（URL とハッシュを固定）を取る。2 回目以降はネットワークが要らない。`COPY_PLUGIN_AFTER_BUILD` は切ってある（`C:\Program Files\Common Files\VST3` に書かない）。
+最初の構成で JUCE（約 130 MB）・ARA SDK（サブモジュール込み）・WebView2 の NuGet パッケージ（URL とハッシュを固定）・Signalsmith Stretch と Linear を取る。2 回目以降はネットワークが要らない。`COPY_PLUGIN_AFTER_BUILD` は切ってある（システムの VST3 フォルダに書かない）。
 同じ構成が `GlissHostCheck`（検証用のホスト）も作る（`-DGLISS_BUILD_HOSTCHECK=OFF` で外せる）。
 
 DAW に載せて試すときは、`Gliss.vst3` を DAW が探す場所に置く（Fender Studio Pro 8 の VST3 の追加の場所に `plugin\build\GlissARA_artefacts\Release\VST3` を足すか、`%CommonProgramFiles%\VST3` へ管理者権限でコピーする。どちらも未確認。実物の DAW での確認は人の許可を取って行う）。配布版はインストーラがユーザーごとの置き場に入れる（下の「配布」）。
@@ -222,8 +224,8 @@ Copy-Item -Recurse "$env:LOCALAPPDATA\Programs\Gliss\resources\plugin\Gliss.vst3
 ### ライセンス
 
 - JUCE 9（AGPLv3 か商用。Gliss は AGPLv3 の側で使う）と結合した `Gliss.vst3` は **AGPLv3 の条件で配る**。Gliss 自身のソースは GPL-3.0-or-later のまま（GPLv3 §13 と AGPLv3 §13 が結合を認める）。
-- 対応するソースは、このリポジトリの同じ版のタグの `plugin/` と、`plugin/CMakeLists.txt` が版を固定して取る依存（JUCE・ARA SDK・`Microsoft.Web.WebView2` の NuGet）。`Gliss.vst3` の `NOTICE.txt` に場所を書いている。
-- 依存のライセンス文: JUCE（`LICENSE.md` と AGPLv3 の全文）・ARA SDK（Apache-2.0。`NOTICE.txt` も）・WebView2 のローダ（BSD-3-Clause）・JUCE が同梱してリンクされる第三者のコード（zlib・HarfBuzz・SheenBidi・LunaSVG・PlutoVG・libpng・jpeglib・libwebp・FLAC・Ogg Vorbis・Opus・VST3 SDK（MIT）・PreSonus の拡張ヘッダ）。
+- 対応するソースは、このリポジトリの同じ版のタグの `plugin/` と、`plugin/CMakeLists.txt` および Signalsmith Stretch の CMakeLists が版を固定して取る依存（JUCE・ARA SDK・`Microsoft.Web.WebView2` の NuGet・Signalsmith Stretch・Signalsmith Linear）。`Gliss.vst3` の `NOTICE.txt` に場所を書いている。
+- 依存のライセンス文: JUCE（`LICENSE.md` と AGPLv3 の全文）・ARA SDK（Apache-2.0。`NOTICE.txt` も）・WebView2 のローダ（BSD-3-Clause）・Signalsmith Stretch と Signalsmith Linear（MIT）・JUCE が同梱してリンクされる第三者のコード（zlib・HarfBuzz・SheenBidi・LunaSVG・PlutoVG・libpng・jpeglib・libwebp・FLAC・Ogg Vorbis・Opus・VST3 SDK（MIT）・PreSonus の拡張ヘッダ）。
   `scripts/third-party-notices.mjs` が JUCE の SBOM（`JUCE.spdx.json`）を、`GlissARA` にリンクするモジュールから辿って集める。リンクしないもの（ASIO SDK・Oboe・AudioUnitSDK・AAX SDK・LV2 一式）は理由つきで外し、SBOM に知らない同梱物が増えたら載せる（JUCE を上げたら `JUCE_NOT_LINKED` を見直す）。
 - インストール先の `resources\THIRD_PARTY_NOTICES.txt` の「DAW のプラグイン」の節と、`Gliss.vst3\Contents\Resources\THIRD_PARTY_NOTICES.txt` は同じ中身。
 

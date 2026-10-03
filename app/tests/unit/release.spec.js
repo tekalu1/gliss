@@ -283,10 +283,13 @@ test('(R11b) THIRD_PARTY_NOTICES: プラグインの依存（JUCE の SBOM を�
   expect(juceVendored(spdx, ['juce_x']).map((v) => v.name)).toEqual(['Unknown']);
   expect(() => juceVendored(spdx, ['juce_missing'])).toThrow(/juce_missing/);
   // 節: AGPLv3 で配ることと、対応するソースの場所
-  const info = { juce: { version: '9.0.3' }, araSdk: { version: 'releases/2.3.0' }, webview2: { version: '1.0.4258.31' } };
+  const info = { juce: { version: '9.0.3' }, araSdk: { version: 'releases/2.3.0' }, webview2: { version: '1.0.4258.31' },
+    signalsmithStretch: { version: '1.4.0' }, signalsmithLinear: { version: '0.6.4' } };
   const text = notices({ version: '0.1.0', python: [], node: [], plugin: [{ name: 'JUCE', version: '9.0.3', license: 'AGPL-3.0-only', texts: [] }], pluginInfo: info });
   expect(text).toContain('DAW のプラグイン（resources/plugin/Gliss.vst3');
   expect(text).toContain('GNU Affero General Public License version 3');
   expect(pluginLicenseLines(info).join('\n')).toContain('ARA SDK 2.3.0');
+  expect(pluginLicenseLines(info).join('\n')).toContain('Signalsmith Stretch 1.4.0');
+  expect(pluginLicenseLines(info).join('\n')).toContain('Signalsmith Linear 0.6.4');
   expect(notices({ version: '0.1.0', python: [], node: [] })).not.toContain('Gliss.vst3');
 });

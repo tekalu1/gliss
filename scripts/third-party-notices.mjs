@@ -9,7 +9,7 @@
 //   - 画面（app.asar）に入る Node のパッケージ: app/package.json の dependencies から辿れるもの（devDependencies は入らない）
 //   - エンジン exe に入る Gliss の F0 モデル（試作）の学習コード・学習データの出典（engine/vocal_engine/analysis/models/gliss-f0.NOTICE.txt）
 //   - 任意のアドオン（scripts/build-addon.mjs が作った engine/packaging/dist-addons/<id>.LICENSES.txt。作っていれば）
-//   - DAW のプラグイン（Gliss.vst3）に入れた依存: JUCE（AGPLv3）・ARA SDK・WebView2 のローダと、JUCE が同梱した第三者のコード
+//   - DAW のプラグイン（Gliss.vst3）に入れた依存: JUCE（AGPLv3）・ARA SDK・WebView2 のローダ・Signalsmith と、JUCE が同梱した第三者のコード
 //     （JUCE の SBOM の JUCE.spdx.json を、リンクするモジュールから辿る）。scripts/build-plugin.mjs を先に走らせる（依存の置き場を書く）
 // Electron・Chromium のライセンス文（LICENSE.electron.txt・LICENSES.chromium.html）は electron-builder がインストール先の直下に置く。
 // electron-builder.yml の extraResources が resources/THIRD_PARTY_NOTICES.txt に入れる。
@@ -221,7 +221,7 @@ function vendoredTexts(juceDir, v) {
   return texts;
 }
 
-/** DAW のプラグイン（Gliss.vst3）に入れた依存。JUCE（AGPLv3 の側で使う）・ARA SDK・WebView2 のローダ・JUCE が同梱した第三者のコード。 */
+/** DAW のプラグイン（Gliss.vst3）に入れた依存。JUCE・ARA SDK・WebView2 のローダ・Signalsmith と、JUCE が同梱した第三者のコード。 */
 export function pluginPackages(info = readPluginBuild()) {
   const juce = info.juce.dir;
   const read = (...p) => fs.readFileSync(path.join(...p), 'utf8');
@@ -235,6 +235,10 @@ export function pluginPackages(info = readPluginBuild()) {
         { file: 'NOTICE.txt', text: read(info.araSdk.dir, 'NOTICE.txt') }] },
     { name: 'WebView2 のローダ（Microsoft.Web.WebView2 の WebView2LoaderStatic.lib）', version: info.webview2.version, license: 'BSD-3-Clause', copyleft: false,
       texts: [{ file: 'LICENSE.txt', text: read(info.webview2.dir, 'LICENSE.txt') }] },
+    { name: 'Signalsmith Stretch', version: info.signalsmithStretch.version, license: 'MIT', copyleft: false,
+      texts: [{ file: 'LICENSE.txt', text: read(info.signalsmithStretch.dir, 'LICENSE.txt') }] },
+    { name: 'Signalsmith Linear', version: info.signalsmithLinear.version, license: 'MIT', copyleft: false,
+      texts: [{ file: 'LICENSE.txt', text: read(info.signalsmithLinear.dir, 'LICENSE.txt') }] },
   ];
   for (const v of juceVendored(spdx, pluginJuceModules())) {
     out.push({ name: `${v.name}（JUCE に同梱。${v.dir}）`, version: v.version, license: v.license, copyleft: isCopyleft(v.name, v.license), texts: vendoredTexts(juce, v) });
@@ -253,9 +257,10 @@ export function pluginLicenseLines(info) {
     `Gliss.vst3 は Gliss のソース（GPL-3.0-or-later）を JUCE ${info.juce.version}（AGPL-3.0-only）と結合したもの。GPLv3 と AGPLv3 の第 13 条により、`,
     '結合した全体（Gliss.vst3）は GNU Affero General Public License version 3 の条件で配布する（Gliss.vst3 の Contents/Resources/LICENSE-AGPL-3.0.txt）。',
     'Gliss 自身のソースのライセンスは GPL-3.0-or-later のまま。',
-    `対応するソース: Gliss のリポジトリ（https://github.com/tekalu1/gliss）の同じ版のタグの plugin/ と、plugin/CMakeLists.txt が版を固定して取る依存`,
+    `対応するソース: Gliss のリポジトリ（https://github.com/tekalu1/gliss）の同じ版のタグの plugin/ と、plugin/CMakeLists.txt および Signalsmith Stretch の CMakeLists.txt が版を固定して取る依存`,
     `（JUCE ${info.juce.version}: https://github.com/juce-framework/JUCE ・ARA SDK ${info.araSdk.version.replace(/^releases\//, '')}: https://github.com/Celemony/ARA_SDK ・`,
-    `Microsoft.Web.WebView2 ${info.webview2.version}: https://www.nuget.org/packages/Microsoft.Web.WebView2 ）。`,
+    `Microsoft.Web.WebView2 ${info.webview2.version}: https://www.nuget.org/packages/Microsoft.Web.WebView2 ・`,
+    `Signalsmith Stretch ${info.signalsmithStretch.version}: https://github.com/Signalsmith-Audio/signalsmith-stretch ・Signalsmith Linear ${info.signalsmithLinear.version}: https://github.com/Signalsmith-Audio/linear ）。`,
   ];
 }
 
