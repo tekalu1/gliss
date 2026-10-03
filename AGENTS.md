@@ -63,7 +63,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 | `engine/` | `<wt>\engine` で pytest（上の「作業開始」）。絞るなら `-k`。MCP のツールを変えたら `engine/docs/MCP.md` も直す |
 | `app/` の画面 | `pnpm test:unit` と、関係する `pnpm exec playwright test tests/<名前>.spec.js` |
 | 配布・更新・アドオン（`electron-builder.yml`・`build/installer.nsh`・`updates*.mjs`・`addons.mjs`・`scripts/build-*.mjs`） | `pnpm test:unit`（`release.spec.js` が NSIS のテンプレートの形を見る）。`pnpm build:engine` → `pnpm build:plugin`（`dist:dir` の前に要る。VS の MSVC と CMake）→ `pnpm dist:dir` → `node scripts/smoke-packaged.mjs`。更新は `node scripts/smoke-update.mjs --old <古い展開版> --new <新しい出力>`、アドオンは `node scripts/build-addon.mjs --all` → `pnpm dist:dir` → `node scripts/smoke-addon.mjs --models <重み>` |
-| `plugin/` | `powershell -NoProfile -File plugin\scripts\test-plugin.ps1`（ビルドと、ARA の TestHost・GlissHostCheck。`-SkipBuild` で流すだけ。詳しくは `docs/ara-plugin.md`）。ビルドの出力と依存は `plugin/build/`（git 管理外）。プラグインを `Common Files\VST3` などシステムの場所に置かない（実物の DAW での確認は人の許可を取って行う） |
+| `plugin/` | `powershell -NoProfile -File plugin\scripts\test-plugin.ps1`（ビルドと、ARA の TestHost・GlissHostCheck・単体テスト・エンジンにつないだ通し試験 GlissARATest。エンジンは main の `.venv` の python で worktree の `engine` を読む。`-SkipBuild` で流すだけ。詳しくは `docs/ara-plugin.md`）。ビルドの出力と依存は `plugin/build/`（git 管理外）。プラグインを `Common Files\VST3` などシステムの場所に置かない（実物の DAW での確認は人の許可を取って行う） |
 | 版・リリースノート・`scripts/release-*.mjs` | `node scripts/sync-version.mjs --check`・`node scripts/release-check.mjs`・`pnpm test:unit` |
 | `.github/workflows/` | actionlint |
 | 文書だけ | 書いたコマンド・パス・名前が実在するか、`git diff --check` |
