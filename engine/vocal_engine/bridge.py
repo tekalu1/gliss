@@ -36,7 +36,7 @@ EDIT_TOOLS = frozenset({
     "set_lyrics", "import_lyrics", "set_note_syllable",
     "shift_pitch", "set_pitch_curve", "move_note", "stretch", "move_boundary", "correct_to_guide",
     "set_transition", "split_note", "merge_notes", "apply_plan", "set_connection",
-    "mute_notes", "set_fade", "reset_to_original", "undo", "redo",
+    "mute_notes", "unmute_notes", "set_fade", "reset_to_original", "undo", "redo",
     "add_track", "remove_track", "set_track", "set_guide_track", "set_tempo",
 })
 # 保存・書き出し: ユーザーのファイルを書く（プロジェクトの中の一時ファイル = render_preview などは対象外）。
