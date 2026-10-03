@@ -10,6 +10,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 | テストと素材 | `docs/testing.md` |
 | 配布・自動更新・アドオン・リリース | `docs/release-plan.md` |
 | エンジンの MCP のツール | `engine/docs/MCP.md` |
+| VST3 + ARA 2 プラグイン（`plugin/`） | `docs/ara-plugin.md` |
 | 次にやること | `gh issue list --repo tekalu1/gliss` |
 
 ## 作業開始
@@ -31,7 +32,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 
 ## 構成
 
-`app/`（Electron の画面。ビルド工程なし）・`engine/`（Python のエンジン `vocal_engine`。MCP サーバー）・`scripts/`（版・ビルド・スモーク・リリースの道具）・
+`app/`（Electron の画面。ビルド工程なし）・`engine/`（Python のエンジン `vocal_engine`。MCP サーバー）・`plugin/`（VST3 + ARA 2 プラグイン。C++・CMake）・`scripts/`（版・ビルド・スモーク・リリースの道具）・
 `releases/`（リリースノートの正本）・`docs/`・`assets/logo/`・`.github/workflows/`（`test.yml` と `release.yml`）。中身は `docs/development.md` の「構成」。
 内部の名前は旧称のまま（`vocal_engine`・`VOCAL_ENGINE_*`・`VOCAL_EDITOR_*`・`_ve.wav`。理由は `docs/development.md` の「内部の名前」）。環境変数は旧称と `GLISS_*` が混ざっている。
 文書とコードの issue 番号（「issue #33」など）は、公開前の非公開の旧リポジトリのもの。このリポジトリの issue とは番号が合わない。
@@ -62,6 +63,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 | `engine/` | `<wt>\engine` で pytest（上の「作業開始」）。絞るなら `-k`。MCP のツールを変えたら `engine/docs/MCP.md` も直す |
 | `app/` の画面 | `pnpm test:unit` と、関係する `pnpm exec playwright test tests/<名前>.spec.js` |
 | 配布・更新・アドオン（`electron-builder.yml`・`build/installer.nsh`・`updates*.mjs`・`addons.mjs`・`scripts/build-*.mjs`） | `pnpm test:unit`（`release.spec.js` が NSIS のテンプレートの形を見る）。`pnpm build:engine` → `pnpm dist:dir` → `node scripts/smoke-packaged.mjs`。更新は `node scripts/smoke-update.mjs --old <古い展開版> --new <新しい出力>`、アドオンは `node scripts/build-addon.mjs --all` → `pnpm dist:dir` → `node scripts/smoke-addon.mjs --models <重み>` |
+| `plugin/` | `powershell -NoProfile -File plugin\scripts\test-plugin.ps1`（ビルドと、ARA の TestHost・GlissHostCheck。`-SkipBuild` で流すだけ。詳しくは `docs/ara-plugin.md`）。ビルドの出力と依存は `plugin/build/`（git 管理外）。プラグインを `Common Files\VST3` などシステムの場所に置かない（実物の DAW での確認は人の許可を取って行う） |
 | 版・リリースノート・`scripts/release-*.mjs` | `node scripts/sync-version.mjs --check`・`node scripts/release-check.mjs`・`pnpm test:unit` |
 | `.github/workflows/` | actionlint |
 | 文書だけ | 書いたコマンド・パス・名前が実在するか、`git diff --check` |
