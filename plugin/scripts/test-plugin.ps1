@@ -46,6 +46,9 @@ if (Test-Path $cache) {
 }
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ('gliss-ara-test-' + [System.Diagnostics.Process]::GetCurrentProcess().Id)
 New-Item -ItemType Directory -Force $work | Out-Null
+# The hosts this run started. The leftover checks at the end look only at these and their children, so a run in
+# another worktree at the same time is not counted (or killed).
+$startedPids = New-Object 'System.Collections.Generic.List[int]'
 
 function Invoke-Checked([string]$Exe, [string[]]$ExeArgs, [string]$Name, [hashtable]$Env = @{}) {
     # Run with a timeout; stdout+stderr go to $work\<Name>.log. Returns the exit code (-999 on timeout).
@@ -56,6 +59,7 @@ function Invoke-Checked([string]$Exe, [string[]]$ExeArgs, [string]$Name, [hashta
         $p = Start-Process -FilePath $Exe -ArgumentList $ExeArgs -PassThru -NoNewWindow `
             -RedirectStandardOutput $log -RedirectStandardError ($log + '.err')
         $null = $p.Handle   # keep the handle so ExitCode is readable after exit
+        $startedPids.Add($p.Id)
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
             & taskkill /T /F /PID $p.Id | Out-Null
             return -999
@@ -222,16 +226,17 @@ try {
     }
 }
 finally {
-    # nothing we started may remain
-    $left = Get-Process -Name ARATestHost, GlissARATest, GlissHostCheck, GlissPluginTests -ErrorAction SilentlyContinue
+    # nothing we started may remain (only our hosts: another worktree may be running this script at the same time)
+    $left = @(Get-Process -Name ARATestHost, GlissARATest, GlissHostCheck, GlissPluginTests -ErrorAction SilentlyContinue |
+        Where-Object { $startedPids.Contains($_.Id) })
     foreach ($p in $left) { & taskkill /T /F /PID $p.Id | Out-Null }
-    Report 'no leftover test processes' (-not $left) ("killed=" + @($left).Count)
+    Report 'no leftover test processes' ($left.Count -eq 0) ("killed=" + $left.Count)
 
-    # WebView2 browser processes of the editor (user data folder %TEMP%\GlissARA-<pid>) end shortly after the host quits
+    # WebView2 browser processes of the editor (user data folder %TEMP%\GlissARA-<pid of our host>) end shortly after the host quits
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $webviews = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -match 'GlissARA-\d+' })
+            Where-Object { $_.CommandLine -match 'GlissARA-(\d+)' -and $startedPids.Contains([int]$Matches[1]) })
         if ($webviews.Count -eq 0) { break }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $deadline)
@@ -239,16 +244,15 @@ finally {
     Report 'no leftover WebView2 processes' ($webviews.Count -eq 0) ("killed=" + $webviews.Count)
 
     # Engines started by the plug-in run in a Job Object of the host process and end with it. Engines that other
-    # programs started (an MCP client, the app) are left alone: only new ones whose parent is gone or is our host count.
+    # programs started (an MCP client, the app, a run in another worktree) are left alone: only new ones whose parent is
+    # one of our hosts count (the parent's ID stays on the process after the host has quit).
     if ($null -ne $enginesBefore) {
         $deadline = (Get-Date).AddSeconds(10)
         do {
             $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-            $alive = @{}; foreach ($p in $all) { $alive[[int]$p.ProcessId] = $p.Name }
             $new = @($all | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'vocal_engine\.mcp' -and $enginesBefore -notcontains $_.ProcessId })
-            # ours: the parent is gone or is one of our hosts; plus the children of those (the .venv launcher starts the real python)
-            $ours = @($new | Where-Object { -not $alive.ContainsKey([int]$_.ParentProcessId) -or
-                @('ARATestHost.exe', 'GlissARATest.exe', 'GlissHostCheck.exe') -contains $alive[[int]$_.ParentProcessId] })
+            # ours: the parent is one of our hosts; plus the children of those (the .venv launcher starts the real python)
+            $ours = @($new | Where-Object { $startedPids.Contains([int]$_.ParentProcessId) })
             $oursIds = @($ours | ForEach-Object { [int]$_.ProcessId })
             $engines = @($ours) + @($new | Where-Object { $oursIds -contains [int]$_.ParentProcessId })
             if ($engines.Count -eq 0) { break }
