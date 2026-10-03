@@ -1,7 +1,9 @@
 // トラックビュー（上）。モック `proposal/track-view.html` の設計のとおり（issue #7。`docs/track-view.md` §3）。
 //
-//  - トラックの見出しは 名前・ガイド指定のアイコン・M・S の 4 つだけ。裏の準備（issue #63）がまだの間だけ、名前の右に
-//    小さな印（準備中の輪・待ちの点線の輪・失敗の !）を足す。
+//  - トラックの見出しは 1 段目が 名前・ガイド指定のアイコン・M・S、2 段目が音量のスライダー・パンのノブ（高さ 40 px 未満は
+//    2 段目を畳む）。音量・パンは M／S と同じ聴き比べの操作（再生だけに効く・取り消しの対象外・session に保存）。
+//    見出しとレーンの境目をドラッグして見出しの幅を変える（140〜360 px。state.json の view に保存）。
+//    裏の準備（issue #63）がまだの間だけ、名前の右に小さな印（準備中の輪・待ちの点線の輪・失敗の !）を足す。
 //  - クリップ（音声ファイル 1 本）をクリック → そのトラックを編集対象にして、クリックした所の歌っている
 //    かたまり（無ければクリップ全体）を下に出す。レーンを横にドラッグ → その範囲に下がズーム（ドラッグ中も追従）。
 //    トラック名のクリック → 表示範囲はそのまま、編集対象だけ切り替え。伴奏はクリックしても再生位置が動くだけ。
@@ -30,16 +32,24 @@ import {
   spanOf, timelineRange, totalSec,
 } from './state.js';
 import { onPlayhead, onRender, render, renderToolbar } from './draw.js';
-import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setTrack } from './session.js';
+import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setMix, setTrack } from './session.js';
 import { enqueue, handleEngineError, refresh, setHistoryHandler, wake } from './edits.js';
 import { dropBuffers, play, stop } from './audio.js';
 import { closeMenu, openClipMenu, openRulerMenu, openTrackMenu } from './menus.js';
 import { wheelAction } from './commands.js';
 import { G, currentDiv, snapStep, snapTime, tempo, ticks, timeSnapOn } from './grid.js';
+import {
+  GAIN_MAX_DB, GAIN_MIN_DB, dbToPos, fmtDb, fmtPan, gainOf, knobSvg, panFromUi, panOf, panSpeech, panUi, posToDb,
+} from './mixer.js';
 
 // トラックの高さ（全トラック共通）。縦ズーム（既定 Ctrl+ホイール。issue #27）で 28〜96 px（v3 §9）
 export const TRACK_H = { MIN: 28, MAX: 96, DEF: 44 };
 let TH = TRACK_H.DEF;
+// 見出しの幅（全体で 1 つ。曲ごとではなく表示の設定）。上限はトラックビューの幅の 40% まで
+export const HEAD_W = { MIN: 140, MAX: 360, DEF: 160, NARROW: 150, RATIO: 0.4 };
+let HW = HEAD_W.DEF;
+const SHORT_H = 40;         // これ未満の高さでは 2 段目（音量・パン）を畳む
+const MIX_DBL_MS = 400;     // 音量・パンの 2 回押し（既定値に戻す）の間隔
 const RH = 20;              // ルーラーの高さ
 const CLIP_T = 4;           // クリップの上端（行の中）
 const clipH = () => TH - 7;
@@ -60,6 +70,8 @@ let lanes = null;
 let ruler = null;
 let split = null;
 let tvBody = null;
+let hsz = null;
+let bub = null;
 let saveView = () => {};
 let onNewTake = () => false;  // 新しく足したテイクを編集対象にしたとき（最初の発声に寄せる。main.js）
 let laneW = 1000;
@@ -76,6 +88,8 @@ let tvView = null;          // 上の表示範囲 { t0, span }（秒。issue #39
 let tvDir = null;           // tvView を決めたプロジェクト（別のプロジェクトを開いたら全体表示に戻す）
 let pendingOrder = null;    // 見出しのドラッグで決めた並び（id の配列。当たるまでこの並びで描く。issue #38）
 let hd = null;              // 見出しのドラッグ（並び替え）
+let mixDrag = null;         // 音量・パンのドラッグ { id, kind }（見出しは描き直すので、window で追う）
+let lastMix = { key: '', t: 0, x: 0, y: 0 };
 let suppressClick = false;  // 並び替えのドラッグの後の click は名前のクリック（編集対象の切り替え）にしない
 const overviews = new Map(); // トラック id → JSON メタと Int8 波形（セッションが変わったら捨てる）
 const waveCache = new Map();
@@ -281,20 +295,69 @@ function headsHtml() {
   return rows().map((t, i) => {
     const cur = t.id === S.session?.current;
     const cls = `th ${t.kind}${cur ? ' cur' : ''}${audible(t) ? '' : ' off'}`;
+    const nm = esc(t.name);
     const g = t.kind === 'vocal'
       ? `<button class="g" data-act="guide" aria-pressed="${!!t.guide}" title="${t.guide ? 'ガイドを外す' : 'このトラックをガイドにする'}" aria-label="ガイド">${ICON_GUIDE}</button>`
       : '<span class="gx"></span>';
     const pp = t.kind === 'vocal' ? `<span class="pp" data-pp="${esc(t.id)}"></span>` : '';
-    return `<div class="${cls}" data-i="${i}" data-id="${esc(t.id)}"><span class="nm" title="${esc(t.path || t.name)}">${esc(t.name)}</span>${pp}${g}`
-      + `<button data-act="m" aria-pressed="${!!t.mute}" title="ミュート" aria-label="ミュート">M</button>`
-      + `<button data-act="s" aria-pressed="${!!t.solo}" title="ソロ" aria-label="ソロ">S</button></div>`;
+    const db = gainOf(t); const pan = panOf(t);
+    const dragging = (k) => (mixDrag && mixDrag.id === t.id && mixDrag.kind === k ? ' drag' : '');
+    const pct = (dbToPos(db) * 100).toFixed(2);
+    // 高さが小さくて 2 段目を畳んでいる間は、値を名前のツールチップに出す
+    const tip = `${esc(t.path || t.name)} — 音量 ${fmtDb(db)} dB・パン ${fmtPan(pan)}`;
+    const r1 = `<div class="r1"><span class="nm" title="${tip}">${nm}</span>${pp}${g}`
+      + `<button data-act="m" aria-pressed="${!!t.mute}" title="ミュート" aria-label="${nm} のミュート">M</button>`
+      + `<button data-act="s" aria-pressed="${!!t.solo}" title="ソロ" aria-label="${nm} のソロ">S</button></div>`;
+    const r2 = '<div class="r2">'
+      + `<div class="vol${dragging('vol')}" data-mix="vol" role="slider" tabindex="0" aria-label="${nm} の音量" aria-valuemin="${GAIN_MIN_DB}" aria-valuemax="${GAIN_MAX_DB}" aria-valuenow="${db}" aria-valuetext="${fmtDb(db)} dB" title="音量 ${fmtDb(db)} dB（ダブルクリックで 0 dB・Shift で細かく）">`
+      + `<i class="tr"></i><i class="fi" style="width:${pct}%"></i><i class="z" style="left:80%"></i><i class="kn" style="left:${pct}%"></i></div>`
+      + `<span class="vv${Math.abs(db) > 0.04 ? ' chg' : ''}">${fmtDb(db)}</span>`
+      + `<div class="pan${dragging('pan')}" data-mix="pan" role="slider" tabindex="0" aria-label="${nm} のパン" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="${panUi(pan)}" aria-valuetext="${panSpeech(pan)}" title="パン ${fmtPan(pan)}（上下にドラッグ・ダブルクリックで中央）">${knobSvg(pan)}</div></div>`;
+    return `<div class="${cls}" data-i="${i}" data-id="${esc(t.id)}">${r1}${r2}</div>`;
   }).join('');
+}
+
+// ---------------------------------------------------------------- 見出しの幅
+/** 見出しの幅の上限（360 px と、トラックビューの幅の 40% の小さいほう。下限の 140 px は割らない）。 */
+function maxHeadW() {
+  const w = tv?.getBoundingClientRect().width || 0;
+  return Math.max(HEAD_W.MIN, w > 0 ? Math.min(HEAD_W.MAX, Math.floor(w * HEAD_W.RATIO)) : HEAD_W.MAX);
+}
+/** 今の見出しの幅（覚えている幅を、いまのトラックビューの幅に収めたもの）。 */
+export function headWidth() { return Math.round(clamp(HW, HEAD_W.MIN, maxHeadW())); }
+/** 覚えている幅（state.json の view に保存する値）。 */
+export function savedHeadWidth() { return HW; }
+
+function applyHeadW() {
+  if (!tv) return;
+  const w = headWidth();
+  tv.style.setProperty('--hw', `${w}px`);
+  tv.classList.toggle('narrow', w < HEAD_W.NARROW);
+  tv.classList.toggle('short', TH < SHORT_H);
+  if (hsz) {
+    hsz.setAttribute('aria-valuemin', String(HEAD_W.MIN));
+    hsz.setAttribute('aria-valuemax', String(maxHeadW()));
+    hsz.setAttribute('aria-valuenow', String(w));
+    hsz.setAttribute('aria-valuetext', `${w} px`);
+  }
+}
+
+/** 見出しの幅を決める（140〜360 px・トラックビューの幅の 40% まで）。save: 表示の設定として覚える。 */
+export function setHeadWidth(w, { save = true } = {}) {
+  const v = Math.round(clamp(+w || HEAD_W.DEF, HEAD_W.MIN, HEAD_W.MAX));
+  const changed = v !== HW;
+  HW = v;
+  lastSig = '';
+  renderTracks();
+  if (changed && save) saveView();
+  return headWidth();
 }
 
 export function renderTracks() {
   if (!lanes) return;
   layout();
   if (!S.tracks.length) return;
+  applyHeadW();                       // 見出しの幅を先に決める（レーンの幅はそのあとで測る）
   laneW = Math.max(50, lanes.getBoundingClientRect().width || 1000);
   // 上の目盛り: タイムライン（ドラッグ中の見かけの位置を含む）＋後ろに 4% の余白（DAW の曲の終わりの後の空き）。
   // 同じトラックの並びの間は広がるだけ（自動では縮めない）。ドラッグ中も同じ規則で決めるので、
@@ -315,7 +378,13 @@ export function renderTracks() {
   range = tvView ? [tvView.t0, tvView.t0 + tvView.span] : autoRange;
   const hh = headsHtml();
   // 名前の入力中は見出しを作り直さない（入力欄が消える）
-  if (hh !== lastHeads && !renaming) { heads.innerHTML = hh; lastHeads = hh; paintPrep(true); }
+  if (hh !== lastHeads && !renaming) {
+    const keep = focusedMix();
+    heads.innerHTML = hh;
+    lastHeads = hh;
+    paintPrep(true);
+    if (keep) heads.querySelector(`.th[data-id="${CSS.escape(keep.id)}"] [data-mix="${keep.kind}"]`)?.focus({ preventScroll: true });
+  }
   heads.style.setProperty('--th', `${TH}px`);
   const vr = viewRange();
   const sig = JSON.stringify([laneW, TH, range, vr, S.loop, S.session?.current, S.session?.guide,
@@ -1211,6 +1280,7 @@ function onHeadsClick(e) {
   if (suppressClick) { suppressClick = false; return; }     // 並び替えのドラッグの後
   const th = e.target.closest('.th');
   if (!th) return;
+  if (e.target.closest('.vol, .pan')) return;                // 音量・パン（押したときに値を決める。名前のクリックではない）
   const t = S.tracks.find((x) => x.id === th.dataset.id);
   if (!t) return;
   const b = e.target.closest('button');
@@ -1236,6 +1306,186 @@ async function toggle(t, key) {
   }
 }
 
+// ---------------------------------------------------------------- 音量・パン（見出しの 2 段目）
+// M／S と同じ聴き比べの操作: その場で音に当て（再生中も）、取り消しの履歴には入れず、session に保存する（session.js setMix）。
+// 値を変えると見出しを作り直すので、ドラッグは window で追う。2 回押しは押下の間隔で見る（dblclick は作り直しで届かない）。
+
+/** 音量・パンを当てる（変わらなければ何もしない）。エンジンへの保存の失敗は状態行に出す。 */
+function mix(t, patch) {
+  if (Object.keys(patch).every((k) => t[k] === patch[k])) return Promise.resolve(false);
+  return setMix(t.id, patch).catch(async (err) => {
+    const handled = (err.conflict || err.preparing) && await enqueue(() => handleEngineError(err));
+    if (!handled) status(`音量・パンを保存できなかった: ${err.message}`);
+    return false;
+  });
+}
+
+/** 描き直しでフォーカスが外れないように、フォーカスしているスライダーを覚える。 */
+function focusedMix() {
+  const a = document.activeElement;
+  if (!a || !heads.contains(a) || !a.dataset?.mix) return null;
+  const id = a.closest('.th')?.dataset.id;
+  return id ? { id, kind: a.dataset.mix } : null;
+}
+
+const mixEl = (id, kind) => heads.querySelector(`.th[data-id="${CSS.escape(id)}"] [data-mix="${kind}"]`);
+
+/** ドラッグ中の値の吹き出し（スライダーのつまみ・ノブの上。x/y はトラックビューの中の位置）。 */
+function showBub(text, x, y) {
+  if (!bub) return;
+  bub.hidden = false;
+  bub.textContent = text;
+  const w = bub.offsetWidth; const tw = tv.getBoundingClientRect().width;
+  bub.style.left = `${Math.round(clamp(x, w / 2 + 2, Math.max(w / 2 + 2, tw - w / 2 - 2)))}px`;
+  bub.style.top = `${Math.round(y)}px`;
+}
+function hideBub() { if (bub) bub.hidden = true; }
+
+function showMixBub(t, kind) {
+  const el = mixEl(t.id, kind);
+  if (!el) return;
+  const r = el.getBoundingClientRect(); const tr = tv.getBoundingClientRect();
+  if (kind === 'vol') {
+    const db = gainOf(t);
+    showBub(`${fmtDb(db)} dB`, r.left + dbToPos(db) * r.width - tr.left, r.top - tr.top - 3);
+  } else {
+    showBub(fmtPan(panOf(t)), r.left + r.width / 2 - tr.left, r.top - tr.top - 3);
+  }
+}
+
+function resetMix(t, kind) {
+  if (kind === 'vol') { mix(t, { gain_db: 0 }); status(`${t.name}: 音量を 0 dB に戻した`); }
+  else { mix(t, { pan: 0 }); status(`${t.name}: パンを中央に戻した`); }
+}
+
+function onMixDown(e) {
+  if (e.button !== 0) return;
+  const el = e.target.closest('.vol, .pan');
+  if (!el) return;
+  const t = S.tracks.find((x) => x.id === el.closest('.th')?.dataset.id);
+  if (!t || mixDrag) return;
+  e.preventDefault();
+  closeMenu();
+  el.focus({ preventScroll: true });
+  const kind = el.classList.contains('vol') ? 'vol' : 'pan';
+  const now = performance.now();
+  const key = `${kind}:${t.id}`;
+  const dbl = lastMix.key === key && now - lastMix.t < MIX_DBL_MS && Math.hypot(e.clientX - lastMix.x, e.clientY - lastMix.y) < 8;
+  lastMix = { key, t: dbl ? 0 : now, x: e.clientX, y: e.clientY };
+  if (dbl) { resetMix(t, kind); return; }
+  mixDrag = { id: t.id, kind };
+  let apply;
+  let jump = false;                                       // つまみ以外を押した（その位置の値にする）
+  if (kind === 'vol') {
+    const r = el.getBoundingClientRect();
+    // 押した所へ跳ばない: つまみの上ならそこからの差で、つまみ以外ならそこへ移してそこからの差で動かす（Shift で 1/10）
+    let pos = dbToPos(gainOf(t));
+    if (Math.abs(e.clientX - (r.left + pos * r.width)) > 6) { pos = clamp((e.clientX - r.left) / r.width, 0, 1); jump = true; }
+    let last = e.clientX;
+    apply = (ev) => {
+      if (ev) {
+        pos = clamp(pos + (ev.clientX - last) / r.width * (ev.shiftKey ? 0.1 : 1), 0, 1);
+        last = ev.clientX;
+      }
+      let db = posToDb(pos);
+      if (!(ev && ev.shiftKey) && db > -0.15 && db < 0.15) db = 0;     // 0 dB に吸い付く（Shift の間は吸い付かない）
+      mix(t, { gain_db: db });
+    };
+  } else {
+    // 上下（上 = 右）にドラッグ。横に動かしても効く。1 px = 1。Shift で 1/10。中央の ±2 に吸い付く
+    let val = panUi(panOf(t)); let ly = e.clientY; let lx = e.clientX;
+    apply = (ev) => {
+      if (!ev) return;                                    // 押しただけでは変えない
+      val = clamp(val + ((ly - ev.clientY) + (ev.clientX - lx)) * (ev.shiftKey ? 0.1 : 1), -100, 100);
+      ly = ev.clientY; lx = ev.clientX;
+      const fine = ev.shiftKey;
+      mix(t, { pan: Math.abs(val) < 2 && !fine ? 0 : panFromUi(fine ? Math.round(val * 10) / 10 : Math.round(val)) });
+    };
+  }
+  const refresh = () => { renderTracks(); showMixBub(t, kind); };
+  const mv = (ev) => {
+    if (buttonReleased(ev)) { up(); return; }            // 離したことが届いていない（state.js）
+    apply(ev);
+    refresh();
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', mv);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('pointercancel', up);
+    mixDrag = null;
+    hideBub();
+    lastHeads = '';                                       // つまみの「ドラッグ中」の見た目を外す
+    renderTracks();
+  };
+  window.addEventListener('pointermove', mv);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('pointercancel', up);
+  if (jump) apply(null);
+  lastHeads = '';
+  refresh();
+}
+
+/** キー: 音量は ←→（↑↓）で 0.5 dB・Shift で 0.1 dB・Home で 0 dB・End で −∞。パンは 5・Shift で 1・Home で中央。 */
+function onMixKey(e) {
+  const el = e.target.closest?.('.vol, .pan');
+  if (!el || e.ctrlKey || e.metaKey || e.altKey) return;
+  const t = S.tracks.find((x) => x.id === el.closest('.th')?.dataset.id);
+  if (!t) return;
+  const dir = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+  if (el.classList.contains('vol')) {
+    if (dir) mix(t, { gain_db: clamp(Math.round((gainOf(t) + dir * (e.shiftKey ? 0.1 : 0.5)) * 10) / 10, GAIN_MIN_DB, GAIN_MAX_DB) });
+    else if (e.key === 'Home') mix(t, { gain_db: 0 });
+    else if (e.key === 'End') mix(t, { gain_db: GAIN_MIN_DB });
+    else return;
+  } else if (dir) {
+    mix(t, { pan: panFromUi(clamp(panUi(panOf(t)) + dir * (e.shiftKey ? 1 : 5), -100, 100)) });
+  } else if (e.key === 'Home') {
+    mix(t, { pan: 0 });
+  } else return;
+  e.preventDefault();
+  e.stopPropagation();                                   // ←→ はノートの移動・再生位置のコマンドに渡さない
+}
+
+// ---------------------------------------------------------------- 見出しの幅の境目
+function installHeadSize() {
+  hsz.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    closeMenu();
+    hsz.classList.add('on');
+    const x0 = e.clientX; const w0 = headWidth();
+    const mv = (ev) => {
+      if (buttonReleased(ev)) { up(); return; }
+      const w = setHeadWidth(Math.min(w0 + ev.clientX - x0, maxHeadW()));
+      showBub(`${w} px`, w, 16);
+    };
+    const up = () => {
+      hsz.classList.remove('on');
+      hideBub();
+      window.removeEventListener('pointermove', mv);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+    };
+    window.addEventListener('pointermove', mv);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', up);
+    showBub(`${w0} px`, w0, 16);
+  });
+  hsz.addEventListener('dblclick', () => {
+    setHeadWidth(HEAD_W.DEF);
+    status(`見出しの幅を既定（${HEAD_W.DEF} px）に戻した`);
+  });
+  hsz.addEventListener('keydown', (e) => {
+    const d = { ArrowLeft: -10, ArrowRight: 10 }[e.key];
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (d) setHeadWidth(headWidth() + d);
+    else if (e.key === 'Home') setHeadWidth(HEAD_W.DEF);
+    else return;
+    e.preventDefault();
+    e.stopPropagation();
+  });
+}
+
 // ---------------------------------------------------------------- 並び順（見出しのドラッグ。issue #38）
 const ORDER_PX = 4;         // これだけ縦に動いたら並び替えのドラッグ（それまではクリック）
 
@@ -1247,7 +1497,7 @@ function moved(order, id, to) {
 }
 
 function onHeadsDown(e) {
-  if (e.button !== 0 || e.target.closest('button, input')) return;
+  if (e.button !== 0 || e.target.closest('button, input, .vol, .pan')) return;
   const th = e.target.closest('.th');
   if (!th) return;
   const R = rows();
@@ -1485,6 +1735,8 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   ruler = $('#tvRuler');
   split = $('#split');
   tvBody = $('#tvBody');
+  hsz = $('#hsz');
+  bub = $('#tvBub');
   saveView = onViewChanged || (() => {});
   onNewTake = newTake || (() => false);
   lanes.addEventListener('pointerdown', onLaneDown);
@@ -1494,6 +1746,8 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   lanes.addEventListener('lostpointercapture', onLaneLost);   // pointerup の後は dr が無いので何もしない
   ruler.addEventListener('pointerdown', onRulerDown);
   heads.addEventListener('click', onHeadsClick);
+  heads.addEventListener('pointerdown', onMixDown);
+  heads.addEventListener('keydown', onMixKey);
   heads.addEventListener('pointerdown', onHeadsDown);
   heads.addEventListener('pointermove', onHeadsMove);
   window.addEventListener('pointerup', onHeadsUp);
@@ -1503,6 +1757,7 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   lanes.addEventListener('contextmenu', onLanesContext);
   ruler.addEventListener('contextmenu', openRulerMenu);
   installSplit();
+  installHeadSize();
   tvBody.addEventListener('wheel', onTvWheel, { passive: false });
   onRender(renderTracks);
   onPlayhead(moveHead);
@@ -1523,7 +1778,7 @@ export function tracksState() {
   } : null;
   return {
     range: [...range], laneW, height: tvHeight(), collapsed, fit: fitH(), frame: fr, trackH: TH,
-    view: tracksView(), order: rows().map((t) => t.id), pendingOrder: pendingOrder ? [...pendingOrder] : null,
+    view: tracksView(), headW: headWidth(), savedHeadW: savedHeadWidth(), order: rows().map((t) => t.id), pendingOrder: pendingOrder ? [...pendingOrder] : null,
     scrollTop: tvBody?.scrollTop || 0,
     clips: rows().map((t, i) => {
       const c = lanes?.querySelector(`[data-clip="${CSS.escape(t.id)}"]`);
@@ -1531,6 +1786,7 @@ export function tracksState() {
     }),
     heads: [...(heads?.querySelectorAll('.th') || [])].map((el) => ({
       id: el.dataset.id, cur: el.classList.contains('cur'), off: el.classList.contains('off'),
+      gain: +el.querySelector('.vol')?.getAttribute('aria-valuenow'), pan: +el.querySelector('.pan')?.getAttribute('aria-valuenow'),
       guide: el.querySelector('.g')?.getAttribute('aria-pressed') === 'true',
       prep: el.querySelector('.pp')?.dataset.state || null,
       prepTip: el.querySelector('.pp')?.title || null,
