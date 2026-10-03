@@ -124,12 +124,13 @@ def test_every_tool_is_classified():
     assert len(names) == len(set(names))
     for f in m.TOOLS:
         n = f.__name__
-        groups = [n in bridge.EDIT_TOOLS, n in bridge.SAVE_TOOLS, n in bridge.CONDITIONAL_TOOLS, n in free]
+        groups = [n in bridge.EDIT_TOOLS, n in bridge.SAVE_TOOLS, n in bridge.CONDITIONAL_TOOLS, n in free,
+                  n in bridge.ARA_TOOLS]
         assert sum(groups) == 1, "%s は bridge.py のどこにも（か 2 か所に）入っている" % n
         if "author" in inspect.signature(f).parameters and n not in ("open_project", "new_project", "load_project"):
             assert n in bridge.EDIT_TOOLS, n
     assert bridge.EDIT_TOOLS <= set(names) and bridge.SAVE_TOOLS <= set(names)
-    assert bridge.CONDITIONAL_TOOLS <= set(names)
+    assert bridge.CONDITIONAL_TOOLS <= set(names) and bridge.ARA_TOOLS <= set(names)
 
 
 # ---------------------------------------------------------------- 許可（AI 側のプロセス）

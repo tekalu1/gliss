@@ -2,7 +2,8 @@
 """画面（Gliss）と AI 側のエンジンの橋渡し（`bridge.json`）。
 
 画面が起動するエンジンと、Claude Code などの AI が起動するエンジンは**別のプロセス**。
-画面は自分のエンジンに `GLISS_CLIENT=app` を渡す。それ以外のプロセス（= AI）は、
+画面は自分のエンジンに `GLISS_CLIENT=app` を渡す（DAW の ARA プラグインが起動するエンジンは `GLISS_CLIENT=ara`。
+画面と同じく許可に従わない）。それ以外のプロセス（= AI）は、
 画面が書いた `bridge.json` を**ツールを呼ぶたびに**読み、次の 2 つに従う:
 
 - `allow`: AI に許すこと。`edit`（編集。既定 true）/ `save`（保存・書き出し。既定 false）。
@@ -23,6 +24,9 @@
 ```
 
 どのツールが「編集」「保存・書き出し」に入るかは `EDIT_TOOLS` / `SAVE_TOOLS` / `category()`（一覧は docs/MCP.md §4-1）。
+
+`bridge.json` は画面（`app/ai-connect.mjs`）が書き、エンジンは読むだけ。DAW の ARA プラグインのエンジン（`ara`）の曲は
+`bridge.json` に載らないので、AI の `load_project()` はプラグインの曲を開かない。
 """
 import json
 import os
@@ -45,13 +49,30 @@ SAVE_TOOLS = frozenset({"save_project", "export_wav", "prepare_asr_model"})
 # 引数しだいで入るもの（category() が決める）: close_project(discard=True) は編集、
 # render_region(path=…) / export_view_data(path=…) / render_preview(name=<パス>) は保存・書き出し
 CONDITIONAL_TOOLS = frozenset({"close_project", "render_region", "export_view_data", "render_preview"})
+# DAW の ARA プラグインのエンジン専用（mcp_ara.py）。AI のプロセスからは許可に関係なく断る
+# （プラグインの作業場所を別のプロセスから書き換えない。AI からプラグインの曲は触らない）
+ARA_TOOLS = frozenset({"ara_open", "ara_set_modification", "ara_remove_modification", "ara_sync",
+                       "ara_render_dirty", "ara_revs", "ara_archive", "ara_restore"})
 
 LABELS = {"edit": "編集", "save": "保存・書き出し"}
 
 
+TRUSTED_CLIENTS = ("app", "ara")    # 許可に従わないクライアント（画面・DAW の ARA プラグイン）
+
+
+def client():
+    """エンジンを起動したクライアント（`GLISS_CLIENT`。"app" = 画面 / "ara" = DAW のプラグイン / "" = AI など）。"""
+    return os.environ.get(CLIENT_ENV, "").strip().lower()
+
+
 def is_app():
-    """画面（Gliss）が起動したエンジンか。"""
-    return os.environ.get(CLIENT_ENV, "").strip().lower() == "app"
+    """画面（Gliss）か DAW の ARA プラグインが起動したエンジンか（AI の許可に従わない）。"""
+    return client() in TRUSTED_CLIENTS
+
+
+def is_ara():
+    """DAW の ARA プラグインが起動したエンジンか。"""
+    return client() == "ara"
 
 
 def path():
@@ -106,6 +127,9 @@ def denied(name, args=None):
     """AI のプロセスで、許していないツールなら返り値（dict）。許していれば None。画面のプロセスは常に None。"""
     if is_app():
         return None
+    if name in ARA_TOOLS:
+        return {"ok": False, "tool": name, "permission": "ara",
+                "error": "%s は DAW の Gliss（ARA プラグイン）のエンジン専用" % name}
     cat = category(name, args)
     if cat is None or allow()[cat]:
         return None
@@ -114,5 +138,6 @@ def denied(name, args=None):
                      % (LABELS[cat], LABELS[cat])}
 
 
-__all__ = ["BRIDGE_ENV", "CLIENT_ENV", "CONDITIONAL_TOOLS", "EDIT_TOOLS", "SAVE_TOOLS", "allow",
-           "category", "denied", "is_app", "path", "project", "read"]
+__all__ = ["ARA_TOOLS", "BRIDGE_ENV", "CLIENT_ENV", "CONDITIONAL_TOOLS", "EDIT_TOOLS", "SAVE_TOOLS",
+           "TRUSTED_CLIENTS", "allow",
+           "category", "client", "denied", "is_app", "is_ara", "path", "project", "read"]
