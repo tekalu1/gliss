@@ -5,7 +5,7 @@
 namespace gliss
 {
 
-/** 画面の設定（表示範囲・キー・グリッドなど）の置き場 plugin-state.json（design-stage23 §1-1 の saveState）。
+/** 画面の設定（表示範囲・キー・グリッドなど）の置き場 plugin-state.json（DocumentBridge::saveState が書く）。
     単体アプリの state.json とは別のファイル（同時に書いて壊さない）。WebView2 の userDataFolder は一時なので localStorage には置かない。 */
 namespace pluginstate
 {

@@ -15,7 +15,7 @@
 namespace gliss
 {
 
-/** 編集を当てた音を返す PlaybackRenderer（design-stage23 §4-3）。
+/** 編集を当てた音を返す PlaybackRenderer（docs/ara-plugin.md の「再生」）。
 
     - オーディオスレッドはキャッシュ（AudioModification ごとの EditedPcm のスナップショット）を読むだけ。
       IPC・再合成・ホストの音の読み出し・確保・ロック待ちをしない。キャッシュの無い区間は原音。

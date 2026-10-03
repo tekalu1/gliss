@@ -24,7 +24,7 @@ bool shouldSyncAfter (const juce::String& tool, const juce::var& result);
 
 /** 試験用の口 GLISS_TEST_EDIT の中身（エンジンにつないで解析が済んだら、最初の修飾に 1 回だけ当てる編集）。
     受ける形: {"tool": "shift_pitch", "args": {...}} ／ shift_pitch の引数そのもの {"cents": 100, "start_sec": 0, "end_sec": 5} ／
-    "shift_pitch:<note_id>:<cents>"（design-stage23 §6-1 の書き方）。 */
+    "shift_pitch:<note_id>:<cents>"（docs/ara-plugin.md の「検証用の環境変数」）。 */
 struct TestEdit
 {
     juce::String tool;

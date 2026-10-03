@@ -14,7 +14,7 @@ struct ModificationArchive
     juce::var archive;   // エンジンの Project.to_archive()（編集リスト）。まだ無ければ void（null で書く）
 };
 
-/** DAW のソングに保存するもの（ARA のアーカイブ。design-stage23 §4-5）。解析のキャッシュは入れない（作業場所に持つ）。
+/** DAW のソングに保存するもの（ARA のアーカイブ。docs/ara-plugin.md の「編集の単位・保存」）。解析のキャッシュは入れない（作業場所に持つ）。
 
     { "format": "gliss-ara", "version": 1,
       "document": { "work_key": "<作業場所の鍵>", "guide": "<ガイドの修飾の persistentID>" | null },

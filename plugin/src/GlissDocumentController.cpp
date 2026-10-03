@@ -355,7 +355,7 @@ void GlissDocumentController::notifyContentChanged (const juce::StringArray& ara
 }
 
 //==============================================================================
-// アーカイブ（design-stage23 §4-5）。編集リストだけを書く（解析のキャッシュは作業場所に持つ）。
+// アーカイブ（docs/ara-plugin.md の「編集の単位・保存」）。編集リストだけを書く（解析のキャッシュは作業場所に持つ）。
 bool GlissDocumentController::doStoreObjectsToStream (juce::ARAOutputStream& output, const juce::ARAStoreObjectsFilter* filter) noexcept
 {
     // エンジンが動いていれば最新の編集を取り直す（ara_archive はエンジンのロックを取らないので、解析の最中も待たない）。

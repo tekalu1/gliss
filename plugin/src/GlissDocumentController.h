@@ -29,7 +29,7 @@ struct RenderContext
     virtual bool isSyncSettled() const noexcept = 0;
 };
 
-/** 編集の単位（plan.md「編集の単位」）。エンジンのボーカルのトラック 1 本（ara_id = persistentID）。
+/** 編集の単位（docs/ara-plugin.md の「編集の単位・保存」）。エンジンのボーカルのトラック 1 本（ara_id = persistentID）。
     編集を当てた音のキャッシュ（EditedPcm）を持つ。同じ修飾の複数のリージョンは同じキャッシュを読む。 */
 class GlissAudioModification final : public juce::ARAAudioModification
 {
@@ -49,7 +49,7 @@ private:
     juce::String cloneSourceId;
 };
 
-/** DocumentController の実装（design-stage23 §3・§4・§2-5）。エンジン（DocumentSync の McpClient）を 1 本持ち、
+/** DocumentController の実装（docs/ara-plugin.md の「エンジンとの同期」「編集の単位・保存」「再生」）。エンジン（DocumentSync の McpClient）を 1 本持ち、
     ARA の出来事をエンジンに伝え、編集を当てた音を再生のキャッシュに置き、DAW のソングに編集リストを保存する。
     エディタ（C4）には DocumentBridge として見せる。 */
 class GlissDocumentController final : public juce::ARADocumentControllerSpecialisation,

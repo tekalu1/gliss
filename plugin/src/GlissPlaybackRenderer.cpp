@@ -11,7 +11,7 @@ namespace
 /** ホストが「リアルタイムでない」描画のときに、原音の先読みの完了を待つ上限（ミリ秒）。 */
 constexpr int offlineReadTimeoutMs = 500;
 
-/** 非リアルタイムの描画で、同期の完了を待つ上限（prepareToPlay ごと。design-stage23 §4-3）。 */
+/** 非リアルタイムの描画で、同期の完了を待つ上限（prepareToPlay ごと。docs/ara-plugin.md の「再生」）。 */
 constexpr double offlineSyncWaitMs = 10000.0;
 
 /** 先読みの長さ（秒）。 */

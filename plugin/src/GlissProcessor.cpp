@@ -39,7 +39,7 @@ void GlissProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
 {
     juce::ScopedNoDenormals noDenormals;
 
-    // DAW の再生位置を DocumentController に写す（どの役のインスタンスでも。原子変数に書くだけ。design-stage23 §2-5）。
+    // DAW の再生位置を DocumentController に写す（どの役のインスタンスでも。原子変数に書くだけ。docs/ara-plugin.md の「再生」）。
     if (auto* documentController = ARA::PlugIn::PlugInExtension::getDocumentController())
         if (auto* hostPlayHead = getPlayHead())
             if (const auto position = hostPlayHead->getPosition())

@@ -8,7 +8,7 @@ namespace gliss
 {
 
 /** エディタ（WebView2 の画面）がドキュメントに頼む口。C3（GlissDocumentController）が実装し、C4（GlissEditor）が使う。
-    形は scratchpad の design-stage23.md §5 と r1-report.md §2（ara-bridge.js が期待するネイティブ関数・イベント）に合わせる。
+    形は app/renderer/ara-bridge.js（画面が期待するネイティブ関数・イベント）に合わせる（docs/ara-plugin.md の「エディタ」）。
 
     スレッド: すべてメッセージスレッドから呼ぶ。中で待たない。結果は Completion で（メッセージスレッドで）返す。
     値はすべて JSON にできる juce::var。エンジンの {ok:false} も例外にせず値で返す。 */

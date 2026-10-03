@@ -6,9 +6,9 @@ namespace gliss
 {
 
 /** EditorRenderer（編集中の試聴を DAW の出力に足す役）。つかんだノートの試聴（render_audition の WAV）はまだ作っていないので、
-    何も足さない（DocumentBridge::preview は {ok:false}、bootstrap の preview は false）。
+    何も足さない（DocumentBridge::preview は {ok:false}、bootstrap は preview を出さない）。
 
-    作るときの注意（research-products-ux §5.3）: Reaper は PlaybackRenderer と EditorRenderer を同じバッファで順に呼ぶ。
+    作るときの注意（調べた範囲の報告。実物では未確認）: Reaper は PlaybackRenderer と EditorRenderer を同じバッファで順に呼ぶ。
     再生中に鳴らすと二重に鳴るので、止まっているときだけ鳴らす。 */
 class GlissEditorRenderer final : public juce::ARAEditorRenderer
 {

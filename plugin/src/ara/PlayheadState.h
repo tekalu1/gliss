@@ -12,7 +12,7 @@
 namespace gliss
 {
 
-/** DAW の再生位置の写し（design-stage23 §2-5）。 */
+/** DAW の再生位置の写し（docs/ara-plugin.md の「再生」）。 */
 struct PlayheadSnapshot
 {
     bool valid = false;          // 一度でも書かれた

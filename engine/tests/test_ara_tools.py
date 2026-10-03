@@ -66,7 +66,7 @@ def _prep_off():
 
 
 class Cache:
-    """プラグインのキャッシュの真似（design §4-2）: 原音の上に restore → windows を当てる。"""
+    """プラグインのキャッシュの真似（engine/docs/MCP.md §3-4 の「差分の再合成」）: 原音の上に restore → windows を当てる。"""
 
     def __init__(self, path):
         self.orig = sf.read(path, dtype="float32", always_2d=True)[0]

@@ -5,7 +5,7 @@
 // **クラシックのスクリプト**（ES モジュールではない）。C++ が `WebBrowserComponent::Options::withUserScript` で
 // ページのスクリプトより前に差し込む。Electron では読み込まれない（Electron の動きは変わらない）。
 //
-// C++ との口は 3 つ（最終の仕様は scratchpad の r1-report.md と plugin/ の WebResources / GlissEditor）:
+// C++ との口は 3 つ（docs/ara-plugin.md の「エディタ」と、plugin/src/editor の EditorWebView・WebResources）:
 //   - ネイティブ関数（JS → C++、Promise）: JUCE 9.0.3 の `@juce-framework/webview` の `getNativeFunction(name)`。
 //     JUCE が resource provider で配る `/juce/index.js` を **動的 import** して取る（`__juce__invoke` などの内部の形は真似しない）。
 //   - イベント（C++ → JS）: `window.__JUCE__.backend.addEventListener(eventId, fn)`。ページより前に登録するので取りこぼさない。

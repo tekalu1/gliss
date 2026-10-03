@@ -56,7 +56,7 @@ struct SyncModel
     std::vector<SyncModification> modifications;
 };
 
-/** DAW のドキュメント 1 つとエンジン（McpClient 1 本）の間を同期する（design-stage23 §3-2・§3-4・§3-5・§4-2）。
+/** DAW のドキュメント 1 つとエンジン（McpClient 1 本）の間を同期する（docs/ara-plugin.md の「エンジンとの同期」、engine/docs/MCP.md §3-4）。
 
     同期のスレッドが 1 本: エンジンを遅延起動して ara_open → ソースの音を一時 WAV に書いて ara_set_modification
     （アーカイブから戻すものは ara_restore）→ 位置・名前の変化は ara_sync → 外したものは ara_remove_modification →
