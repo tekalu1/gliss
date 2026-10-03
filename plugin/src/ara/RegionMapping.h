@@ -2,21 +2,25 @@
 
 #include <juce_core/juce_core.h>
 
+#include <cmath>
 #include <optional>
 #include <vector>
 
 namespace gliss
 {
 
-/** 1 つの PlaybackRegion の時間（秒）。song はソング（DAW のタイムライン）、mod は AudioModification（= ソース）の秒。
-    Gliss は時間を伸ばさないので、長さは両方で同じ（ずれたら短い方に合わせる）。 */
+/** 1 つの PlaybackRegion の時間（秒）。song はソング、mod は AudioModification の時間。 */
 struct RegionTimes
 {
     juce::String id;
     double songStart = 0.0, songEnd = 0.0;
     double modStart = 0.0, modEnd = 0.0;
 
-    double getLength() const noexcept { return juce::jmin (songEnd - songStart, modEnd - modStart); }
+    double songLength() const noexcept { return songEnd - songStart; }
+    double modLength() const noexcept { return modEnd - modStart; }
+    double scale() const noexcept { return songLength() > 0.0 ? modLength() / songLength() : 0.0; }
+    bool isStretched() const noexcept { return std::abs (scale() - 1.0) > 1.0e-9; }
+    void normalize (bool timestretchEnabled) noexcept { if (! timestretchEnabled) modEnd = modStart + songLength(); }
 
     /** 画面に渡す形 { id, song_start, song_end, mod_start, mod_end }。 */
     juce::var toVar() const;
@@ -50,6 +54,17 @@ struct BlockSlice
     そこに当たるソースの位置。サンプルの位置は ARA と同じ丸め（samplePositionAtTime = floor (t * rate + 0.5)）。
     周波数が同じなら段階 1 と同じ整数の計算（ソースの位置 = ソングの位置 + (修飾の頭 − ソングの頭)）。 */
 BlockSlice sliceBlock (const RegionTimes&, juce::int64 blockStart, int numSamples, double hostRate, double sourceRate);
+
+/** 伸縮したリージョンのソング上の切り出し。startInModification は修飾の時間をホストのサンプルで数えた位置。 */
+struct StretchSlice
+{
+    int destStart = 0;
+    int numSamples = 0;
+    double startInModification = 0.0;
+    bool isEmpty() const noexcept { return numSamples <= 0; }
+};
+
+StretchSlice sliceStretchedBlock (const RegionTimes&, juce::int64 blockStart, int numSamples, double hostRate) noexcept;
 
 /** ARA の samplePositionAtTime と同じ丸め。 */
 juce::int64 samplePosition (double seconds, double rate);

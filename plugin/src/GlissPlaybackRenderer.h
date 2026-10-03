@@ -6,6 +6,7 @@
 #include "GlissDocumentController.h"
 #include "cache/RegionReader.h"
 #include "cache/SourceReader.h"
+#include "cache/StretchReader.h"
 
 #include <atomic>
 #include <map>
@@ -51,6 +52,7 @@ private:
     struct RegionEntry
     {
         RegionReader reader;
+        StretchReader stretch;
         FormatSourceReader* source = nullptr;      // sourceReaders が持つ
         std::shared_ptr<EditedPcm> pcm;            // 修飾と持ち合う（オーディオスレッドでは参照の数を変えない）
         double sourceRate = 0.0;

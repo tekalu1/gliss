@@ -2,9 +2,8 @@
 
 使い方: python verify_render_trace.py <記録のフォルダ>
 
-記録の complete=1 の行ごとに、プラグインが返した音の 0 チャンネルの総和・二乗和が、元の信号の
-[src, src+n) の総和・二乗和と一致するかを見る（SDK の SineAudioFile と同じ式。5 秒・44.1 kHz・1 チャンネル）。
-先読みが間に合わなかった行（complete=0）は比べない。
+1 回目の描画は元の信号と総和・二乗和を厳密に比較する。2 回目は 0.75 倍の時間伸縮なので、
+読み出しがすべて完了し、音のあるブロックがあることを確かめる。
 """
 import sys, re, glob
 import numpy as np
@@ -23,13 +22,24 @@ def pulsed_sine(start, n):
     return value.astype(np.float32).astype(np.float64)
 
 pat = re.compile(r"trace t=(-?\d+) src=(-?\d+) n=(\d+) complete=(\d) sum=(\S+) sumsq=(\S+)")
-checked = bad = incomplete = silent_incomplete = 0
+checked = bad = incomplete = stretched_checked = stretched_incomplete = 0
+stretched_energy = 0.0
 for path in glob.glob(sys.argv[1] + "/gliss-ara-*.log"):
+    pass_index = 0
+    previous_time = -1
     for line in open(path, encoding="utf-8"):
         m = pat.search(line)
         if not m:
             continue
         t, src, n, complete, s, ss = int(m[1]), int(m[2]), int(m[3]), int(m[4]), float(m[5]), float(m[6])
+        if previous_time >= 0 and t < previous_time:
+            pass_index += 1
+        previous_time = t
+        if pass_index:
+            stretched_checked += 1
+            stretched_incomplete += not complete
+            stretched_energy += ss
+            continue
         exp = pulsed_sine(src, n)
         if not complete:
             incomplete += 1
@@ -39,5 +49,6 @@ for path in glob.glob(sys.argv[1] + "/gliss-ara-*.log"):
         if abs(exp.sum() - s) > 1e-5 or abs((exp * exp).sum() - ss) > 1e-5:
             bad += 1
             print("MISMATCH", line.strip(), "expected", exp.sum(), (exp * exp).sum())
-print(f"complete blocks checked={checked} mismatches={bad} incomplete blocks (not compared)={incomplete}")
-sys.exit(1 if bad or checked == 0 else 0)
+print(f"unmodified complete blocks={checked} mismatches={bad} incomplete={incomplete}; "
+      f"stretched blocks={stretched_checked} incomplete={stretched_incomplete} energy={stretched_energy:.3f}")
+sys.exit(1 if bad or checked == 0 or stretched_checked == 0 or stretched_incomplete or stretched_energy <= 1.0 else 0)

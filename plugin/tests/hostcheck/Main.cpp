@@ -23,7 +23,7 @@
 
 namespace
 {
-constexpr auto expectedFactoryID = "io.github.tekalu1.gliss.arafactory.2";
+constexpr auto expectedFactoryID = "io.github.tekalu1.gliss.arafactory.3";
 constexpr auto expectedArchiveID = "io.github.tekalu1.gliss.aradocumentarchive.1";
 
 /** エディタを画面の外に置く窓。 */

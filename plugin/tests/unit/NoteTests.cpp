@@ -172,13 +172,15 @@ public:
             expectEquals (ranged[0].pitchNumber, 65);
         }
 
-        beginTest ("a region longer in the song than in the modification is cut to the shorter length");
+        beginTest ("a stretched region maps note position and duration into song time");
         {
             auto r = regionAt (5.0, 0.0, 1.0);
-            r.songEnd = 9.0;   // ソングでは 4 秒、修飾では 1 秒（Gliss は伸ばさない）
+            r.songEnd = 9.0;   // 修飾の 1 秒をソングの 4 秒へ伸ばす
             const auto out = notes::forRegion (parsed.at ("mod-A"), r);
             expectEquals ((int) out.size(), 1);
-            expectWithinAbsoluteError (out[0].getEnd(), 5.0 + 1.0, 1.0e-12);
+            expectWithinAbsoluteError (out[0].startPosition, 7.0, 1.0e-12);
+            expectWithinAbsoluteError (out[0].noteDuration, 2.0, 1.0e-12);
+            expectWithinAbsoluteError (out[0].getEnd(), 9.0, 1.0e-12);
         }
 
         beginTest ("content comparison tells a changed copy (notification) from the same copy");

@@ -78,6 +78,7 @@ void GlissPlaybackRenderer::prepareToPlay (double sampleRateIn,
 
         auto entry = std::make_unique<RegionEntry>();
         entry->reader.prepare (sampleRate, maximumSamplesPerBlock, juce::jmin (sourceChannels, RegionReader::maxChannels), sourceRate);
+        entry->stretch.prepare (sampleRate, maximumSamplesPerBlock, numChannels, sourceRate);
         entry->source = sourceReader.get();
         entry->pcm = modification->getEditedPcm();
         entry->sourceRate = sourceRate;
@@ -192,20 +193,37 @@ bool GlissPlaybackRenderer::processBlock (juce::AudioBuffer<float>& buffer,
 
         auto& entry = *found->second;
 
-        // ホストの時間（曲の時間）でのリージョンの範囲と、このブロックの重なり。ヘッド・テールは使わない（時間を伸ばさない）。
+        // ホストの時間でのリージョンの範囲と、このブロックの重なり。ヘッド・テールは使わない。
         RegionTimes times;
         times.songStart = region->getStartInPlaybackTime();
         times.songEnd = region->getEndInPlaybackTime();
         times.modStart = region->getStartInAudioModificationTime();
         times.modEnd = region->getEndInAudioModificationTime();
+        times.normalize (region->isTimestretchEnabled());
 
-        const auto slice = regions::sliceBlock (times, timeInSamples, numSamples, sampleRate, entry.sourceRate);
-
-        if (slice.isEmpty())
-            continue;
-
-        const auto complete = entry.reader.readBlock (buffer, slice.destStart, slice.numSamples, slice.startInSource,
-                                                      entry.source, entry.pcm.get(), options);
+        regions::BlockSlice slice;
+        bool complete = false;
+        if (times.isStretched())
+        {
+            const auto stretched = regions::sliceStretchedBlock (times, timeInSamples, numSamples, sampleRate);
+            if (stretched.isEmpty())
+                continue;
+            slice.destStart = stretched.destStart;
+            slice.numSamples = stretched.numSamples;
+            slice.startInSource = regions::samplePosition (stretched.startInModification / sampleRate, entry.sourceRate);
+            complete = entry.stretch.readBlock (buffer, slice.destStart, slice.numSamples,
+                                                timeInSamples + slice.destStart, stretched.startInModification,
+                                                times.scale(), entry.source, entry.pcm.get(), options);
+        }
+        else
+        {
+            // 非伸縮は従来の整数の切り出し・読み出しをそのまま使う。
+            slice = regions::sliceBlock (times, timeInSamples, numSamples, sampleRate, entry.sourceRate);
+            if (slice.isEmpty())
+                continue;
+            complete = entry.reader.readBlock (buffer, slice.destStart, slice.numSamples, slice.startInSource,
+                                               entry.source, entry.pcm.get(), options);
+        }
 
         if (! complete)
             ++incompleteReads;

@@ -34,6 +34,7 @@ target_link_libraries(GlissPluginTests
         juce::juce_audio_formats
         juce::juce_core
         juce::juce_events
+        signalsmith-stretch
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)

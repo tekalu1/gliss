@@ -3,4 +3,5 @@ list(APPEND GLISS_UNIT_SOURCES
     src/cache/EditedPcm.cpp
     src/cache/SourceReader.cpp
     src/cache/RegionReader.cpp
+    src/cache/StretchReader.cpp
 )

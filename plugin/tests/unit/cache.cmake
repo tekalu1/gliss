@@ -2,4 +2,5 @@
 list(APPEND GLISS_UNIT_TESTS
     "${CMAKE_CURRENT_SOURCE_DIR}/AllocationCounter.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/CacheTests.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/StretchTests.cpp"
 )

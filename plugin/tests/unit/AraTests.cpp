@@ -180,6 +180,23 @@ public:
             expect (! regions::modToSong ({}, 1.0).has_value());
         }
 
+        beginTest ("linear stretch and disabled transformation");
+        {
+            auto r = region ("stretch", 10.0, 14.0, 2.0, 5.0);
+            expect (r.isStretched());
+            expectWithinAbsoluteError (r.scale(), 0.75, 1.0e-12);
+            expectWithinAbsoluteError (*regions::songToMod (r, 12.0), 3.5, 1.0e-12);
+            expectWithinAbsoluteError (*regions::modToSong ({ r }, 3.5), 12.0, 1.0e-12);
+            const auto slice = regions::sliceStretchedBlock (r, 10 * 48000 - 32, 128, 48000.0);
+            expectEquals (slice.destStart, 32);
+            expectEquals (slice.numSamples, 96);
+            expectWithinAbsoluteError (slice.startInModification, 2.0 * 48000.0, 1.0e-8);
+            r.normalize (false);
+            expect (! r.isStretched());
+            expectWithinAbsoluteError (r.modEnd, 6.0, 1.0e-12);
+            expectWithinAbsoluteError (*regions::songToMod (r, 12.0), 4.0, 1.0e-12);
+        }
+
         beginTest ("track offset uses the earliest region");
         {
             expect (! regions::trackOffset ({}).has_value());
@@ -187,6 +204,8 @@ public:
             const std::vector<RegionTimes> list { region ("b", 30.0, 32.0, 4.0, 6.0), region ("a", 10.0, 12.0, 2.5, 4.5) };
             expectEquals (regions::representative (list), 1);
             expectWithinAbsoluteError (*regions::trackOffset (list), 7.5, 1.0e-12);
+            expectWithinAbsoluteError (*regions::trackOffset ({ region ("stretch", 10.0, 14.0, 2.0, 5.0) }),
+                                       10.0 - 2.0 / 0.75, 1.0e-12);
         }
 
         beginTest ("block slices at the same rate match the stage-1 renderer");

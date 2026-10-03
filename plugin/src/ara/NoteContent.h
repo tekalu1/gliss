@@ -67,7 +67,7 @@ std::vector<NoteEvent> forModification (const ModificationNotes&, const std::opt
 /** AudioSource（ソースの秒）のノート（解析だけ）。 */
 std::vector<NoteEvent> forSource (const ModificationNotes&, const std::optional<NoteTimeRange>& range = {});
 
-/** PlaybackRegion（ソングの秒）のノート: リージョンの修飾の範囲で切り、ソングの秒に写す（Gliss は時間を伸ばさない）。
+/** PlaybackRegion（ソングの秒）のノート: リージョンの修飾の範囲で切り、伸縮比に従ってソングの秒に写す。
     songRange はソングの秒。 */
 std::vector<NoteEvent> forRegion (const ModificationNotes&, const RegionTimes&, const std::optional<NoteTimeRange>& songRange = {});
 } // namespace notes

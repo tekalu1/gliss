@@ -3,7 +3,7 @@
 #   cmake -S plugin -B plugin/build -G "Visual Studio 17 2022" -A x64
 #   cmake --build plugin/build --config Release --target GlissARA_VST3
 #
-# 依存（JUCE・ARA SDK・WebView2）は FetchContent でタグを固定して plugin/build/_deps に取る。リポジトリには入れない。
+# 依存（JUCE・ARA SDK・WebView2・Signalsmith）は FetchContent で版を固定して plugin/build/_deps に取る。リポジトリには入れない。
 cmake_minimum_required(VERSION 3.22)
 
 # 実行時ライブラリは静的にする（利用者の PC に VC++ 再頒布可能パッケージを要求しない）。project() より前に置く。
@@ -19,6 +19,7 @@ include(FetchContent)
 # ---- 依存（版は docs/ara-plugin.md の表と合わせる） ----
 set(GLISS_JUCE_TAG "9.0.3")
 set(GLISS_ARA_SDK_TAG "releases/2.3.0")
+set(GLISS_STRETCH_TAG "1.4.0")
 set(GLISS_WEBVIEW2_VERSION "1.0.4258.31")
 set(GLISS_WEBVIEW2_SHA256 "56f7f4b8bf9aee4b8efefbbdd4f67d5f74ebd1b100ed0806da71bf76af481aa9")
 
@@ -34,6 +35,11 @@ FetchContent_Declare(ara_sdk
     GIT_SHALLOW TRUE
     GIT_SUBMODULES_RECURSE TRUE)
 
+FetchContent_Declare(signalsmith_stretch
+    GIT_REPOSITORY https://github.com/Signalsmith-Audio/signalsmith-stretch.git
+    GIT_TAG ${GLISS_STRETCH_TAG}
+    GIT_SHALLOW TRUE)
+
 # WebView2 の NuGet パッケージ（静的ライブラリ WebView2LoaderStatic.lib）。JUCE の FindWebView2 は
 # 「*Microsoft.Web.WebView2*」という名前のフォルダを JUCE_WEBVIEW2_PACKAGE_LOCATION の下に探す。
 set(GLISS_NUGET_DIR "${FETCHCONTENT_BASE_DIR}/nuget")
@@ -43,7 +49,8 @@ FetchContent_Declare(webview2
     DOWNLOAD_NAME "Microsoft.Web.WebView2.${GLISS_WEBVIEW2_VERSION}.zip"
     SOURCE_DIR "${GLISS_NUGET_DIR}/Microsoft.Web.WebView2.${GLISS_WEBVIEW2_VERSION}")
 
-FetchContent_MakeAvailable(ara_sdk webview2 juce)
+FetchContent_MakeAvailable(ara_sdk webview2 juce signalsmith_stretch)
+FetchContent_GetProperties(signalsmith-linear)
 
 set(JUCE_WEBVIEW2_PACKAGE_LOCATION "${GLISS_NUGET_DIR}" CACHE PATH "WebView2 の NuGet パッケージを置いた場所" FORCE)
 juce_set_ara_sdk_path("${ara_sdk_SOURCE_DIR}")
@@ -82,9 +89,10 @@ juce_add_plugin(GlissARA
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
     IS_ARA_EFFECT TRUE
-    # DAW に返す解析: ノート（content reader。ホストが解析を頼める）。時間の伸縮などの変形は名乗らない
+    # DAW に返す解析はノート。再生の変形は線形の時間伸縮。
     ARA_ANALYSIS_TYPES kARAContentTypeNotes
-    ARA_FACTORY_ID "\"io.github.tekalu1.gliss.arafactory.2\""
+    ARA_TRANSFORMATION_FLAGS kARAPlaybackTransformationTimestretch
+    ARA_FACTORY_ID "\"io.github.tekalu1.gliss.arafactory.3\""
     ARA_DOCUMENT_ARCHIVE_ID "\"io.github.tekalu1.gliss.aradocumentarchive.1\""
     NEEDS_WEBVIEW2 TRUE
     COPY_PLUGIN_AFTER_BUILD FALSE)
@@ -129,6 +137,7 @@ target_link_libraries(GlissARA
         juce::juce_events
         juce::juce_gui_basics
         juce::juce_gui_extra
+        signalsmith-stretch
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -147,7 +156,7 @@ if(GLISS_BUILD_TESTS)
 endif()
 
 # ---- 配布（scripts/build-plugin.mjs が読む。docs/ara-plugin.md の「配布」） ----
-# 出来た Gliss.vst3 の DLL（Gliss.vst3/Contents/x86_64-win/Gliss.vst3）の場所と、DLL に入れた依存（JUCE・ARA SDK・WebView2）の置き場と版を構成ごとに JSON に書く。
+# 出来た Gliss.vst3 の DLL（Gliss.vst3/Contents/x86_64-win/Gliss.vst3）の場所と、DLL に入れた依存（JUCE・ARA SDK・WebView2・Signalsmith）の置き場と版を構成ごとに JSON に書く。
 # build-plugin.mjs はこれを見て Gliss.vst3 を plugin/build/dist に写し、scripts/third-party-notices.mjs は依存のライセンス文を集める。
 # パスは CMake の形（区切りは /）なので、JSON の中で escape は要らない。
 file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/gliss-plugin-$<CONFIG>.json" CONTENT "{
@@ -157,6 +166,8 @@ file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/gliss-plugin-$<CONFIG>.json" CONTENT "
   \"binary\": \"$<TARGET_FILE:GlissARA_VST3>\",
   \"juce\": { \"version\": \"${GLISS_JUCE_TAG}\", \"dir\": \"${juce_SOURCE_DIR}\" },
   \"araSdk\": { \"version\": \"${GLISS_ARA_SDK_TAG}\", \"dir\": \"${ara_sdk_SOURCE_DIR}\" },
-  \"webview2\": { \"version\": \"${GLISS_WEBVIEW2_VERSION}\", \"dir\": \"${webview2_SOURCE_DIR}\" }
+  \"webview2\": { \"version\": \"${GLISS_WEBVIEW2_VERSION}\", \"dir\": \"${webview2_SOURCE_DIR}\" },
+  \"signalsmithStretch\": { \"version\": \"${GLISS_STRETCH_TAG}\", \"dir\": \"${signalsmith_stretch_SOURCE_DIR}\" },
+  \"signalsmithLinear\": { \"version\": \"0.6.4\", \"dir\": \"${signalsmith-linear_SOURCE_DIR}\" }
 }
 ")

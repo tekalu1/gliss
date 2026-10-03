@@ -38,6 +38,7 @@ RegionTimes timesOf (const juce::ARAPlaybackRegion* region)
     t.songEnd = region->getEndInPlaybackTime();
     t.modStart = region->getStartInAudioModificationTime();
     t.modEnd = region->getEndInAudioModificationTime();
+    t.normalize (region->isTimestretchEnabled());
     return t;
 }
 } // namespace

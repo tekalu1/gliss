@@ -146,13 +146,14 @@ std::vector<NoteEvent> forRegion (const ModificationNotes& m, const RegionTimes&
     if (! m.ready)
         return out;
 
-    const auto length = region.getLength();
+    const auto length = region.modLength();
 
-    if (! (length > 0.0))
+    if (! (length > 0.0) || region.scale() <= 0.0)
         return out;
 
     const auto modStart = region.modStart;
     const auto modEnd = region.modStart + length;
+    const auto scale = region.scale();
     const auto shift = region.songStart - region.modStart;
 
     for (const auto& e : m.notes)
@@ -165,10 +166,20 @@ std::vector<NoteEvent> forRegion (const ModificationNotes& m, const RegionTimes&
             continue;
 
         NoteEvent r = e;
-        r.startPosition = a + shift;
-        r.noteDuration = noteEnd - a;
-        r.signalDuration = juce::jmax (signalEnd - a, r.noteDuration);
-        r.attackDuration = juce::jlimit (0.0, r.noteDuration, e.attackDuration - (a - e.startPosition));
+        if (! region.isStretched())
+        {
+            r.startPosition = a + shift;
+            r.noteDuration = noteEnd - a;
+            r.signalDuration = juce::jmax (signalEnd - a, r.noteDuration);
+            r.attackDuration = juce::jlimit (0.0, r.noteDuration, e.attackDuration - (a - e.startPosition));
+        }
+        else
+        {
+            r.startPosition = region.songStart + (a - modStart) / scale;
+            r.noteDuration = (noteEnd - a) / scale;
+            r.signalDuration = juce::jmax ((signalEnd - a) / scale, r.noteDuration);
+            r.attackDuration = juce::jlimit (0.0, r.noteDuration, (e.attackDuration - (a - e.startPosition)) / scale);
+        }
 
         if (intersects (r, songRange))
             out.push_back (r);
