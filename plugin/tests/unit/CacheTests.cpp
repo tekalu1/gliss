@@ -2,12 +2,16 @@
 #include "cache/RegionReader.h"
 #include "cache/SourceReader.h"
 
+#include "AllocationCounter.h"
+
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_core/juce_core.h>
 
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -66,6 +70,22 @@ public:
         beginTest ("4. Channel conversion (mono to stereo, stereo to mono, and compare mode)");
         std::printf ("--- Running Test 4 ---\n");
         testChannelConversionAndCompareMode();
+
+        beginTest ("5. Resampled output is time-aligned right after a seek and does not depend on block splitting");
+        std::printf ("--- Running Test 5 ---\n");
+        testResamplingAlignmentAndChunking();
+
+        beginTest ("6. readBlock after prepare does not allocate or free on the audio thread");
+        std::printf ("--- Running Test 6 ---\n");
+        testNoAllocationOnAudioThread();
+
+        beginTest ("7. Replaced snapshots are released off the audio thread");
+        std::printf ("--- Running Test 7 ---\n");
+        testOldSnapshotsAreNotReleasedOnTheAudioThread();
+
+        beginTest ("8. Random restore/windows updates match a per-frame model");
+        std::printf ("--- Running Test 8 ---\n");
+        testIncrementalUpdatesMatchAFrameModel();
     }
 
 private:
@@ -208,8 +228,8 @@ private:
 
             for (int ch = 0; ch < wInc.getNumChannels(); ++ch)
             {
-                const auto* pInc = wInc.buffer.getReadPointer (ch);
-                const auto* pBatch = wBatch.buffer.getReadPointer (ch);
+                const auto* pInc = wInc.getReadPointer (ch);
+                const auto* pBatch = wBatch.getReadPointer (ch);
 
                 for (int s = 0; s < wInc.getNumSamples(); ++s)
                 {
@@ -253,6 +273,8 @@ private:
         std::thread reader ([&]
         {
             juce::AudioBuffer<float> dest (numChannels, 256);
+            RegionReader regionReader;
+            regionReader.prepare (sampleRate, 256, numChannels, sampleRate);
 
             while (! stopFlag.load())
             {
@@ -279,7 +301,7 @@ private:
                 }
 
                 // RegionReader::readBlock も呼び出してみる
-                RegionReader::readBlock (dest, 0, 256, 100, sampleRate, nullptr, &pcm, nullptr);
+                regionReader.readBlock (dest, 0, 256, 100, nullptr, &pcm);
             }
         });
 
@@ -330,7 +352,8 @@ private:
         constexpr int totalHostSamples = blockSize * totalHostBlocks;
 
         juce::AudioBuffer<float> outputBuffer (numChannels, totalHostSamples);
-        ResampleState resampleState;
+        RegionReader regionReader;
+        regionReader.prepare (hostRate, blockSize, numChannels, srcRate);
 
         const double speedRatio = srcRate / hostRate;
         for (int b = 0; b < totalHostBlocks; ++b)
@@ -338,9 +361,8 @@ private:
             const auto hostSample = (juce::int64) (b * blockSize);
             const auto srcSample = (juce::int64) std::llround ((double) hostSample * speedRatio);
 
-            RegionReader::readBlock (outputBuffer, b * blockSize, blockSize,
-                                     srcSample, hostRate,
-                                     &sourceReader, &pcm, &resampleState);
+            regionReader.readBlock (outputBuffer, b * blockSize, blockSize,
+                                    srcSample, &sourceReader, &pcm);
         }
 
         // 窓の境界に対応するホストサンプル位置:
@@ -358,7 +380,7 @@ private:
         constexpr float maxExpectedFirstDiff = 0.07f;
         constexpr float maxExpectedSecondDiff = 0.01f;
 
-        // 全体の差分を走査（最初の 120 サンプルは Sinc 補間器の初期遅延 100 サンプルの過渡応答なので除外）
+        // 全体の差分を走査（最初の 120 サンプルは、ソースの頭（0 より前は無音）で変換器を満たした過渡応答なので除外）
         for (int i = 120; i < totalHostSamples; ++i)
         {
             const float diff1 = std::abs (out[i] - out[i - 1]);
@@ -405,7 +427,9 @@ private:
             juce::AudioBuffer<float> stereoDest (2, 100);
             stereoDest.clear();
 
-            RegionReader::readBlock (stereoDest, 0, 100, 0, sampleRate, &reader, nullptr);
+            RegionReader regionReader;
+            regionReader.prepare (sampleRate, 100, 1, sampleRate);
+            regionReader.readBlock (stereoDest, 0, 100, 0, &reader, nullptr);
 
             const auto* l = stereoDest.getReadPointer (0);
             const auto* r = stereoDest.getReadPointer (1);
@@ -431,7 +455,9 @@ private:
             juce::AudioBuffer<float> monoDest (1, 100);
             monoDest.clear();
 
-            RegionReader::readBlock (monoDest, 0, 100, 0, sampleRate, &reader, nullptr);
+            RegionReader regionReader;
+            regionReader.prepare (sampleRate, 100, 2, sampleRate);
+            regionReader.readBlock (monoDest, 0, 100, 0, &reader, nullptr);
 
             const auto* m = monoDest.getReadPointer (0);
             for (int i = 0; i < 100; ++i)
@@ -453,16 +479,393 @@ private:
 
             juce::AudioBuffer<float> destNormal (1, 100);
             juce::AudioBuffer<float> destCompare (1, 100);
+            RegionReader regionReader;
+            regionReader.prepare (sampleRate, 100, 1, sampleRate);
 
             // 通常時: 窓が適用されて 0.99f
-            RegionReader::readBlock (destNormal, 0, 100, 0, sampleRate, &reader, &pcm, nullptr, { false });
+            regionReader.readBlock (destNormal, 0, 100, 0, &reader, &pcm, { false });
             CHECK_WITHIN (destNormal.getSample (0, 50), 0.99f, 1e-6f);
 
             // 比較モード: 窓が無視されて原音（0.0f）
-            RegionReader::readBlock (destCompare, 0, 100, 0, sampleRate, &reader, &pcm, nullptr, { true });
+            regionReader.readBlock (destCompare, 0, 100, 0, &reader, &pcm, { true });
             CHECK_WITHIN (destCompare.getSample (0, 50), 0.0f, 1e-6f);
         }
+
+        // D. モノラルの窓をステレオのソースに当てると両チャンネルへ
+        {
+            juce::AudioBuffer<float> stereoSource (2, 100);
+            for (int i = 0; i < 100; ++i)
+            {
+                stereoSource.setSample (0, i, 0.1f);
+                stereoSource.setSample (1, i, 0.2f);
+            }
+            BufferSourceReader reader (stereoSource, sampleRate);
+
+            EditedPcm pcm (sampleRate, 1);
+            std::vector<float> winData (10, 0.9f);
+            std::vector<WindowMeta> metas = { { 10, 10, 0 } };
+            CHECK_EXPECT (pcm.applyDirty ("rev1", true, {}, metas, winData.data(), winData.size()));
+
+            juce::AudioBuffer<float> dest (2, 100);
+            RegionReader regionReader;
+            regionReader.prepare (sampleRate, 100, 2, sampleRate);
+            regionReader.readBlock (dest, 0, 100, 0, &reader, &pcm);
+
+            CHECK_WITHIN (dest.getSample (0, 15), 0.9f, 1e-6f);
+            CHECK_WITHIN (dest.getSample (1, 15), 0.9f, 1e-6f);
+            CHECK_WITHIN (dest.getSample (0, 25), 0.1f, 1e-6f);
+            CHECK_WITHIN (dest.getSample (1, 25), 0.2f, 1e-6f);
+
+            // E. ソースに無い出力のチャンネルは無音（上書きのとき）
+            juce::AudioBuffer<float> quad (4, 100);
+            for (int ch = 0; ch < 4; ++ch)
+                juce::FloatVectorOperations::fill (quad.getWritePointer (ch), 7.0f, 100);
+            regionReader.readBlock (quad, 0, 100, 0, &reader, nullptr);
+            CHECK_WITHIN (quad.getSample (0, 50), 0.1f, 1e-6f);
+            CHECK_WITHIN (quad.getSample (1, 50), 0.2f, 1e-6f);
+            CHECK_WITHIN (quad.getSample (2, 50), 0.0f, 1e-6f);
+            CHECK_WITHIN (quad.getSample (3, 50), 0.0f, 1e-6f);
+
+            // F. 周波数の違うスナップショット（設定の食い違い）は当てない
+            EditedPcm otherRate (44100.0, 2);
+            std::vector<float> otherData (200, 0.9f);
+            std::vector<WindowMeta> otherMetas = { { 0, 100, 0 } };
+            CHECK_EXPECT (otherRate.applyDirty ("rev1", true, {}, otherMetas, otherData.data(), otherData.size()));
+            regionReader.readBlock (dest, 0, 100, 0, &reader, &otherRate);
+            CHECK_WITHIN (dest.getSample (0, 50), 0.1f, 1e-6f);
+            CHECK_WITHIN (dest.getSample (1, 50), 0.2f, 1e-6f);
+        }
         std::printf ("Test 4 finished.\n");
+    }
+
+    //==========================================================================
+    // 5. 周波数変換: シークの直後から時刻が合い、ブロックの分け方で結果が変わらない
+    //==========================================================================
+    void testResamplingAlignmentAndChunking()
+    {
+        constexpr double srcRate = 44100.0;
+        constexpr double hostRate = 48000.0;
+        constexpr double ratio = srcRate / hostRate;
+        constexpr int numChannels = 2;
+        constexpr int totalSrc = 44100 * 3;
+        constexpr double freq = 440.0;
+        const double twoPi = 2.0 * juce::MathConstants<double>::pi;
+
+        auto expected = [&] (double sourcePosition, int ch)
+        {
+            return (float) std::sin (twoPi * freq * sourcePosition / srcRate + 0.5 * ch);
+        };
+
+        juce::AudioBuffer<float> src (numChannels, totalSrc);
+        for (int ch = 0; ch < numChannels; ++ch)
+            for (int i = 0; i < totalSrc; ++i)
+                src.setSample (ch, i, expected ((double) i, ch));
+        BufferSourceReader sourceReader (src, srcRate);
+
+        // A. シーク（最初・前へ・後ろへ）の直後の 1 サンプル目から時刻が合う。上限（128）より長いブロックは中で分ける
+        {
+            RegionReader reader;
+            reader.prepare (hostRate, 128, numChannels, srcRate);
+            juce::AudioBuffer<float> out (numChannels, 1024);
+            float maxError = 0.0f;
+
+            auto run = [&] (juce::int64 startHost, std::initializer_list<int> blockSizes)
+            {
+                const auto firstStartInSource = (juce::int64) std::llround ((double) startHost * ratio);
+                juce::int64 host = startHost;
+                for (const auto n : blockSizes)
+                {
+                    const auto startInSource = (juce::int64) std::llround ((double) host * ratio);
+                    out.clear();
+                    CHECK_EXPECT (reader.readBlock (out, 0, n, startInSource, &sourceReader, nullptr));
+                    for (int ch = 0; ch < numChannels; ++ch)
+                        for (int k = 0; k < n; ++k)
+                        {
+                            const auto position = (double) firstStartInSource + (double) (host - startHost + k) * ratio;
+                            maxError = std::max (maxError, std::abs (out.getSample (ch, k) - expected (position, ch)));
+                        }
+                    host += n;
+                }
+            };
+
+            run (4800, { 100, 128, 300, 37, 512, 1 });
+            run (60000, { 64, 200 });
+            run (9600, { 256, 256 });
+            std::printf ("Test 5A max error vs ideal: %g\n", (double) maxError);
+            // 変換器の遅れが残っていれば誤差は 1 近くになる。0.01 は JUCE の WindowedSinc の利得（約 0.99）の分
+            CHECK_EXPECT (maxError < 1.5e-2f);
+        }
+
+        // B. 上限 128 で 512 ずつ読む（中で分ける）のと、上限 512 で 64 ずつ読むのが同じ
+        {
+            constexpr int total = 512 * 40;
+            juce::AudioBuffer<float> outA (numChannels, total);
+            juce::AudioBuffer<float> outB (numChannels, total);
+
+            RegionReader readerA;
+            readerA.prepare (hostRate, 128, numChannels, srcRate);
+            for (int host = 0; host < total; host += 512)
+                readerA.readBlock (outA, host, 512, (juce::int64) std::llround ((double) host * ratio), &sourceReader, nullptr);
+
+            RegionReader readerB;
+            readerB.prepare (hostRate, 512, numChannels, srcRate);
+            for (int host = 0; host < total; host += 64)
+                readerB.readBlock (outB, host, 64, (juce::int64) std::llround ((double) host * ratio), &sourceReader, nullptr);
+
+            float maxDiff = 0.0f;
+            for (int ch = 0; ch < numChannels; ++ch)
+                for (int i = 0; i < total; ++i)
+                    maxDiff = std::max (maxDiff, std::abs (outA.getSample (ch, i) - outB.getSample (ch, i)));
+            CHECK_WITHIN (maxDiff, 0.0f, 1.0e-7f);
+        }
+
+        // C. ソースの末尾を越えて読むと無音になり、読めなかった扱いにしない
+        {
+            RegionReader reader;
+            reader.prepare (hostRate, 256, numChannels, srcRate);
+            const auto endHost = (juce::int64) std::llround ((double) totalSrc / ratio);
+            juce::AudioBuffer<float> out (numChannels, 256);
+            bool allComplete = true;
+            float maxAfterEnd = 0.0f;
+            for (juce::int64 host = endHost - 1024; host < endHost + 1024; host += 256)
+            {
+                allComplete = reader.readBlock (out, 0, 256, (juce::int64) std::llround ((double) host * ratio), &sourceReader, nullptr) && allComplete;
+                for (int k = 0; k < 256; ++k)
+                    if (host + k > endHost + 256) // ソースの 200 サンプル（変換器の窓の半分＋余裕）より後
+                        for (int ch = 0; ch < numChannels; ++ch)
+                            maxAfterEnd = std::max (maxAfterEnd, std::abs (out.getSample (ch, k)));
+            }
+            CHECK_EXPECT (allComplete);
+            CHECK_WITHIN (maxAfterEnd, 0.0f, 0.0f);
+        }
+        std::printf ("Test 5 finished.\n");
+    }
+
+    //==========================================================================
+    // 6. prepare の後の readBlock がオーディオスレッドで確保・解放をしない
+    //==========================================================================
+    void testNoAllocationOnAudioThread()
+    {
+        // 数え上げが効いていること
+        {
+            test::ScopedAllocationCounter counter;
+            void* volatile p = ::operator new (16);
+            ::operator delete (p);
+            CHECK_EQUALS (counter.getAllocations(), 1LL);
+            CHECK_EQUALS (counter.getDeallocations(), 1LL);
+        }
+
+        constexpr double srcRate = 44100.0;
+        constexpr double hostRate = 48000.0;
+        constexpr int numChannels = 3;
+        constexpr int length = 44100 * 2;
+
+        juce::AudioBuffer<float> src (numChannels, length);
+        for (int ch = 0; ch < numChannels; ++ch)
+            for (int i = 0; i < length; ++i)
+                src.setSample (ch, i, (float) std::sin (0.01 * i + ch));
+
+        std::vector<float> winData (2000 * numChannels, 0.25f);
+        std::vector<WindowMeta> metas = { { 1000, 2000, 0 }, { 5000, 2000, 0 }, { 9000, 2000, 0 }, { 30000, 2000, 0 } };
+
+        BufferSourceReader resampledSource (src, srcRate);
+        EditedPcm resampledPcm (srcRate, numChannels);
+        CHECK_EXPECT (resampledPcm.applyDirty ("rev1", true, {}, metas, winData.data(), winData.size()));
+
+        BufferSourceReader sameRateSource (src, hostRate);
+        EditedPcm sameRatePcm (hostRate, numChannels);
+        CHECK_EXPECT (sameRatePcm.applyDirty ("rev1", true, {}, metas, winData.data(), winData.size()));
+
+        RegionReader resampled;
+        resampled.prepare (hostRate, 512, numChannels, srcRate);
+        RegionReader sameRate;
+        sameRate.prepare (hostRate, 512, numChannels, hostRate);
+
+        juce::AudioBuffer<float> dest (2, 8192);
+        RegionReadOptions addOptions;
+        addOptions.addToDestBuffer = true;
+        RegionReadOptions compareOptions;
+        compareOptions.compareMode = true;
+
+        long long allocations = 0, deallocations = 0;
+        {
+            test::ScopedAllocationCounter counter;
+
+            // 素通し: 上限より長いブロック・3 チャンネル（前はヒープの作業用バッファ）・窓に掛かるブロック（前は窓の列の vector）
+            sameRate.readBlock (dest, 0, 8192, 0, &sameRateSource, &sameRatePcm);
+            sameRate.readBlock (dest, 0, 256, 900, &sameRateSource, &sameRatePcm, addOptions);
+            sameRate.readBlock (dest, 0, 256, 900, &sameRateSource, &sameRatePcm, compareOptions);
+
+            // 変換: 最初・続き・シーク・上限より長いブロック（前は変換器の resize とヒープの作業用バッファ）
+            resampled.readBlock (dest, 0, 512, 0, &resampledSource, &resampledPcm);
+            resampled.readBlock (dest, 0, 512, (juce::int64) std::llround (512.0 * srcRate / hostRate), &resampledSource, &resampledPcm);
+            resampled.readBlock (dest, 0, 4000, 4500, &resampledSource, &resampledPcm, addOptions);
+            resampled.readBlock (dest, 0, 4000, 29000, &resampledSource, &resampledPcm);
+
+            // スナップショットの写しと破棄
+            for (int i = 0; i < 10; ++i)
+                auto snapshot = resampledPcm.tryGetSnapshot();
+
+            allocations = counter.getAllocations();
+            deallocations = counter.getDeallocations();
+        }
+        CHECK_EQUALS (allocations, 0LL);
+        CHECK_EQUALS (deallocations, 0LL);
+        std::printf ("Test 6 finished.\n");
+    }
+
+    //==========================================================================
+    // 7. 差し替えた古いスナップショットがオーディオスレッドで解放されない
+    //==========================================================================
+    void testOldSnapshotsAreNotReleasedOnTheAudioThread()
+    {
+        constexpr double sampleRate = 48000.0;
+        EditedPcm pcm (sampleRate, 1);
+        std::vector<float> data (48000, 0.5f);
+        std::vector<WindowMeta> metas = { { 0, 48000, 0 } };
+        CHECK_EXPECT (pcm.applyDirty ("rev1", true, {}, metas, data.data(), data.size()));
+        CHECK_EQUALS ((long long) pcm.releaseUnusedSnapshots(), 0LL); // 誰も読んでいない古いもの（最初の空）は差し替えの時に解放済み
+
+        std::weak_ptr<const EditedPcmSnapshot> watched;
+        juce::WaitableEvent acquired, replaced, released;
+        long long audioAllocations = -1, audioDeallocations = -1;
+        bool gotSnapshot = false;
+
+        std::thread audio ([&]
+        {
+            auto snapshot = pcm.tryGetSnapshot();
+            gotSnapshot = snapshot != nullptr;
+            watched = snapshot;
+            acquired.signal();
+            replaced.wait (10000);
+            {
+                test::ScopedAllocationCounter counter;
+                snapshot.reset(); // 最後の参照ならここで窓の PCM ごと解放される
+                audioAllocations = counter.getAllocations();
+                audioDeallocations = counter.getDeallocations();
+            }
+            released.signal();
+        });
+
+        acquired.wait (10000);
+        CHECK_EXPECT (pcm.applyDirty ("rev2", true, {}, metas, data.data(), data.size()));
+        CHECK_EQUALS ((long long) pcm.releaseUnusedSnapshots(), 1LL); // オーディオスレッドが持っている間は残す
+        replaced.signal();
+        released.wait (10000);
+        audio.join();
+
+        CHECK_EXPECT (gotSnapshot);
+        CHECK_EQUALS (audioAllocations, 0LL);
+        CHECK_EQUALS (audioDeallocations, 0LL);
+        CHECK_EXPECT (! watched.expired());                            // 手放しても解放待ちに残っている
+        CHECK_EQUALS ((long long) pcm.releaseUnusedSnapshots(), 0LL);  // ここ（オーディオスレッド以外）で解放する
+        CHECK_EXPECT (watched.expired());
+        std::printf ("Test 7 finished.\n");
+    }
+
+    //==========================================================================
+    // 8. ランダムな restore・windows の差分更新を、1 フレームずつの模型と突き合わせる
+    //==========================================================================
+    void testIncrementalUpdatesMatchAFrameModel()
+    {
+        constexpr double sampleRate = 48000.0;
+        constexpr int numChannels = 2;
+        constexpr int length = 20000;
+        juce::Random random (12345);
+
+        juce::AudioBuffer<float> src (numChannels, length);
+        for (int ch = 0; ch < numChannels; ++ch)
+            for (int i = 0; i < length; ++i)
+                src.setSample (ch, i, -1.0f - (float) i * 1.0e-4f - (float) ch * 0.5f);
+        BufferSourceReader sourceReader (src, sampleRate);
+
+        // 期待する出力（原音に戻した所は原音、窓を置いた所は窓の値）
+        std::vector<float> model ((size_t) length * numChannels);
+        auto restoreModel = [&] (int start, int end)
+        {
+            for (int i = start; i < end; ++i)
+                for (int ch = 0; ch < numChannels; ++ch)
+                    model[(size_t) i * numChannels + (size_t) ch] = src.getSample (ch, i);
+        };
+        restoreModel (0, length);
+
+        EditedPcm pcm (sampleRate, numChannels);
+        RegionReader reader;
+        reader.prepare (sampleRate, 512, numChannels, sampleRate);
+        juce::AudioBuffer<float> out (numChannels, length);
+        int mismatches = 0, layoutErrors = 0, applyFailures = 0;
+
+        for (int round = 0; round < 200; ++round)
+        {
+            const bool reset = round % 50 == 0;
+            if (reset)
+                restoreModel (0, length);
+
+            std::vector<juce::Range<juce::int64>> restore;
+            const auto numRestore = reset ? 0 : random.nextInt (4);
+            for (int r = 0; r < numRestore; ++r)
+            {
+                const auto start = random.nextInt (length);
+                const auto end = std::min (length, start + 1 + random.nextInt (3000));
+                restore.push_back ({ start, end });
+                restoreModel (start, end);
+            }
+
+            std::vector<WindowMeta> metas;
+            std::vector<float> f32;
+            const auto numWindows = random.nextInt (4) + (reset ? 3 : 0);
+            for (int w = 0; w < numWindows; ++w)
+            {
+                const auto start = random.nextInt (length);
+                const auto frames = std::min (length, start + 1 + random.nextInt (2500)) - start;
+                metas.push_back ({ start, frames, (juce::int64) (f32.size() * sizeof (float)) });
+                for (int i = 0; i < frames; ++i)
+                    for (int ch = 0; ch < numChannels; ++ch)
+                    {
+                        const auto value = (float) round + (float) (start + i) * 1.0e-4f + (float) ch * 0.25f;
+                        f32.push_back (value);
+                        model[(size_t) (start + i) * numChannels + (size_t) ch] = value;
+                    }
+            }
+
+            if (! pcm.applyDirty (juce::String (round), reset, restore, metas, f32.data(), f32.size()))
+                ++applyFailures;
+
+            // 窓の列: 開始の順・重ならない・PCM の範囲の中
+            const auto snapshot = pcm.getSnapshot();
+            juce::int64 previousEnd = std::numeric_limits<juce::int64>::min();
+            for (const auto& w : snapshot->getWindows())
+            {
+                if (w.startFrame < previousEnd || w.numSamples <= 0 || w.offset < 0
+                    || w.offset + w.numSamples > w.pcm->getNumSamples())
+                    ++layoutErrors;
+                previousEnd = w.getEndFrame();
+            }
+
+            // ばらばらの長さのブロック（上限 512 を越えるものを含む）で全体を読む
+            for (int pos = 0; pos < length;)
+            {
+                const auto n = std::min (length - pos, 1 + random.nextInt (1500));
+                reader.readBlock (out, pos, n, pos, &sourceReader, &pcm);
+                pos += n;
+            }
+
+            for (int i = 0; i < length; ++i)
+                for (int ch = 0; ch < numChannels; ++ch)
+                    if (out.getSample (ch, i) != model[(size_t) i * numChannels + (size_t) ch])
+                    {
+                        if (mismatches == 0)
+                            std::printf ("first mismatch: round %d frame %d ch %d (%f vs %f)\n", round, i, ch,
+                                         (double) out.getSample (ch, i), (double) model[(size_t) i * numChannels + (size_t) ch]);
+                        ++mismatches;
+                    }
+        }
+
+        CHECK_EQUALS (applyFailures, 0);
+        CHECK_EQUALS (layoutErrors, 0);
+        CHECK_EQUALS (mismatches, 0);
+        CHECK_EQUALS ((long long) pcm.releaseUnusedSnapshots(), 0LL);
+        std::printf ("Test 8 finished.\n");
     }
 };
 
