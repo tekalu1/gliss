@@ -2096,6 +2096,9 @@ TOOLS += _mcp_document.TOOLS
 # 区間の音声認識で歌詞を確かめる（issue #54）
 from . import mcp_asr as _mcp_asr   # noqa: E402
 TOOLS += _mcp_asr.TOOLS
+# DAW（ARA プラグイン）のドキュメント・修飾・差分の再合成・アーカイブ
+from . import mcp_ara as _mcp_ara   # noqa: E402
+TOOLS += _mcp_ara.TOOLS
 
 
 def build_server():
