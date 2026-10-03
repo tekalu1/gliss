@@ -525,11 +525,13 @@ def ara_remove_modification(ara_id: str) -> dict:
 
 
 @_tool
-def ara_sync(tracks: list | None = None, tempo: dict | None = None) -> dict:
+def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str | None = None) -> dict:
     """**DAW（ARA）のプラグイン向け**: DAW の位置・名前・テンポをまとめて当てる（取り消しの履歴に入れない）。
 
     tracks: [{ara_id, offset_sec?, name?, group?}]（変わったものだけでよい）。位置は 1 サンプル未満の差なら変えない。
     tempo: {bpm, numerator, denominator, start_sec}（MusicalContext。session.tempo に source = "daw" で書く）。
+    guide: ガイドにする修飾の ara_id（"" で外す。省けば今のまま）。アーカイブの document.guide を戻すとき用
+      （画面のガイドの指定 set_guide_track と違い、取り消しの履歴に入れない）。
     編集対象かガイドの位置が変わって、編集対象のガイドの重ね方が変わったら開き直す（reopened = true →
     画面は analyze_take から描き直す）。知らない ara_id は unknown に返す。
     """
@@ -568,13 +570,27 @@ def ara_sync(tracks: list | None = None, tempo: dict | None = None) -> dict:
         if nt != s.tempo:
             s.tempo = nt
             tempo_changed = True
-    if changed or tempo_changed:
+    guide_changed = False
+    if guide is not None:
+        g = None
+        if guide:
+            gt = s.find_ara(guide)
+            if gt is None:
+                unknown.append(guide)
+            elif gt["kind"] != "vocal":
+                raise SessionError("伴奏のトラックはガイドにできない: %s" % guide)
+            else:
+                g = gt["id"]
+        if (g is not None or not guide) and g != s.guide:
+            s.guide = g
+            guide_changed = True
+    if changed or tempo_changed or guide_changed:
         s.save()
     reopened = _mt._reopen_if_stale(s)
-    if changed:
+    if changed or guide_changed:
         _mt._schedule(s)
     return _ok(changed=changed, unknown=unknown, tempo=copy.deepcopy(s.tempo), tempo_changed=tempo_changed,
-               reopened=bool(reopened), session=_mt.summary(s))
+               guide=s.guide, guide_changed=guide_changed, reopened=bool(reopened), session=_mt.summary(s))
 
 
 @_tool

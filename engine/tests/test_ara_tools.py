@@ -452,6 +452,16 @@ def test_sync_moves_tracks_reopens_and_is_not_in_the_history(ara, tmp_path):
     assert s.track(tg)["offset_sec"] == 4.5 and s.track(tg)["name"] == "Guide" and s.tempo["bpm"] == 128
     _ok(m.redo())
     assert s.guide == tg and s.track(tg)["offset_sec"] == 4.5
+    # アーカイブのガイドを戻す（履歴に入れない）: ara_id で指定・"" で外す・省けば今のまま
+    _ok(mt.select_track(t1))                     # redo でガイドのトラックに切り替わっている
+    r = _ok(a.ara_sync(guide=""))
+    assert r["guide"] is None and r["guide_changed"] and r["reopened"] and s.guide is None
+    r = _ok(a.ara_sync(guide="guide"))
+    assert r["guide"] == tg and r["guide_changed"] and r["reopened"]
+    assert _ok(a.ara_sync())["guide"] == tg
+    assert _ok(a.ara_sync(guide="nope"))["unknown"] == ["nope"] and s.guide == tg
+    assert mt.history_summary()["size"] == size
+    assert _ok(a.ara_archive())["guide"] == "guide"
 
 
 def test_undo_after_ara_ops_does_not_undo_daw_operations(ara, tmp_path):
