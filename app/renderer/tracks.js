@@ -17,6 +17,10 @@
 //    上半分は範囲のドラッグ（Studio One／Fender Studio Pro のスマートツールと同じ分け方: 上半分 = 範囲、
 //    下半分 = 矢印）。動かさずに離せば、どちらの半分でもクリック。
 //    Shift で細かく（1/10）、元の位置（0）の 6 px・30 ms 以内に吸い付く（Shift・Alt の間は吸い付かない）。Ctrl+Z で戻す。
+//  - **ツールで上の動きが変わる**（承認済み 2026-10-03。docs/track-view.md §8）: はさみ = クリップをクリックで切る・切れ目の
+//    ダブルクリックでつなぐ（ホバーで縦線・時間スナップ、Shift で外す）、ミュート = 部分のクリックで消す⇔戻す（なぞってまとめて）、
+//    鉛筆 = メインと同じ（カーソルも矢印）、メイン = 今のまま。切れ目と消した部分はトラックの `cuts` / `mutes`（トラックの頭が
+//    0 の秒。エンジンの split_track / join_track / mute_track_range）。消した部分は再生で鳴らさず（audio.js）、書き出しにも効く。
 //  - トラックの操作（追加・外す・位置・名前・種類・ガイドの指定）はエンジンの曲の取り消しの履歴に入る（issue #16）。
 //    Ctrl+Z で別のトラックの操作を戻すと、エンジンがそのトラックを編集対象にする（setHistoryHandler で画面に反映）。
 //  - トラックの追加（ファイル > トラックを追加… / ウィンドウへのドロップ。main.js）と、見出し・クリップ・ルーラーの
@@ -34,7 +38,8 @@ import {
 import { onPlayhead, onRender, render, renderToolbar } from './draw.js';
 import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setMix, setTrack } from './session.js';
 import { enqueue, handleEngineError, refresh, setHistoryHandler, wake } from './edits.js';
-import { dropBuffers, play, stop } from './audio.js';
+import { dropBuffers, play, setGains, stop } from './audio.js';
+import { CUT_MIN_EDGE, covered, joinAt, normCuts, paintPiece, pieces } from './clipedit.js';
 import { closeMenu, openClipMenu, openRulerMenu, openTrackMenu } from './menus.js';
 import { wheelAction } from './commands.js';
 import { G, currentDiv, snapStep, snapTime, tempo, ticks, timeSnapOn } from './grid.js';
@@ -55,6 +60,7 @@ const CLIP_T = 4;           // クリップの上端（行の中）
 const clipH = () => TH - 7;
 const { SCALE_H, LANE_H } = LAYOUT;
 const { TAKE, GUIDE, SEL, INST, VOCAL } = COLORS;
+const ICON_MUTE = '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>';
 const ICON_GUIDE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg>';
 const SNAP_PX = 6;          // 元の位置（0）に吸い付く距離
 const SNAP_MAX_SEC = 0.03;  // ただしこれより大きくは吸い付かない（曲全体の表示では 6 px が 1 秒近くになる）
@@ -90,11 +96,24 @@ let pendingOrder = null;    // 見出しのドラッグで決めた並び（id �
 let hd = null;              // 見出しのドラッグ（並び替え）
 let mixDrag = null;         // 音量・パンのドラッグ { id, kind }（見出しは描き直すので、window で追う）
 let lastMix = { key: '', t: 0, x: 0, y: 0 };
+let tvHover = null;         // はさみ・ミュートのホバー: { id, t: 切る位置（トラックの秒）, cut: 近い切れ目, piece: [a, b] }
+let lastHit = null;         // 最後のポインタの当たり（ツールを替えたときにカーソルを付け直す）
+let tvTool = 'main';        // 描いたときのツール（変わったらホバーを捨てる）
+let lastCut = { id: null, t: 0, x: 0 };   // はさみ: 前のクリック（切れ目のダブルクリックでつなぐ）
 let suppressClick = false;  // 並び替えのドラッグの後の click は名前のクリック（編集対象の切り替え）にしない
 const overviews = new Map(); // トラック id → JSON メタと Int8 波形（セッションが変わったら捨てる）
 const waveCache = new Map();
 const ovLoading = new Set();
 let ovDir = null;
+
+/** ツールごとの説明（ステータス行。下のピアノロールと上のトラックビューの両方）。 */
+export const TOOL_STATUS = {
+  main: 'メインツール: 下はノートを選ぶ・動かす。上はクリックで下に出す（上半分 = 範囲・下半分 = 位置）',
+  draw: '鉛筆: 下はピッチを描く。上は描くものが無いので、メインと同じに働く',
+  cut: 'はさみ: 下はノートを分ける（境目をダブルクリックで結合）。上はクリップをクリックで分ける・切れ目をダブルクリックでつなぐ（Shift でグリッドに寄せない）',
+  mute: 'ミュート: 下はノートを無音にする／戻す。上は部分をクリックで消す／戻す（横になぞるとまとめて）',
+};
+export function toolHint(tool) { return TOOL_STATUS[tool] || ''; }
 
 /** 上に描く並び（並び替えのドラッグ中・確定待ちはその並び）。行の番号はこの並びの番号。 */
 export function rows() {
@@ -376,6 +395,7 @@ export function renderTracks() {
   // ズーム・スクロールした表示（issue #39）は全体の範囲の中に収める（位置のドラッグ中は止める = 1:1）
   if (tvView && (!dr || dr.type !== 'move')) tvView = clampTv(tvView);
   range = tvView ? [tvView.t0, tvView.t0 + tvView.span] : autoRange;
+  if (tvTool !== S.tool) { tvTool = S.tool; tvHover = null; lastCut = { id: null, t: 0, x: 0 }; }
   const hh = headsHtml();
   // 名前の入力中は見出しを作り直さない（入力欄が消える）
   if (hh !== lastHeads && !renaming) {
@@ -388,7 +408,7 @@ export function renderTracks() {
   heads.style.setProperty('--th', `${TH}px`);
   const vr = viewRange();
   const sig = JSON.stringify([laneW, TH, range, vr, S.loop, S.session?.current, S.session?.guide,
-    rows().map((t) => [t.id, offsetOf(t), t.kind, t.mute, t.solo, t.duration_sec]),
+    rows().map((t) => [t.id, offsetOf(t), t.kind, t.mute, t.solo, t.duration_sec, t.cuts, t.mutes]), S.tool,
     overviews.size, dr && [dr.type, dr.row, dr.a, dr.b, dr.moved, dr.off], S.vd ? mutedSpans() : null,
     tempo(), G.fmt, currentDiv()]);
   if (sig !== lastSig) {
@@ -397,6 +417,7 @@ export function renderTracks() {
     drawRuler();
   }
   moveHead();
+  applyCursor();
 }
 
 /** 編集中のトラックの無音の区間（ノートの無音。秒 = そのトラックの音の中。つながった分は 1 つにまとめる）。
@@ -437,6 +458,19 @@ function drawLanes(vr) {
     for (const d of wavePaths(t)) {
       s += `<path d="${d}" fill="${col}" opacity="${op.toFixed(3)}" transform="translate(${f1(x0)},${y})" pointer-events="none"/>`;
     }
+    // クリップの切れ目（部分の境目）と、消した部分（ミュートツール）: 点線の輪郭・薄い波形・スピーカー×
+    const bg = cur ? '#161619' : '#111113';
+    for (const [a, b] of t.mutes || []) {
+      const mx0 = Math.max(x0, tvX(off + a)); const mx1 = Math.min(x1, tvX(off + b));
+      if (mx1 < 0 || mx0 > laneW || mx1 <= mx0) continue;
+      s += `<rect data-mute-range="${esc(t.id)}" data-a="${a}" data-b="${b}" x="${f1(mx0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, mx1 - mx0))}" height="${clipH()}" rx="2" fill="${bg}" fill-opacity=".78" stroke="#8f8f94" stroke-opacity=".7" stroke-dasharray="3 2.5" pointer-events="none"/>`;
+      if (mx1 - mx0 > 22 && clipH() >= 22) s += `<g transform="translate(${f1(mx0 + 4)},${y + CLIP_T + 3}) scale(.5)" fill="none" stroke="#8f8f94" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" pointer-events="none">${ICON_MUTE}</g>`;
+    }
+    for (const c of t.cuts || []) {
+      const cx = tvX(off + c);
+      if (cx < -2 || cx > laneW + 2) continue;
+      s += `<line data-cut="${esc(t.id)}" data-sec="${c}" x1="${f1(cx)}" y1="${y + CLIP_T}" x2="${f1(cx)}" y2="${y + CLIP_T + clipH()}" stroke="${bg}" stroke-width="2" pointer-events="none"/>`;
+    }
     // 無音のノート（ミュートツール・Del）: 波形を暗くして、点線の輪郭（ピアノロールの無音のノートと同じ見分け）
     if (cur && S.vd) {
       for (const [a, b] of mutedSpans()) {
@@ -469,8 +503,31 @@ function drawLanes(vr) {
     s += `<g id="tvTip" pointer-events="none"><rect x="${f1(tx)}" y="${ty}" width="${f1(w)}" height="17" rx="2" fill="#232326"/>`
       + `<text x="${f1(tx + 5)}" y="${ty + 12.5}" font-size="11" fill="${SEL}">${txt}</text></g>`;
   }
+  s += '<g id="tvov" pointer-events="none"></g>';
   s += `<line id="tvph" x1="0" y1="0" x2="0" y2="${LH}" stroke="${SEL}" pointer-events="none"/>`;
   lanes.innerHTML = s;
+  paintOverlay();
+}
+
+/** はさみの縦線・ミュートの部分の枠（ホバー。lanes を描き直さずに付け替える）。 */
+function paintOverlay() {
+  const g = lanes?.querySelector('#tvov');
+  if (!g) return;
+  const h = tvHover;
+  const R = rows();
+  const i = h ? R.findIndex((t) => t.id === h.id) : -1;
+  if (i < 0 || (dr && dr.type !== 'paint')) { g.innerHTML = ''; return; }
+  const t = R[i];
+  const y = i * TH; const off = offsetOf(t);
+  let s = '';
+  if (S.tool === 'cut') {
+    const x = tvX(off + (h.cut ?? h.t));
+    s = `<line id="tvcut" x1="${f1(x)}" y1="${y + 2}" x2="${f1(x)}" y2="${y + TH - 2}" stroke="${SEL}" stroke-width="${h.cut != null ? 2 : 1}"/>`;
+  } else if (S.tool === 'mute' && h.piece) {
+    const xa = tvX(off + h.piece[0]); const xb = tvX(off + h.piece[1]);
+    s = `<rect id="tvpiece" x="${f1(xa)}" y="${y + CLIP_T}" width="${f1(Math.max(1, xb - xa))}" height="${clipH()}" rx="2" fill="${SEL}" fill-opacity=".06" stroke="${SEL}" stroke-opacity=".6"/>`;
+  }
+  g.innerHTML = s;
 }
 
 function drawRuler() {
@@ -1076,9 +1133,11 @@ export function setGuide(id) {
 }
 
 // ---------------------------------------------------------------- ポインタ
-function laneHit(e) {
+function laneHit(e) { return hitAt(e.clientX, e.clientY); }
+
+function hitAt(clientX, clientY) {
   const r = lanes.getBoundingClientRect();
-  const x = e.clientX - r.left; const y = e.clientY - r.top;
+  const x = clientX - r.left; const y = clientY - r.top;
   const row = Math.floor(y / TH);
   const t = rows()[row] || null;
   const tl = tvT(x);
@@ -1099,6 +1158,9 @@ function onLaneDown(e) {
   closeMenu();
   const h = laneHit(e);
   if (!h.t) return;
+  // はさみ・ミュートは、クリップの上ではメインの操作（範囲・位置）の代わりに働く（クリップの外はメインと同じ）
+  if (S.tool === 'cut' && h.inClip) { cutDown(e, h); return; }
+  if (S.tool === 'mute' && h.inClip) { muteDown(e, h); return; }
   if (h.move) {
     // クリップの下半分: 位置をずらす（音源全体）。確定待ちの見かけの位置があれば、そこから
     dr = { type: 'move', row: h.row, id: h.t.id, x0: e.clientX, xl: e.clientX, t0: h.tl,
@@ -1185,13 +1247,11 @@ function clampRange(t, a, b) {
 function onLaneMove(e) {
   if (!dr) {
     const h = laneHit(e);
-    lanes.style.cursor = h.move ? 'grab' : h.t && h.t.kind === 'vocal' && h.inClip ? 'pointer' : 'default';
-    // ツールチップ（SVG の title 属性は出ないので、外側の HTML に付ける）
-    const tip = h.move ? 'ドラッグで位置をずらす（Shift: 細かく / Alt: 吸い付かない）' : '';
-    if (tvBody.title !== tip) tvBody.title = tip;
+    hoverTool(h, e);
     return;
   }
   if (buttonReleased(e)) { onLaneLost(); return; }   // 離したことが届いていない（state.js）
+  if (dr.type === 'paint') { paintMove(e); return; }
   if (dr.type === 'move') { moveDrag(e); return; }
   if (dr.type !== 'range') return;
   const t = rows()[dr.row];
@@ -1220,6 +1280,7 @@ function onLaneLost() {
 
 function onLaneUp() {
   if (dr && dr.type === 'move') { endMove(); return; }
+  if (dr && dr.type === 'paint') { endPaint(); return; }
   const d = dr;
   if (!d || d.type !== 'range') return;
   dr = null;
@@ -1231,6 +1292,203 @@ function onLaneUp() {
     return;
   }
   clickAt(t, d.t0);
+}
+
+// ---------------------------------------------------------------- ツール（はさみ・ミュート。承認済み 2026-10-03）
+const r6 = (v) => Math.round(v * 1e6) / 1e6;
+const secText = (v) => `${v.toFixed(2)} 秒`;
+const CUT_NEAR_PX = 5;      // 切れ目に乗っているとみなす距離
+const DBL_MS = 450;         // 切れ目のダブルクリックの間隔
+
+/** ホバー: ツールのカーソル・ツールチップ・はさみの縦線／ミュートの部分の枠（メインと鉛筆は今までどおり）。 */
+function hoverTool(h, e) {
+  lastHit = { inClip: h.inClip, move: h.move, t: h.t };
+  tvHover = null;
+  let tip = '';
+  if (S.tool === 'cut' && h.t && h.inClip) {
+    const off = offsetOf(h.t);
+    let v = h.tl;
+    if (timeSnapOn(e)) v = snapTime(v, tvStep());
+    const cut = (h.t.cuts || []).find((c) => Math.abs(tvX(off + c) - h.x) <= CUT_NEAR_PX);
+    tvHover = { id: h.t.id, t: r6(v - off), cut: cut ?? null };
+    tip = cut != null ? '切れ目: ダブルクリックでつなぐ' : 'クリックでここを分ける（Shift: グリッドに寄せない）';
+  } else if (S.tool === 'mute' && h.t && h.inClip) {
+    const k = pieceAt(h.t, h.tl);
+    const p = k >= 0 ? pieces(h.t.cuts || [], h.t.duration_sec || 0)[k] : null;
+    tvHover = p ? { id: h.t.id, piece: p } : null;
+    if (p) tip = `クリックでこの部分を${covered(h.t.mutes || [], p[0], p[1]) ? '戻す' : '消す'}（なぞるとまとめて）`;
+  } else if (S.tool !== 'cut' && S.tool !== 'mute') {
+    if (h.move) tip = 'ドラッグで位置をずらす（Shift: 細かく / Alt: 吸い付かない）';
+  }
+  applyCursor(lastHit);
+  if (tvBody.title !== tip) tvBody.title = tip;   // SVG の title 属性は出ないので、外側の HTML に付ける
+  paintOverlay();
+}
+
+/** ツールのカーソル: はさみ・ミュートはクリップの上だけ（CSS の cur-cut / cur-mute。外は矢印）、鉛筆はメインと同じ動きで矢印。 */
+function applyCursor(h = lastHit) {
+  if (!lanes || (dr && dr.type !== 'paint')) return;       // 位置・範囲のドラッグ中は触らない（grabbing のまま）
+  const inClip = !!h?.inClip;
+  lanes.classList.toggle('cur-cut', S.tool === 'cut' && inClip);
+  lanes.classList.toggle('cur-mute', S.tool === 'mute' && inClip);
+  if (S.tool === 'cut' || S.tool === 'mute') lanes.style.cursor = '';
+  else if (S.tool === 'draw') lanes.style.cursor = 'default';
+  else lanes.style.cursor = h?.move ? 'grab' : h?.t && h.t.kind === 'vocal' && h.inClip ? 'pointer' : 'default';
+}
+
+/** 時刻 tl（タイムラインの秒）が入っている部分の番号（クリップの外は -1）。 */
+function pieceAt(t, tl) {
+  const loc = tl - offsetOf(t);
+  const ps = pieces(t.cuts || [], t.duration_sec || 0);
+  return ps.findIndex(([a, b]) => loc >= a && loc <= b);
+}
+
+/** 切れ目・消した部分の操作 1 つ: 見かけをすぐ変えて（mutate）、エンジンの呼び出しを順番待ちに入れ、返り値で置き換える。
+ * 順番待ちの間に Ctrl+Z で外されたら見かけを戻す。 */
+function clipEdit(label, ts, mutate, calls, done) {
+  const before = ts.map((t) => ({ t, cuts: (t.cuts || []).slice(), mutes: (t.mutes || []).map((m) => m.slice()) }));
+  mutate();
+  afterLocal(ts);
+  const cancel = () => {
+    for (const b of before) { b.t.cuts = b.cuts; b.t.mutes = b.mutes; }
+    afterLocal(ts);
+  };
+  return enqueue(async () => {
+    S.busy = true;
+    renderToolbar();
+    try {
+      let r = null;
+      for (const c of calls) r = await call(c.tool, { ...c.args, author: 'human' });
+      if (r?.session) adoptSession(r.session);
+      status(done);
+      return true;
+    } catch (err) {
+      if (!await handleEngineError(err)) status(`${label}できなかった: ${err.message}`);
+      await resync();
+      return false;
+    } finally {
+      S.busy = false;
+      renderToolbar();
+      render();
+      renderTracks();
+      wake();
+    }
+  }, { label, cancel });
+}
+
+/** 見かけを変えた後の描き直し（上・下の斜線・再生中の音）。 */
+function afterLocal(ts) {
+  setGains();                       // 再生中なら消した区間を今から先の音にも当てる
+  renderTracks();
+  if (ts.some((t) => t.id === S.session?.current)) render();
+}
+
+/** はさみ: クリックで分ける・切れ目の上のダブルクリックでつなぐ（時間スナップ。Shift で外す。クリップ全体が対象）。 */
+function cutDown(e, h) {
+  const t = h.t;
+  const off = offsetOf(t);
+  const dur = t.duration_sec || 0;
+  const now = performance.now();
+  const dbl = lastCut.id === t.id && now - lastCut.t < DBL_MS && Math.abs(h.x - lastCut.x) < 8;
+  lastCut = { id: t.id, t: now, x: h.x };
+  const cut = (t.cuts || []).find((c) => Math.abs(tvX(off + c) - h.x) <= CUT_NEAR_PX);
+  if (cut != null) {
+    if (!dbl) { status(`${t.name}: 切れ目（${secText(cut)}）。ダブルクリックでつなぐ`); return; }
+    lastCut = { id: null, t: 0, x: 0 };
+    const j = joinAt(t, cut);
+    clipEdit('クリップをつなぐ', [t], () => { t.cuts = j.cuts; t.mutes = j.mutes; },
+      [{ tool: 'join_track', args: { track_id: t.id, sec: cut } }], `${t.name}: 切れ目をつないだ（${secText(cut)}）`);
+    return;
+  }
+  const v = timeSnapOn(e) ? snapTime(h.tl, tvStep()) : h.tl;
+  const sec = r6(v - off);
+  if (sec < CUT_MIN_EDGE || sec > dur - CUT_MIN_EDGE) {
+    status('クリップの端に近すぎる（両端から 20 ms 以上内側で分ける）');
+    return;
+  }
+  clipEdit('クリップを分ける', [t], () => { t.cuts = normCuts([...(t.cuts || []), sec], dur); },
+    [{ tool: 'split_track', args: { track_id: t.id, sec } }], `${t.name}: ${secText(sec)} で分けた（切れ目をダブルクリックでつなぐ）`);
+}
+
+/** ミュート: 部分を押したら、その部分の今の状態の反対（消す⇔戻す）を、なぞった部分すべてに当てる向きにする（行をまたいでよい）。 */
+function muteDown(e, h) {
+  const k = pieceAt(h.t, h.tl);
+  if (k < 0) return;
+  const [a, b] = pieces(h.t.cuts || [], h.t.duration_sec || 0)[k];
+  const to = !covered(h.t.mutes || [], a, b);
+  dr = { type: 'paint', to, ops: [], seen: new Set(), before: new Map(), moved: true, at: { x: e.clientX, y: e.clientY }, group: `paint-${Date.now()}` };
+  paintAt(h.t, k, to);
+  lanes.setPointerCapture(e.pointerId);
+  paintOverlay();
+}
+
+function paintAt(t, k, to) {
+  const key = `${t.id}:${k}`;
+  if (dr.seen.has(key)) return;
+  dr.seen.add(key);
+  const [a, b] = pieces(t.cuts || [], t.duration_sec || 0)[k];
+  if (covered(t.mutes || [], a, b) === to) return;
+  if (!dr.before.has(t.id)) dr.before.set(t.id, { t, cuts: (t.cuts || []).slice(), mutes: (t.mutes || []).map((m) => m.slice()) });
+  t.mutes = paintPiece(t, k, to);
+  dr.ops.push({ id: t.id, name: t.name, a, b, to });
+  afterLocal([t]);
+}
+
+/** なぞっている間: 通った部分を押した部分と同じ向きにする（速く動かして飛ばした分は、前の点との間を細かく見る）。 */
+function paintMove(e) {
+  const from = dr.at;
+  const steps = Math.max(1, Math.ceil(Math.hypot(e.clientX - from.x, e.clientY - from.y) / 4));
+  let last = null;
+  for (let i = 1; i <= steps; i++) {
+    const h = hitAt(from.x + (e.clientX - from.x) * i / steps, from.y + (e.clientY - from.y) * i / steps);
+    if (!h.t || !h.inClip) continue;
+    const k = pieceAt(h.t, h.tl);
+    if (k >= 0) { paintAt(h.t, k, dr.to); last = { t: h.t, k }; }
+  }
+  dr.at = { x: e.clientX, y: e.clientY };
+  if (last) {
+    tvHover = { id: last.t.id, piece: pieces(last.t.cuts || [], last.t.duration_sec || 0)[last.k] };
+    paintOverlay();
+  }
+}
+
+/** 離した: 変わった部分を 1 つのまとまり（group = 取り消し 1 回）としてエンジンに当てる。 */
+function endPaint() {
+  const d = dr;
+  dr = null;
+  tvHover = null;
+  if (!d.ops.length) { renderTracks(); return; }
+  const ts = [...d.before.values()].map((b) => b.t);
+  const cancel = () => { for (const b of d.before.values()) { b.t.cuts = b.cuts; b.t.mutes = b.mutes; } afterLocal(ts); };
+  const to = d.to;
+  const names = [...new Set(d.ops.map((o) => o.name))].join('・');
+  const done = d.ops.length === 1
+    ? `${names}: ${secText(d.ops[0].a)}〜${secText(d.ops[0].b)} を${to ? '消した' : '戻した'}（Ctrl+Z で戻る）`
+    : `${names}: ${d.ops.length} か所を${to ? '消した' : '戻した'}（Ctrl+Z で 1 回で戻る）`;
+  enqueue(async () => {
+    S.busy = true;
+    renderToolbar();
+    try {
+      let r = null;
+      for (const o of d.ops) {
+        r = await call('mute_track_range', { track_id: o.id, start_sec: o.a, end_sec: o.b, mute: o.to, group: d.group, author: 'human' });
+      }
+      if (r?.session) adoptSession(r.session);
+      status(done);
+      return true;
+    } catch (err) {
+      if (!await handleEngineError(err)) status(`ミュートできなかった: ${err.message}`);
+      await resync();
+      return false;
+    } finally {
+      S.busy = false;
+      renderToolbar();
+      render();
+      renderTracks();
+      wake();
+    }
+  }, { label: to ? '部分のミュート' : '部分を戻す', cancel });
+  renderTracks();
 }
 
 // ルーラー（上下共通）: クリックで再生位置、ドラッグでループ
@@ -1743,6 +2001,7 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   lanes.addEventListener('pointermove', onLaneMove);
   lanes.addEventListener('pointerup', onLaneUp);
   lanes.addEventListener('pointercancel', onLaneUp);
+  lanes.addEventListener('pointerleave', () => { if (dr) return; tvHover = null; lastHit = null; paintOverlay(); applyCursor(); });
   lanes.addEventListener('lostpointercapture', onLaneLost);   // pointerup の後は dr が無いので何もしない
   ruler.addEventListener('pointerdown', onRulerDown);
   heads.addEventListener('click', onHeadsClick);
@@ -1782,7 +2041,8 @@ export function tracksState() {
     scrollTop: tvBody?.scrollTop || 0,
     clips: rows().map((t, i) => {
       const c = lanes?.querySelector(`[data-clip="${CSS.escape(t.id)}"]`);
-      return { id: t.id, row: i, x: c ? +c.getAttribute('x') : null, w: c ? +c.getAttribute('width') : null };
+      return { id: t.id, row: i, x: c ? +c.getAttribute('x') : null, w: c ? +c.getAttribute('width') : null,
+        cuts: [...(t.cuts || [])], mutes: (t.mutes || []).map((m) => [...m]) };
     }),
     heads: [...(heads?.querySelectorAll('.th') || [])].map((el) => ({
       id: el.dataset.id, cur: el.classList.contains('cur'), off: el.classList.contains('off'),
