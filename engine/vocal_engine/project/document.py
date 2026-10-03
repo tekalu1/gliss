@@ -18,6 +18,8 @@
 - **旧形式**（`projects/<テイク名>-<sha8>/`。issue #33 より前）はそのまま開ける。そのディレクトリがそのまま作業場所で、
   編集のたびに自動で保存される（今までどおり。未保存にはならない）。名前を付けて保存すると `.gliss` になり、
   旧形式のディレクトリには `moved_to.json` を置く（同じテイクを開き直すと `.gliss` の方を開く）。
+- **DAW（ARA）のドキュメント**（`kind = "ara"`。`mcp_ara.py`）は `work/ara/<work_key>/`。保存は DAW のドキュメント
+  （ARA のアーカイブ）がするので、`.gliss` にはしない・未保存にならない・閉じても消さない（開き直したとき解析のキャッシュを使う）。
 
 ## 音声のパス
 
@@ -47,7 +49,8 @@ EXT = ".gliss"
 MARKER = "document.json"
 MOVED = "moved_to.json"
 WORK_ENV = "VOCAL_ENGINE_WORK_DIR"
-KINDS = ("gliss", "untitled", "legacy")
+KINDS = ("gliss", "untitled", "legacy", "ara")
+ARA_DIR = "ara"                   # DAW（ARA）のドキュメントの作業場所の置き場（work_root() の下）
 AUDIO_EXTS = (".wav", ".wave", ".bwf", ".flac", ".aif", ".aiff")
 
 # 開くたびに変わる（ユーザーの編集ではない）もの: 未保存の判定で比べない
@@ -77,6 +80,14 @@ def work_dir_for(path):
     h = hashlib.sha1(_norm(path).encode("utf-8")).hexdigest()[:12]
     stem = M.safe_name(os.path.splitext(os.path.basename(path))[0])[:40]
     return os.path.join(work_root(), "%s-%s" % (h, stem))
+
+
+def ara_work_dir(work_key):
+    """DAW（ARA）のドキュメントの作業場所（`work/ara/<work_key>`）。work_key は英数字・`-`・`_` だけ（1〜64 字）。"""
+    k = str(work_key or "")
+    if not (1 <= len(k) <= 64) or not all(ch.isascii() and (ch.isalnum() or ch in "-_") for ch in k):
+        raise DocumentError("work_key は英数字・-・_ の 1〜64 字: %r" % work_key)
+    return os.path.join(work_root(), ARA_DIR, k)
 
 
 RESET_RELEASE_SEC = 10.0          # 作業場所を空にする前に、裏の準備が離れるのを待つ最長の秒
@@ -661,8 +672,8 @@ class Document:
             return 0
 
     def dirty(self):
-        if self.kind == "legacy":
-            return False                         # 旧形式は編集のたびに自動で保存している
+        if self.kind in ("legacy", "ara"):
+            return False                         # 旧形式は編集のたびに自動で保存している。ARA は DAW が保存する
         if self.kind == "untitled":
             return self.track_count() > 0
         m = read_marker(self.work_dir) or {}
@@ -832,6 +843,8 @@ def classify(path):
         m = read_marker(p)
         if m and m.get("kind") == "untitled":
             return "work", p
+        if m and m.get("kind") == "ara":
+            raise DocumentError("DAW（ARA）のドキュメントの作業場所は DAW のプラグインから開く: %s" % path)
         if m and m.get("kind") == "gliss" and m.get("source") and os.path.exists(m["source"]):
             return "gliss", m["source"]
         if os.path.exists(os.path.join(p, SESSION_FILE)) or os.path.exists(os.path.join(p, "project.json")):
@@ -839,6 +852,7 @@ def classify(path):
     raise DocumentError("プロジェクトが見つからない: %s" % path)
 
 
-__all__ = ["Document", "DocumentError", "EXT", "FORMAT", "claim_work", "classify", "collect", "content_hash",
+__all__ = ["Document", "DocumentError", "EXT", "FORMAT", "ara_work_dir", "claim_work", "classify", "collect",
+           "content_hash",
            "discard", "moved_to", "new_untitled", "open_file", "read_file", "save_file",
            "work_dir_for", "work_root", "SessionError"]

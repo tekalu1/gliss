@@ -268,6 +268,8 @@ def save_project(path: str = None) -> dict:
     doc = current()
     if doc is None:
         raise ProjectError("プロジェクトが開かれていない（new_project / load_project）")
+    if doc.kind == "ara":
+        raise ProjectError("DAW（ARA）のドキュメントは DAW が保存する（ARA のアーカイブ。ara_archive）")
     s = _srv._state.get("session")
     if s is not None:
         s.reload_if_changed()
@@ -293,8 +295,9 @@ def save_project(path: str = None) -> dict:
 
 @_tool
 def project_status() -> dict:
-    """開いているプロジェクト: kind（"gliss" = 保存したファイル / "untitled" = 無題 / "legacy" = 旧形式の projects/）・
-    path（.gliss）・name・**dirty（保存していない変更があるか。旧形式は自動で保存しているので常に false）**・
+    """開いているプロジェクト: kind（"gliss" = 保存したファイル / "untitled" = 無題 / "legacy" = 旧形式の projects/ /
+    "ara" = DAW のドキュメント（ara_open））・
+    path（.gliss）・name・**dirty（保存していない変更があるか。旧形式と ara は常に false）**・
     work_dir（作業場所）・tracks（トラックの数）・saved_at。開いていなければ document = null。"""
     return _ok(document=info())
 
@@ -302,7 +305,7 @@ def project_status() -> dict:
 @_tool
 def close_project(discard: bool = False) -> dict:
     """プロジェクトを閉じる。discard=True で保存していない変更を捨てる（.gliss は最後に保存した中身に戻し、
-    無題は作業場所ごと消す。旧形式は自動で保存しているので何もしない）。discard=False なら作業場所に残る
+    無題は作業場所ごと消す。旧形式は自動で保存しているので何もしない。DAW（ARA）の作業場所も消さない）。discard=False なら作業場所に残る
     （同じファイルを開けば続きから）。"""
     doc = current()
     dropped = False
