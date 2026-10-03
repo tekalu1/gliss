@@ -1,0 +1,259 @@
+// GlissHostCheck: JUCE のホストとして Gliss.vst3 を読み込み、画面を開かずに（実際は画面の外に置いて）確かめる。
+//
+//   GlissHostCheck <結果を書くファイル> <Gliss.vst3 のバイナリ> [<GLISS_ARA_TRACE_DIR と同じフォルダ、または ->] [--no-editor]
+//
+// 確かめること:
+//   1. VST3 として見つかり、PluginDescription が ARA の拡張を持つと言う
+//   2. ARA ファクトリが取れ、ID が決めたとおりである
+//   3. インスタンスを作り、ARA に結び付かない（普通の VST3 の）ブロック処理が入力を変えない
+//   4. エディタを作り、画面の外の窓に置いて、WebView2 の HTML が読み込まれて "ready" が届く
+//      （プラグインが GLISS_ARA_TRACE_DIR に "editor: page ready" を書く。第 3 引数を渡したときだけ）
+// 窓は画面の外に置き、SW_SHOWNA（前面にも入力の対象にもならない）で出す。結果は 0（全部通った）か 1 で返す。
+#include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_gui_extra/juce_gui_extra.h>
+
+namespace
+{
+constexpr auto expectedFactoryID = "io.github.tekalu1.gliss.arafactory.1";
+constexpr auto expectedArchiveID = "io.github.tekalu1.gliss.aradocumentarchive.1";
+
+/** エディタを画面の外に置く窓。 */
+class OffscreenWindow final : public juce::Component
+{
+public:
+    explicit OffscreenWindow (juce::AudioProcessorEditor& editorIn) : editor (editorIn)
+    {
+        addAndMakeVisible (editor);
+        setBounds (-20000, -20000, editor.getWidth(), editor.getHeight());
+        setWantsKeyboardFocus (false);
+        addToDesktop (juce::ComponentPeer::windowIsTemporary);
+        setVisible (true);
+    }
+
+    void resized() override { editor.setBounds (getLocalBounds()); }
+
+private:
+    juce::AudioProcessorEditor& editor;
+};
+}
+
+class HostCheckApplication final : public juce::JUCEApplication,
+                                   private juce::Timer
+{
+public:
+    const juce::String getApplicationName() override { return "GlissHostCheck"; }
+    const juce::String getApplicationVersion() override { return "1.0.0"; }
+    bool moreThanOneInstanceAllowed() override { return true; }
+
+    void initialise (const juce::String&) override
+    {
+        const auto args = getCommandLineParameterArray();
+
+        if (args.size() < 2)
+        {
+            std::fprintf (stderr, "usage: GlissHostCheck <report file> <Gliss.vst3> [<trace dir> or -] [--no-editor]\n");
+            setApplicationReturnValue (2);
+            quit();
+            return;
+        }
+
+        reportFile = juce::File (args[0]);
+        pluginPath = args[1];
+
+        if (args.size() > 2 && args[2] != "-")
+            traceDir = juce::File (args[2]);
+
+        skipEditor = args.contains ("--no-editor");
+
+        reportFile.deleteFile();
+        formatManager.addFormat (std::make_unique<juce::VST3PluginFormat>());
+
+        juce::OwnedArray<juce::PluginDescription> descriptions;
+        formatManager.getFormat (0)->findAllTypesForFile (descriptions, pluginPath);
+
+        if (! check (descriptions.size() == 1, "found exactly one VST3 class (got " + juce::String (descriptions.size()) + ")"))
+            return finish();
+
+        description = *descriptions[0];
+        report ("name=" + description.name + " manufacturer=" + description.manufacturerName + " version=" + description.version);
+        check (description.hasARAExtension, "PluginDescription.hasARAExtension");
+
+        createInstance();
+    }
+
+    void shutdown() override
+    {
+        stopTimer();
+        window.reset();
+        editor.reset();
+        araFactory = {};
+        instance.reset();
+    }
+
+private:
+    void createInstance()
+    {
+        formatManager.createPluginInstanceAsync (description, 48000.0, 512,
+                                                 [this] (std::unique_ptr<juce::AudioPluginInstance> created, const juce::String& error)
+        {
+            if (! check (created != nullptr, "plugin instance created " + error))
+                return finish();
+
+            instance = std::move (created);
+            checkPassthrough();
+
+            // ファクトリはインスタンスを通して取る（AudioPluginHost と同じ）。AudioPluginFormatManager から DLL の
+            // ハンドルを持たずに取ると、先に DLL が外れて、ファクトリを手放すときに外れた DLL の中を呼んで落ちる
+            // （JUCE の ARAPluginDemo でも同じに落ちる）。
+            juce::createARAFactoryAsync (*instance, [this] (juce::ARAFactoryWrapper wrapper)
+            {
+                checkARAFactory (wrapper);
+                araFactory = std::move (wrapper);
+
+                if (skipEditor)
+                    return finish();
+
+                createEditor();
+            });
+        });
+    }
+
+    void checkARAFactory (const juce::ARAFactoryWrapper& wrapper)
+    {
+        const auto* factory = wrapper.get();
+
+        if (! check (factory != nullptr, "ARA factory created"))
+            return;
+
+        check (juce::String (factory->factoryID) == expectedFactoryID, "factoryID = " + juce::String (factory->factoryID));
+        check (juce::String (factory->documentArchiveID) == expectedArchiveID, "documentArchiveID = " + juce::String (factory->documentArchiveID));
+        report ("plugInName=" + juce::String (factory->plugInName) + " apiGeneration=" + juce::String ((int) factory->lowestSupportedApiGeneration)
+                + ".." + juce::String ((int) factory->highestSupportedApiGeneration));
+    }
+
+    /** ARA に結び付けずに processBlock を呼ぶと、入力がそのまま出る（普通の VST3 としての素通し）。 */
+    void checkPassthrough()
+    {
+        instance->setPlayConfigDetails (2, 2, 48000.0, 512);
+        instance->prepareToPlay (48000.0, 512);
+
+        juce::AudioBuffer<float> buffer (2, 512);
+        juce::AudioBuffer<float> reference (2, 512);
+
+        for (int channel = 0; channel < 2; ++channel)
+            for (int i = 0; i < 512; ++i)
+                reference.setSample (channel, i, 0.25f * std::sin (0.05f * (float) i * (float) (channel + 1)));
+
+        buffer.makeCopyOf (reference);
+        juce::MidiBuffer midi;
+        instance->processBlock (buffer, midi);
+
+        auto maxDifference = 0.0f;
+
+        for (int channel = 0; channel < 2; ++channel)
+            for (int i = 0; i < 512; ++i)
+                maxDifference = juce::jmax (maxDifference, std::abs (buffer.getSample (channel, i) - reference.getSample (channel, i)));
+
+        check (maxDifference == 0.0f, "non-ARA processBlock passes the input through (max difference " + juce::String (maxDifference) + ")");
+        instance->releaseResources();
+    }
+
+    void createEditor()
+    {
+        if (! check (instance->hasEditor(), "plugin has an editor"))
+            return finish();
+
+        editor.reset (instance->createEditorAndMakeActive());
+
+        if (! check (editor != nullptr, "editor created"))
+            return finish();
+
+        window = std::make_unique<OffscreenWindow> (*editor);
+
+        if (traceDir == juce::File())
+        {
+            report ("no trace dir given; not waiting for the page");
+            return finish();
+        }
+
+        waitStart = juce::Time::getMillisecondCounter();
+        startTimer (200);
+    }
+
+    void timerCallback() override
+    {
+        bool ready = false;
+
+        for (const auto& file : traceDir.findChildFiles (juce::File::findFiles, false, "gliss-ara-*.log"))
+            if (file.loadFileAsString().contains ("editor: page ready"))
+                ready = true;
+
+        if (ready)
+        {
+            stopTimer();
+            check (true, "WebView2 page loaded and sent \"ready\" (" + juce::String ((int) (juce::Time::getMillisecondCounter() - waitStart)) + " ms)");
+            return finish();
+        }
+
+        if (juce::Time::getMillisecondCounter() - waitStart > 30000)
+        {
+            stopTimer();
+            check (false, "WebView2 page did not report ready within 30 s");
+            finish();
+        }
+    }
+
+    bool check (bool ok, const juce::String& what)
+    {
+        report ((ok ? "PASS " : "FAIL ") + what);
+
+        if (! ok)
+            ++failures;
+
+        return ok;
+    }
+
+    void report (const juce::String& line)
+    {
+        std::printf ("%s\n", line.toRawUTF8());
+        reportFile.appendText (line + "\n");
+    }
+
+    void finish()
+    {
+        report (failures == 0 ? "RESULT OK" : "RESULT FAILED (" + juce::String (failures) + ")");
+        setApplicationReturnValue (failures == 0 ? 0 : 1);
+
+        // DAW と同じく、エディタを閉じてもメッセージループを回し続け、少し待ってからプラグインを手放す
+        // （WebView2 の後始末はメッセージループの上で非同期に進む）。
+        report ("teardown: closing the editor");
+        window.reset();
+        editor.reset();
+        report ("teardown: editor closed");
+
+        juce::Timer::callAfterDelay (teardownWaitMs, [this]
+        {
+            report ("teardown: releasing the ARA factory and the plugin instance");
+            araFactory = {};
+            instance.reset();
+            report ("teardown: plugin instance released");
+            juce::Timer::callAfterDelay (teardownWaitMs, [this] { report ("teardown: quit"); quit(); });
+        });
+    }
+
+    juce::AudioPluginFormatManager formatManager;
+    juce::PluginDescription description;
+    juce::ARAFactoryWrapper araFactory;
+    std::unique_ptr<juce::AudioPluginInstance> instance;
+    std::unique_ptr<juce::AudioProcessorEditor> editor;
+    std::unique_ptr<OffscreenWindow> window;
+
+    juce::File reportFile, traceDir;
+    juce::String pluginPath;
+    juce::uint32 waitStart = 0;
+    bool skipEditor = false;
+    int failures = 0;
+    static constexpr int teardownWaitMs = 1500;
+};
+
+START_JUCE_APPLICATION (HostCheckApplication)

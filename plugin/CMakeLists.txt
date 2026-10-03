@@ -106,3 +106,9 @@ target_link_libraries(GlissARA
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
+
+# ---- 検証用のホスト（JUCE のホストとして Gliss.vst3 を読み込み、画面の外で WebView2 まで確かめる） ----
+option(GLISS_BUILD_HOSTCHECK "検証用の GlissHostCheck をビルドする" ON)
+if(GLISS_BUILD_HOSTCHECK)
+    add_subdirectory(tests/hostcheck)
+endif()
