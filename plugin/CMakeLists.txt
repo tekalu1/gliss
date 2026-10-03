@@ -82,7 +82,9 @@ juce_add_plugin(GlissARA
     NEEDS_MIDI_INPUT FALSE
     NEEDS_MIDI_OUTPUT FALSE
     IS_ARA_EFFECT TRUE
-    ARA_FACTORY_ID "\"io.github.tekalu1.gliss.arafactory.1\""
+    # DAW に返す解析: ノート（content reader。ホストが解析を頼める）。時間の伸縮などの変形は名乗らない
+    ARA_ANALYSIS_TYPES kARAContentTypeNotes
+    ARA_FACTORY_ID "\"io.github.tekalu1.gliss.arafactory.2\""
     ARA_DOCUMENT_ARCHIVE_ID "\"io.github.tekalu1.gliss.aradocumentarchive.1\""
     NEEDS_WEBVIEW2 TRUE
     COPY_PLUGIN_AFTER_BUILD FALSE)

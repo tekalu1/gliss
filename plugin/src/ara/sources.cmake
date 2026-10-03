@@ -5,6 +5,7 @@ list(APPEND GLISS_UNIT_SOURCES
     src/ara/DocumentSync.cpp
     src/ara/EngineCalls.cpp
     src/ara/FloatWavWriter.cpp
+    src/ara/NoteContent.cpp
     src/ara/PlayheadState.cpp
     src/ara/PluginState.cpp
     src/ara/RegionMapping.cpp

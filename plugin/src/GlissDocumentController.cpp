@@ -110,6 +110,14 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
                 notifyContentChanged (ids);
         });
     };
+    callbacks.notesChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, const juce::StringArray& sources)
+    {
+        juce::MessageManager::callAsync ([this, token, ids, sources]
+        {
+            if (token.lock() != nullptr)
+                notifyNotesChanged (ids, sources);
+        });
+    };
     callbacks.log = [] (const juce::String& line) { diag::log (line); };
 
     const auto disabled = options.engineDisabled;
@@ -350,6 +358,199 @@ void GlissDocumentController::notifyContentChanged (const juce::StringArray& ara
 
             for (auto* region : modification->getPlaybackRegions<juce::ARAPlaybackRegion>())
                 region->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), true);
+        }
+    }
+}
+
+//==============================================================================
+// DAW に返すノート（kARAContentTypeNotes）
+namespace
+{
+/** 作るときに写した ARAContentNote を返すだけの content reader（ARA のスレッドで作り・読み・壊す）。 */
+class NoteContentReader final : public ARA::PlugIn::ContentReader
+{
+public:
+    explicit NoteContentReader (const std::vector<NoteEvent>& source)
+    {
+        events.reserve (source.size());
+
+        for (const auto& e : source)
+            events.push_back ({ e.frequency, e.pitchNumber, e.volume, e.startPosition, e.attackDuration, e.noteDuration, e.signalDuration });
+    }
+
+    ARA::ARAInt32 getEventCount() noexcept override { return (ARA::ARAInt32) events.size(); }
+    const void* getDataForEvent (ARA::ARAInt32 eventIndex) noexcept override { return &events[(size_t) eventIndex]; }
+
+private:
+    std::vector<ARA::ARAContentNote> events;
+};
+
+std::optional<NoteTimeRange> rangeOf (const ARA::ARAContentTimeRange* range)
+{
+    if (range == nullptr)
+        return {};
+
+    return NoteTimeRange { range->start, range->duration };
+}
+
+ARA::ARAContentGrade toAra (NoteGrade g)
+{
+    switch (g)
+    {
+        case NoteGrade::adjusted: return ARA::kARAContentGradeAdjusted;
+        case NoteGrade::detected: return ARA::kARAContentGradeDetected;
+        case NoteGrade::initial:  break;
+    }
+
+    return ARA::kARAContentGradeInitial;
+}
+
+bool isActive (const ARA::PlugIn::AudioModification* m)
+{
+    return m != nullptr && ! m->isDeactivatedForUndoHistory();
+}
+} // namespace
+
+std::shared_ptr<const ModificationNotes> GlissDocumentController::notesOf (const ARA::PlugIn::AudioModification* modification) const
+{
+    if (! isActive (modification))
+        return nullptr;
+
+    auto n = sync->getNotes (juce::String (modification->getPersistentID()));
+    return n != nullptr && n->ready ? n : nullptr;
+}
+
+std::shared_ptr<const ModificationNotes> GlissDocumentController::sourceNotesOf (const ARA::PlugIn::AudioSource* source) const
+{
+    // 同じソースの修飾は同じ音の同じ解析を持つ。解析の済んだ最初のもの。
+    for (const auto* modification : source->getAudioModifications())
+        if (auto n = notesOf (modification))
+            return n;
+
+    return nullptr;
+}
+
+bool GlissDocumentController::doIsAudioSourceContentAvailable (const ARA::PlugIn::AudioSource* source, ARA::ARAContentType type)
+{
+    return type == ARA::kARAContentTypeNotes && sourceNotesOf (source) != nullptr;
+}
+
+ARA::ARAContentGrade GlissDocumentController::doGetAudioSourceContentGrade (const ARA::PlugIn::AudioSource* source, ARA::ARAContentType type)
+{
+    if (type != ARA::kARAContentTypeNotes)
+        return ARA::kARAContentGradeInitial;
+
+    const auto n = sourceNotesOf (source);
+    return toAra (notes::grade (n.get(), true));
+}
+
+ARA::PlugIn::ContentReader* GlissDocumentController::doCreateAudioSourceContentReader (ARA::PlugIn::AudioSource* source, ARA::ARAContentType type,
+                                                                                     const ARA::ARAContentTimeRange* range)
+{
+    const auto n = type == ARA::kARAContentTypeNotes ? sourceNotesOf (source) : nullptr;
+    return new NoteContentReader (n != nullptr ? notes::forSource (*n, rangeOf (range)) : std::vector<NoteEvent> {});
+}
+
+bool GlissDocumentController::doIsAudioModificationContentAvailable (const ARA::PlugIn::AudioModification* modification, ARA::ARAContentType type)
+{
+    return type == ARA::kARAContentTypeNotes && notesOf (modification) != nullptr;
+}
+
+ARA::ARAContentGrade GlissDocumentController::doGetAudioModificationContentGrade (const ARA::PlugIn::AudioModification* modification,
+                                                                                  ARA::ARAContentType type)
+{
+    if (type != ARA::kARAContentTypeNotes)
+        return ARA::kARAContentGradeInitial;
+
+    const auto n = notesOf (modification);
+    return toAra (notes::grade (n.get()));
+}
+
+ARA::PlugIn::ContentReader* GlissDocumentController::doCreateAudioModificationContentReader (ARA::PlugIn::AudioModification* modification,
+                                                                                           ARA::ARAContentType type,
+                                                                                           const ARA::ARAContentTimeRange* range)
+{
+    const auto n = type == ARA::kARAContentTypeNotes ? notesOf (modification) : nullptr;
+    return new NoteContentReader (n != nullptr ? notes::forModification (*n, rangeOf (range)) : std::vector<NoteEvent> {});
+}
+
+bool GlissDocumentController::doIsPlaybackRegionContentAvailable (const ARA::PlugIn::PlaybackRegion* region, ARA::ARAContentType type)
+{
+    return type == ARA::kARAContentTypeNotes && notesOf (region->getAudioModification()) != nullptr;
+}
+
+ARA::ARAContentGrade GlissDocumentController::doGetPlaybackRegionContentGrade (const ARA::PlugIn::PlaybackRegion* region, ARA::ARAContentType type)
+{
+    if (type != ARA::kARAContentTypeNotes)
+        return ARA::kARAContentGradeInitial;
+
+    const auto n = notesOf (region->getAudioModification());
+    return toAra (notes::grade (n.get()));
+}
+
+ARA::PlugIn::ContentReader* GlissDocumentController::doCreatePlaybackRegionContentReader (ARA::PlugIn::PlaybackRegion* region,
+                                                                                        ARA::ARAContentType type,
+                                                                                        const ARA::ARAContentTimeRange* range)
+{
+    const auto n = type == ARA::kARAContentTypeNotes ? notesOf (region->getAudioModification()) : nullptr;
+
+    if (n == nullptr)
+        return new NoteContentReader ({});
+
+    return new NoteContentReader (notes::forRegion (*n, timesOf (static_cast<const juce::ARAPlaybackRegion*> (region)), rangeOf (range)));
+}
+
+bool GlissDocumentController::doIsAudioSourceContentAnalysisIncomplete (const ARA::PlugIn::AudioSource* source, ARA::ARAContentType type)
+{
+    if (type != ARA::kARAContentTypeNotes || sourceNotesOf (source) != nullptr)
+        return false;
+
+    // 解析が進みようのないもの（エンジンが無い・失敗した、ホストが読ませない、修飾が無い・失敗した）は「未完了」にしない
+    // （ホストが解析の終わりを待ち続けないように）。解析はエンジンの裏の準備が全部の修飾に行う。
+    const auto engine = sync->getEngineStatus().state;
+
+    if (engine == "failed" || engine == "disabled" || ! source->isSampleAccessEnabled())
+        return false;
+
+    for (const auto* modification : source->getAudioModifications())
+        if (isActive (modification) && sync->getModStatus (juce::String (modification->getPersistentID())).state != "failed")
+            return true;
+
+    return false;
+}
+
+void GlissDocumentController::doRequestAudioSourceContentAnalysis (ARA::PlugIn::AudioSource* source, std::vector<ARA::ARAContentType> const& types)
+{
+    if (std::find (types.begin(), types.end(), ARA::kARAContentTypeNotes) == types.end())
+        return;
+
+    diag::log ("notes: the host requested the analysis of '" + juce::String (source->getPersistentID()) + "'");
+    sync->requestEngine();
+}
+
+void GlissDocumentController::notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds)
+{
+    auto* document = getDocument();
+
+    if (document == nullptr)
+        return;
+
+    const auto scope = juce::ARAContentUpdateScopes::notesAreAffected();
+
+    for (auto* source : document->getAudioSources<juce::ARAAudioSource>())
+    {
+        if (sourceIds.contains (juce::String (source->getPersistentID())))
+            source->notifyContentChanged (scope, true);
+
+        for (auto* modification : source->getAudioModifications<GlissAudioModification>())
+        {
+            if (! araIds.contains (juce::String (modification->getPersistentID())))
+                continue;
+
+            modification->notifyContentChanged (scope, true);
+
+            for (auto* region : modification->getPlaybackRegions<juce::ARAPlaybackRegion>())
+                region->notifyContentChanged (scope, true);
         }
     }
 }
