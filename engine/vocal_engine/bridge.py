@@ -52,7 +52,7 @@ CONDITIONAL_TOOLS = frozenset({"close_project", "render_region", "export_view_da
 # DAW の ARA プラグインのエンジン専用（mcp_ara.py）。AI のプロセスからは許可に関係なく断る
 # （プラグインの作業場所を別のプロセスから書き換えない。AI からプラグインの曲は触らない）
 ARA_TOOLS = frozenset({"ara_open", "ara_set_modification", "ara_remove_modification", "ara_sync",
-                       "ara_render_dirty", "ara_revs", "ara_archive", "ara_restore"})
+                       "ara_render_dirty", "ara_revs", "ara_archive", "ara_restore", "ara_notes"})
 
 LABELS = {"edit": "編集", "save": "保存・書き出し"}
 

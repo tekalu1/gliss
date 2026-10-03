@@ -2,8 +2,8 @@
 
 Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジンを MCP（stdio）で公開する。サーバーの名前は `gliss`（Python のパッケージは内部名の `vocal_engine` のまま）。
 Claude Code などの MCP クライアントから
-「測る／直す／確かめる」ができる。ツールは 69 個（うちトラック（複数トラックのセッション）・テンポの 9 個は §3-2、
-プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、DAW（ARA プラグイン）専用の 8 個は §3-4、区間の聞き取り（音声認識）の 3 個は §1-1）。
+「測る／直す／確かめる」ができる。ツールは 70 個（うちトラック（複数トラックのセッション）・テンポの 9 個は §3-2、
+プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、DAW（ARA プラグイン）専用の 9 個は §3-4、区間の聞き取り（音声認識）の 3 個は §1-1）。
 
 起動:
 
@@ -1002,6 +1002,7 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 | `ara_revs` | なし | `{revs: {ara_id: rev}, track_ids: {ara_id: track_id}, errors}`。**ロックを取らない**（ディスクの project.json から）。プロジェクトがまだ無い修飾は `"empty"` |
 | `ara_archive` | `ara_ids?`（省けば全部） | `{archives: {ara_id: {name, track, archive}}, guide: <ガイドの ara_id> \| null, tempo, errors, missing}`。`archive` は `Project.to_archive()` の形（素材の参照・歌詞・changeset の列。ガイドは入れない）。**ロックを取らない**（解析のジョブの最中も保存を止めない）。素材の照合のハッシュはトラックを作ったときに覚えた値を使う。プロジェクトがまだ無い修飾は `archive: null` |
 | `ara_restore` | `ara_id`, `archive` | `{track, mismatch, reason?, edits, changesets, reopened, session}`。編集を戻す（履歴に入れず、戻した changeset も Ctrl+Z の列に入れない）。素材の長さ・音の中身が違えば**戻さずに** `mismatch: true`（`ok` は true。プラグインはアーカイブを持ち続ける）。編集対象なら開き直す |
+| `ara_notes` | `ara_ids?`（省けば全部） | `{notes: {ara_id: {track, rev, state, edited, notes, source_notes}}, errors, missing}`。DAW に返すノート（ARA の content reader の `kARAContentTypeNotes`）。`state`: `ready`（解析が済んだ）/ `pending`（解析がまだ）/ `empty`（プロジェクトがまだ無い）。`ready` のときだけ `notes`（編集を当てた後。無音にしたノートは除く）と `source_notes`（解析だけ）が入る。どちらもソースの秒・頭の順・音程のあるノートだけで `[{id, start_sec, end_sec, hz, midi, volume}]`（位置・音程は `export_view_data` の `edited_start_sec`・`edited_end_sec`・`edited_pitch_midi` と同じ定義、`hz` はその Hz、`volume` はノートの音量の山を -60 dB → 0・0 dB → 1）。`edited` = 編集リストが空でない（プラグインは DAW に adjusted と出す）。`rev` は `ara_revs` と同じ。解析は待たない・始めない（裏の準備が済むと版が変わる）。編集対象は変えない |
 
 **差分の再合成**（`ara_render_dirty`。`render/region.py` の `EditCache` をファイルで渡すもの）:
 
@@ -1025,6 +1026,7 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 ソースの WAV を書いたら各修飾に `ara_set_modification`（アーカイブから戻すなら続けて `ara_restore`）→ `ara_render_dirty(since=null)`。
 DAW の操作は `ara_sync` / `ara_set_modification` / `ara_remove_modification`。画面の編集の後は `ara_revs` → 違う修飾に
 `ara_render_dirty(since=<手元の rev>)`（`more` の間は続ける）→ `ara_archive(変わった ara_id)` で保存用の写しを取り直す。
+ノート（DAW に返す）は、`ara_revs` の版がノートを取った版と違う修飾に `ara_notes(ara_ids)`。
 
 ## 4. Claude Code から使う
 
