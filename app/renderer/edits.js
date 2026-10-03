@@ -64,6 +64,7 @@ function discardQueued() {
   S.local.pitch.clear();
   S.local.btime.clear();
   S.local.fade.clear();
+  S.local.mute.clear();
   setPlan(null);
 }
 
@@ -93,6 +94,7 @@ export async function handleEngineError(err, { partial = false } = {}) {
     S.local.pitch.clear();
     S.local.btime.clear();
     S.local.fade.clear();
+    S.local.mute.clear();
     setPlan(null);
     if (partial) {
       invalidate();
@@ -278,14 +280,20 @@ export function mergeMany(ids) {
   }, 'ノートの結合'), { label: '結合' });
 }
 
-/** 無音にする（Del）。長さ・位置は変えない。 */
-export function muteNotes(ids) {
+/** 無音にする（Del）／無音を戻す（右クリック）。長さ・位置は変えず、戻すのは無音だけ（ピッチ等の編集は残る）。
+ * ids は 1 回の呼び出し = 1 つの changeset（取り消し 1 回）。ミュートツールは、なぞっている間の見かけを
+ * S.local.mute に持ち、当たるまでは preview で載せ直す。 */
+function applyMute(ids, to) {
   if (!ids.length) return Promise.resolve();
+  const label = to ? '無音にする' : '無音を戻す';
+  const preview = () => { for (const id of ids) S.local.mute.set(id, to); };
   return enqueue(() => run(async () => {
-    const r = await call('mute_notes', { note_ids: ids, author: AUTHOR });
-    if (!r.changeset) status('もう無音になっている');
-  }, '無音にする'), { label: '無音にする' });
+    const r = await call(to ? 'mute_notes' : 'unmute_notes', { note_ids: ids, author: AUTHOR });
+    if (!r.changeset) status(to ? 'もう無音になっている' : '無音のノートが無かった');
+  }, label), { label, preview, cancel: () => { for (const id of ids) S.local.mute.delete(id); } });
 }
+export const muteNotes = (ids) => applyMute(ids, true);
+export const unmuteNotes = (ids) => applyMute(ids, false);
 
 /** フェード（issue #20）: `set_fade`。fadeIn / fadeOut は編集後の秒（省くとそのまま、0 で消す）。**順番待ちの中から呼ぶ**。 */
 export function applyFade(ids, { fadeIn = null, fadeOut = null } = {}) {

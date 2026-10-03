@@ -754,7 +754,7 @@ window.__app = {
   gridLines: () => [...document.querySelectorAll('#roll [data-grid]')].map((l) => ({ x: +l.getAttribute('x1'), l: +l.dataset.grid })),
   // フェード（issue #20）
   fadeInfo,
-  local: () => ({ fade: [...S.local.fade.entries()] }),
+  local: () => ({ fade: [...S.local.fade.entries()], mute: [...S.local.mute.entries()] }),
   phonemes: () => (S.ph?.phonemes || []).map((p) => ({
     id: p.id, text: p.text, kana: p.kana, label: p.label,
     start: p.edited_start_sec, end: p.edited_end_sec,

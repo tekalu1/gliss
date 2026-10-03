@@ -8,12 +8,14 @@
 // `correction_ref`）。**ドラッグ中・「ガイドに合わせる」のスライダー中も同じ式で**今の見かけから測るので、
 // ドラッグ中の色 = 離した後の色になる（端・移動のドラッグ・鉛筆・ピッチのドラッグ = 手動、ガイドに合わせる = 自動）。
 import {
-  COLORS, S, editedCurve, frameNoteIds, noteFrames, pitchDelta, strokeData, warp,
+  COLORS, S, editedCurve, frameNoteIds, isMuted, noteFrames, pitchDelta, strokeData, warp,
 } from './state.js';
 
 // 黄（テイク）→ 橙 → 赤。段ごとに暗くなる（相対輝度 0.63 → 0.45 → 0.28 → 0.16）
 export const RAMP = ['#e6d24a', '#eaa73c', '#e3702e', '#d23a2a'];
 export const MANUAL = '#ffffff';
+// 無音のノートのピッチの線（補正の色にしない。index.html の --fg3）
+const MUTED_LINE = '#5c5c62';
 const EPS_SEC = 1e-4;
 const EPS_CENTS = 0.1;
 
@@ -171,7 +173,7 @@ export function lineColorer() {
     let c = cache.get(id);
     if (c === undefined) {
       const n = S.byId.get(id);
-      c = n && n.kind === 'note' ? lineColor(n) : COLORS.TAKE;
+      c = n && n.kind === 'note' ? (isMuted(n) ? MUTED_LINE : lineColor(n)) : COLORS.TAKE;
       cache.set(id, c);
     }
     return c;

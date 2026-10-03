@@ -47,7 +47,7 @@ export function onDocument(fn) { docHook = fn; }
 // 0.3 秒を超えたら線を出す呼び出しの名前（ユーザーの操作の反映）。ここに無いものは「処理している…」
 const LABELS = {
   shift_pitch: 'ピッチを反映している…', apply_plan: '編集を反映している…', set_pitch_curve: '描いたピッチを反映している…',
-  split_note: 'ノートを分けている…', merge_notes: 'ノートを結合している…', mute_notes: '無音にしている…',
+  split_note: 'ノートを分けている…', merge_notes: 'ノートを結合している…', mute_notes: '無音にしている…', unmute_notes: '無音を戻している…',
   set_fade: 'フェードを反映している…', set_connection: 'つなぎを反映している…',
   set_transition: 'つなぎのなだらかさを反映している…', move_boundary: '音素の境目を動かしている…',
   reset_to_original: 'オリジナルに戻している…', set_lyrics: '歌詞を反映している…', set_note_syllable: '音節を直している…',

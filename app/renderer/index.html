@@ -236,16 +236,17 @@ body{display:flex;flex-direction:column}
 .toast.on{opacity:1;transform:translate(-50%,0)}
 /* 子音・息（音程の無いノート）: 乗っている・つかんでいる間はやや濃く（issue #35） */
 #roll .npg:hover path[data-nopitch],#roll .npg.hov path[data-nopitch]{fill-opacity:.26}
-/* 無音にしたノート（Del）: 帯を薄く */
-#roll .nb.muted .blob{fill-opacity:.1}
-#roll .nb.muted:hover .blob,#roll .nb.muted.hov .blob{fill-opacity:.16}
-#roll .nb.muted.sel .blob{fill-opacity:.24}
+/* 無音のノート（Del・ミュートツール）: 点線の輪郭と薄い塗り（ピッチの線は draw.js が灰色にする） */
+#roll .nb.muted .blob,#roll .npg.muted path[data-nopitch]{fill-opacity:.06;stroke:#8f8f94;stroke-opacity:.7;stroke-width:1;stroke-dasharray:3 2.5}
+#roll .nb.muted:hover .blob,#roll .nb.muted.hov .blob,#roll .npg.muted:hover path[data-nopitch],#roll .npg.muted.hov path[data-nopitch]{fill-opacity:.12;stroke-opacity:.95}
+#roll .nb.muted.sel .blob,#roll .npg.muted.sel path[data-nopitch]{fill-opacity:.18}
 /* ツールのカーソル（鉛筆・はさみ）。blob の cursor:move などより優先 */
 #roll.tool-draw rect[data-note],#roll.tool-draw path,#roll.tool-draw{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z' stroke='%23111' stroke-width='3.2'/><path d='m15 5 4 4' stroke='%23111' stroke-width='3.2'/><path d='M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='m15 5 4 4' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 3 21,crosshair!important}
 #roll.tool-cut rect[data-note],#roll.tool-cut rect[data-join],#roll.tool-cut{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23111' stroke-width='3.2'/><path d='M20 4 8.12 15.88' stroke='%23111' stroke-width='3.2'/><path d='M14.47 14.48 20 20' stroke='%23111' stroke-width='3.2'/><path d='M8.12 8.12 12 12' stroke='%23111' stroke-width='3.2'/><path d='M6 3a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M6 15a3 3 0 1 0 0 6a3 3 0 1 0 0-6z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M20 4 8.12 15.88' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M14.47 14.48 20 20' stroke='%23f2f2f2' stroke-width='1.5'/><path d='M8.12 8.12 12 12' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 12 12,crosshair!important}
-#roll.tool-draw rect[data-lane],#roll.tool-cut rect[data-lane]{cursor:text!important}
+#roll.tool-mute rect[data-note],#roll.tool-mute{cursor:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke-linecap='round' stroke-linejoin='round'><path d='M11 5 6 9H3v6h3l5 4z' stroke='%23111' stroke-width='3.2'/><path d='m22 9-6 6M16 9l6 6' stroke='%23111' stroke-width='3.2'/><path d='M11 5 6 9H3v6h3l5 4z' stroke='%23f2f2f2' stroke-width='1.5'/><path d='m22 9-6 6M16 9l6 6' stroke='%23f2f2f2' stroke-width='1.5'/></svg>") 6 12,pointer!important}
+#roll.tool-draw rect[data-lane],#roll.tool-cut rect[data-lane],#roll.tool-mute rect[data-lane]{cursor:text!important}
 /* 鍵盤とルーラー（タイムスケール）の上はどのツールでも矢印（issue #6） */
-#roll.tool-draw rect[data-scale],#roll.tool-cut rect[data-scale],#roll.tool-draw rect[data-keys],#roll.tool-cut rect[data-keys]{cursor:default!important}
+#roll.tool-draw rect[data-scale],#roll.tool-cut rect[data-scale],#roll.tool-mute rect[data-scale],#roll.tool-draw rect[data-keys],#roll.tool-cut rect[data-keys],#roll.tool-mute rect[data-keys]{cursor:default!important}
 .lyr{position:absolute;z-index:3;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55);padding:0}
 .lyr[hidden]{display:none}
 .lyr input{width:100%;background:#1c1c1f;border:1px solid #3a3a3e;color:var(--fg);font:inherit;font-size:13px;padding:6px 8px;outline:none}
@@ -304,6 +305,7 @@ body{display:flex;flex-direction:column}
     <button id="bToolMain" aria-label="メインツール（1）" title="メインツール（1）" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3.5 18.5 12l-6 1.5-3 5.5z"/></svg></button>
     <button id="bToolDraw" aria-label="鉛筆（2）: ピッチを描く" title="鉛筆（2）: ピッチを描く" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z"/><path d="m15 5 4 4"/></svg></button>
     <button id="bToolCut" aria-label="はさみ（3）: ノートを分ける" title="はさみ（3）: ノートを分ける（境目をダブルクリックで結合）" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg></button>
+    <button id="bToolMute" aria-label="ミュート（4）: クリックで無音にする／戻す" title="ミュート（4）: クリックで無音にする／戻す（なぞるとまとめて）" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/></svg></button>
     <span class="grp"></span>
     <button id="bUndo" aria-label="元に戻す（Ctrl+Z）" title="元に戻す（Ctrl+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
     <button id="bRedo" aria-label="やり直す（Ctrl+Shift+Z）" title="やり直す（Ctrl+Shift+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>

@@ -48,7 +48,8 @@ export const S = {
   // ドラッグ中の差分。pitch はピッチのドラッグ、btime は音素境界のドラッグ
   // （`move_boundary`。前後 2 音素の線形の伸縮なので境界の上書きで描ける）。
   // fade はフェードのつまみのドラッグ（id → { fi, fo }。編集後の秒。issue #20）
-  local: { pitch: new Map(), btime: new Map(), fade: new Map() },
+  // mute はミュートツールのなぞった分（id → 無音にする = true / 戻す = false。当たるまでの見かけ）
+  local: { pitch: new Map(), btime: new Map(), fade: new Map(), mute: new Map() },
   // エンジンの計画（plan_edit）。{ data, x, x0, pitch, pitch0, guides }
   //   x / pitch    いまの値（タイミング / ピッチの強度。端・移動では x = 秒）
   //   x0 / pitch0  表示中の view data がすでに当たっている値（ポップアップ内の当て直し）
@@ -79,7 +80,7 @@ export const S = {
   guide: null,
   // 開いているプロジェクトのファイル（issue #33）: { kind: 'gliss' | 'untitled' | 'legacy', path, name, dirty, work_dir }
   doc: null,
-  // ツール（ヘッダーのアイコン / 1・2・3）: 'main' = 矢印、'draw' = 鉛筆、'cut' = はさみ
+  // ツール（ヘッダーのアイコン / 1・2・3・4）: 'main' = 矢印、'draw' = 鉛筆、'cut' = はさみ、'mute' = ミュート
   tool: 'main',
   // 「つなぎのなだらかさ」のスライダー中: { keys: Set('a|b'), value }（エンジンは離したときだけ呼ぶ）
   trPreview: null,
@@ -613,6 +614,8 @@ export function guideBox(g) {
 }
 
 export function isSel(id) { return S.sel.indexOf(id) >= 0; }
+/** 無音のノートか（ミュートツールでなぞった分・当たるのを待っている分を含む）。 */
+export function isMuted(n) { return S.local.mute.has(n.id) ? S.local.mute.get(n.id) : !!n.muted; }
 
 /** 選択が無ければ全体が対象（モックと同じ）。 */
 export function targets() {
@@ -692,6 +695,10 @@ export function adopt(vd, { keepView = true } = {}) {
   const fd = S.drag?.type === 'fade' ? S.local.fade.get(S.drag.id) : null;
   S.local.fade.clear();
   if (fd) S.local.fade.set(S.drag.id, fd);
+  // ミュートツールでなぞっている間は、なぞった分を残す（前の編集の描き直しで消えない）
+  const mu = S.drag?.type === 'mute' ? [...S.local.mute] : [];
+  S.local.mute.clear();
+  for (const [id, v] of mu) S.local.mute.set(id, v);
   invalidateWarp();
   S.ph = vd.phonemes?.has_lyrics ? vd.phonemes : null;
   S.phById = new Map((S.ph?.phonemes || []).map((p) => [p.id, p]));
@@ -753,6 +760,7 @@ export function clearProject() {
   S.local.pitch.clear();
   S.local.btime.clear();
   S.local.fade.clear();
+  S.local.mute.clear();
   invalidateWarp();
   syncOff();
 }
