@@ -179,7 +179,8 @@ HISTORY_TOOLS = {
     "set_lyrics", "import_lyrics", "shift_pitch", "set_pitch_curve", "set_transition", "split_note", "merge_notes",
     "move_note", "stretch", "move_boundary", "correct_to_guide", "apply_plan", "set_connection",
     "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
-    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "split_track", "join_track",
+    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "make_score_guide",
+    "split_track", "join_track",
     "mute_track_range", "open_project",
     "new_project", "load_project", "save_project",
 }

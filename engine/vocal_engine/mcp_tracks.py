@@ -545,6 +545,57 @@ def set_guide_track(track_id: str = None, author: str = "ai") -> dict:
                next=("analyze_take を呼ぶ" if reopened else None))
 
 
+@_tool
+@_guarded
+def make_score_guide(path: str, track: int | str = None, bpm: float = None, start_sec: float = None,
+                     use: bool = True, name: str = None, author: str = "ai") -> dict:
+    """譜面（MIDI / SVP）からガイドの音を作り、トラックとして足す（ガイドの WAV が無い・息や囁きで音程が取れないとき）。
+    取り消せる（undo でトラックごと消える）。
+
+    編集対象のトラックの解析（F0・発音の頭）を使って、譜面の**時間の頭**（譜面の 0 拍がタイムラインの何秒か）と
+    **トラック**（主旋律・ハモリ）を推定し、ノートどおりの高さの合成音の WAV（セッションのフォルダの
+    `score-guides/`）と、そのノートの印（WAV の横の `.score.json`）を書く。印のある WAV をガイドにすると、
+    ガイドのノート・発音の頭は譜面のノートそのもの、対応付けは同じ時間軸（ずれ 0）として扱う。
+
+    track: 譜面のトラック（番号か名前）。省略するとテイクの高さに最も合うトラック（返り値の candidates）。
+    bpm: テンポ。省略時は譜面のテンポ。テンポの無い MIDI はセッションのテンポ（set_tempo）、それも無ければ 120。
+    start_sec: 譜面の 0 拍のタイムライン上の秒。省略すると推定する（返り値の start_sec・fit）。
+    use: True ならガイドに指定する。name: トラックの名前（省略時は「譜面ガイド <ファイル名> <トラック>」）。
+    変えたら analyze_take を呼ぶ（ガイドの解析と対応付けが走る）。
+    """
+    from . import score_guide as SG
+    from . import score_import
+    s = _session()
+    p = _srv._project()
+    p.reload_if_changed()
+    p.ensure_analyzed()
+    if not os.path.exists(path):
+        raise SessionError("譜面が見つからない: %s" % path)
+    score = score_import.read_score(path)
+    dur = max([float(t["offset_sec"]) + float(t["duration_sec"]) for t in s.tracks] or [p.duration_sec])
+    tempo = s.tempo or {}
+    notes, start, y, info = SG.build(score, p.take_f0, current_offset_sec(), p.onsets("take"), dur,
+                                     track=track, bpm=bpm, session_bpm=tempo.get("bpm"), start_sec=start_sec)
+    tr = info["track"]
+    key = hashlib.sha1(json.dumps([os.path.abspath(path), os.path.getsize(path), os.path.getmtime(path),
+                                   tr["index"], info["bpm"], info["start_sec"], round(dur, 3)]).encode()
+                       ).hexdigest()[:8]
+    stem = os.path.splitext(os.path.basename(path))[0]
+    wav = os.path.join(s.dir, "score-guides", "%s-t%d-%s.wav" % (stem, tr["index"], key))
+    if not os.path.exists(wav) or SG.read(wav) is None:
+        SG.write(wav, y, info["played"], info)
+    r = add_track(wav, kind="vocal", name=name or "譜面ガイド %s %s" % (stem, tr["index"]), guide=bool(use),
+                  author=author)
+    if not r.get("ok"):
+        return r
+    out = {k: v for k, v in info.items() if k != "played"}
+    return _ok(path=wav, score_track=tr, start_sec=out["start_sec"], bpm=out["bpm"],
+               tempo_source=out["tempo_source"], fit=out["fit"], candidates=out["candidates"],
+               warnings=out["warnings"], notes=len(info["played"]), track=r.get("track"),
+               guide=s.guide, reopened=r.get("reopened"), session=r.get("session"),
+               next="analyze_take を呼ぶ（ガイドが変わった）" if use else "set_guide_track でガイドにする")
+
+
 # ---------------------------------------------------------------- テンポ（issue #18）
 @_tool
 @_guarded
@@ -1090,5 +1141,5 @@ def render_tracks(track_ids: list = None, backend: str = "praat", background: bo
     return _ok(**work())
 
 
-TOOLS = [list_tracks, select_track, add_track, remove_track, set_track, set_guide_track,
+TOOLS = [list_tracks, select_track, add_track, remove_track, set_track, set_guide_track, make_score_guide,
          split_track, join_track, mute_track_range, set_tempo, track_overview, render_tracks]

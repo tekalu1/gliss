@@ -1053,6 +1053,10 @@ class Project:
         info = self.take if role == "take" else self.guide
         if info is None:
             raise ProjectError("%s の音声が無い" % role)
+        if role == "guide":
+            sg = self.score_guide_notes()
+            if sg is not None:                     # 譜面ガイド: 発音の頭 = 譜面のノートの頭
+                return np.array([round(n.start_sec, 4) for n in sg], dtype="float64")
         key = [info["path"], int(info.get("offset_frames", 0) or 0), int(info["frames"]),
                info.get("content_sha256") or info.get("sha256"), ON.VERSION]
         alias = self._cache_path("onsets-%s.json" % role)
@@ -1576,7 +1580,34 @@ class Project:
     @property
     def guide_notes(self):
         self.ensure_analyzed()
+        sg = self.score_guide_notes()
+        if sg is not None:
+            return sg
         return self._guide_notes or []
+
+    def score_guide(self):
+        """ガイドが譜面から作った合成音（`score_guide.write` の印がある）なら、その印。無ければ None。"""
+        g = self.guide
+        if not g or not g.get("path"):
+            return None
+        from .. import score_guide as SG
+        return SG.read(g["path"])
+
+    def score_guide_notes(self):
+        """譜面ガイドのノート（ガイドの秒）。音から分割したノートの代わりに使う（同じ高さが続くノート・
+        1 半音の短い音も譜面どおりに分かれる）。譜面ガイドでなければ None。"""
+        d = self.score_guide()
+        if d is None:
+            return None
+        g = self.guide
+        key = (id(d), int(g.get("offset_frames") or 0), int(g["frames"]))
+        if getattr(self, "_sg_notes", None) is not None and self._sg_notes[0] == key:
+            return self._sg_notes[1]
+        from .. import score_guide as SG
+        ns = SG.guide_notes(d, offset_frames=int(g.get("offset_frames") or 0), sr=int(g["sr"]),
+                            duration_sec=float(g["frames"]) / float(g["sr"]))
+        self._sg_notes = (key, ns)
+        return ns
 
     @property
     def alignment(self):

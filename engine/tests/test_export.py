@@ -155,4 +155,5 @@ def test_export_tool_is_registered():
     assert m.set_f0_estimator in m.TOOLS and m.unmute_notes in m.TOOLS
     names = [f.__name__ for f in m.TOOLS]
     assert {"split_track", "join_track", "mute_track_range"} <= set(names)    # クリップの分割・部分のミュート
-    assert len(m.TOOLS) == 65
+    assert "make_score_guide" in names                  # 譜面ガイド（ガイドとの対応 v3）
+    assert len(m.TOOLS) == 66
