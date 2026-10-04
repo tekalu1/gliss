@@ -240,13 +240,16 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 中央値が 26.8 → 10.9 ms）。結果は `<project>/cache/` に保存し、
 2 回目以降は読み直すだけ。
 
-`estimator`（F0 の方式）を省くと、選んでいる方式（画面の 編集 > ピッチ検出の方式・`set_f0_estimator`）で解析する。
+`estimator`（F0 の方式）を省くと、次の順で決めた方式で解析する（`engine_info().f0_estimator_effective`）:
+そのトラックで明示した方式 → 選んだ方式（画面の 編集 > ピッチ検出の方式・`set_f0_estimator`。画面は起動時に環境変数 `GLISS_F0_ESTIMATOR` で渡す）→
+その曲を前に解析した方式（`project.json` の `analysis.take.estimator`。記録の無い古い解析は `rmvpe`）→ 既定の `rmvpe`。
+`rmvpe` になったのに重みが無ければ `gliss`。RMVPE の重みを後から取った・消したときや既定を替えたときも、前に解析・編集した曲は前の方式のまま（音符の区切りと、付けた編集の当たり方を変えない）。
 **`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator` で選び直すと、全体の方式に戻る。
 
 | `estimator` | 中身 |
 |---|---|
-| `rmvpe` | 既定・正。RMVPE（ONNX）。重みは同梱せず、利用者が取得する（`%LOCALAPPDATA%\Gliss\models\rmvpe.onnx`） |
-| `gliss` | Gliss の F0 モデル（試作）。条件のはっきりした学習データだけで学習した小さなモデル（SwiftF0 と同じ構造、135 KB。エンジンに同梱）。16 kHz・16 ms ごとの出力を 10 ms の格子に載せ、確信度 0.5 以上を有声にする |
+| `rmvpe` | 既定・正。RMVPE（ONNX）。重みは同梱せず、利用者が取得する（初回の画面で任意。`%LOCALAPPDATA%\Gliss\models\rmvpe.onnx`） |
+| `gliss` | Gliss の F0 モデル。条件のはっきりした学習データだけで学習した小さなモデル（SwiftF0 と同じ構造、135 KB。エンジンに同梱）。16 kHz・16 ms ごとの出力を 10 ms の格子に載せ、確信度 0.5 以上を有声にする。RMVPE の重みが無いときに代わりに使う。叫び・高い声への跳躍で 1 オクターブ上に誤ることがある |
 | `praat` | Praat（parselmouth）の自己相関法を歌声向けに調整したもの（octave cost 0.1、有声は strength のヒステリシス）。重みは要らない |
 | `fcpe` | 代替（torch。開発版だけ） |
 | `auto` | `rmvpe` → 落ちたら `gliss` |
@@ -255,6 +258,7 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
   `rmvpe` の `confidence` は 0/1 の代用値、`gliss`・`praat` は 0..1 の確度。
 - **選んでいる方式が `rmvpe` で重みが無いときは `gliss` で解析する**（`engine_info().f0_estimator_effective`）。
   `estimator="rmvpe"` と名前を指定したときは、重みが無ければエラー。
+- `estimator` を指定して解析すると、その方式がその曲の方式として残る（次に省いて呼んだときもその方式）。
 - 保存した解析（`cache/take-analysis.json`）が別の方式・別の版のものなら、テイクの F0 から解析し直す。
   ガイドの解析と対応付けは方式ごとの鍵付きの保存（`cache/guide/`）なので、方式を戻したときは読むだけで済む。
 - 方式を替えると音符の切れ目が変わることがある。編集済みのテイクで替えると、ノートに付けた編集の当たり方が変わりうる。
@@ -833,8 +837,8 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `get_job(job_id)` | 長い処理の結果。`status`・`progress`・`cancellable`。裏の準備に合流した `analyze_take` は `joined`・`stage`・`stage_label` も（§1 `analyze_take`） |
 | `prep_status()` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない |
 | `pause_prep(paused?)` | 裏の準備を一時停止／再開（走っている段は最後まで進み、次の段の前で止まる。合流して待っているトラックは止めない） |
-| `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝選んでいる方式、`f0_estimator_effective`＝実際に使う方式、`f0_estimators`、`gliss_f0_model_found`） |
-| `set_f0_estimator(estimator?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。そのエンジンの既定で、曲は変えない）。この後の `analyze_take`・裏の準備がその方式で解析する（`analyze_take(estimator=…)` でトラックごとに明示した方式は、ここで選び直すと外れる）。返り値の `effective` が実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
+| `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝これから解析する曲の方式（選んだ方式か既定）、`f0_estimator_chosen`＝選んだ方式（選んでいなければ null）、`f0_estimator_effective`＝開いている曲で実際に使う方式、`f0_estimator_default`、`f0_estimators`、`gliss_f0_model_found`） |
+| `set_f0_estimator(estimator?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。そのエンジン全体の方式で、曲は変えない）。この後の `analyze_take`・裏の準備がその方式で解析する（前に別の方式で解析した曲も解析し直す。`analyze_take(estimator=…)` でトラックごとに明示した方式は、ここで選び直すと外れる）。返り値の `effective` が開いている曲で実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
 
 `backend` は `praat`（既定。Praat（praat-parselmouth）の TD-PSOLA）、`psola`（自前の TD-PSOLA）、`world` のどれか。
 praat-parselmouth が import できない環境では `praat` を頼んでも `psola` で再合成し、engine.log に警告を書く

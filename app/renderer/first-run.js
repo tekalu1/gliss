@@ -7,14 +7,20 @@ let models = { rmvpe: false, hubertfa: false };
 let sizes = { rmvpe: 334213248, hubertfa: 256589553 };
 let progress = { phase: 'idle', bytes: 0, total: 0 };
 let installed = false;
+// 解析に要る重み。RMVPE（既定のピッチ検出の方式）は任意（無ければエンジンは同梱の Gliss の F0 モデルで検出する）なので
+// 「準備完了」の条件に入れず、別のボタン（RMVPE も取得）で取る
+const REQUIRED = ['hubertfa'];
+let optionalStarted = false;     // 最後に始めたのが任意の RMVPE だけの取得か（失敗したときの「再試行」を出すボタン）
 
 function active() { return ['downloading', 'extracting'].includes(progress.phase); }
 function formatBytes(n) { return `${Math.ceil(n / 1e6)} MB`; }
 
 function draw() {
-  const ready = models.rmvpe && models.hubertfa;
+  const ready = REQUIRED.every((id) => models[id]);
+  const optional = !models.rmvpe;
   const starting = progress.phase === 'starting';
-  const missing = Object.entries(models).filter(([, found]) => !found).reduce((n, [id]) => n + sizes[id], 0);
+  const failed = progress.phase === 'failed';
+  const missing = REQUIRED.filter((id) => !models[id]).reduce((n, id) => n + sizes[id], 0);
   const summary = $('#modelSummary');
   summary.textContent = ready ? '準備完了' : starting ? '準備中…' : active()
     ? progress.phase === 'extracting' ? `${progress.model} を配置中…` : `${progress.model} をダウンロード中…`
@@ -25,12 +31,16 @@ function draw() {
   $('#modelProgressFill').style.width = `${percent}%`;
   $('#modelPercent').hidden = !active();
   $('#modelPercent').textContent = `${percent}%`;
-  $('#modelLicenseButton').hidden = ready;
+  $('#modelLicenseButton').hidden = ready && !optional;
   $('#modelDownloadButton').hidden = ready || active() || starting;
-  $('#modelDownloadButton').textContent = progress.phase === 'failed' ? '再試行' : 'ダウンロード';
+  $('#modelDownloadButton').textContent = failed && !optionalStarted ? '再試行' : 'ダウンロード';
+  $('#modelOptionalButton').hidden = !optional || active() || starting;
+  $('#modelOptionalButton').textContent = failed && optionalStarted ? 'RMVPE を再試行'
+    : `RMVPE も取得（任意・${formatBytes(sizes.rmvpe)}）`;
   $('#modelCancelButton').hidden = !active();
-  $('#modelError').textContent = progress.phase === 'failed' ? progress.error : '';
-  if (ready) $('#modelLicense').hidden = true;
+  $('#modelHint').hidden = !optional;          // RMVPE が無いと Gliss で検出すること（RMVPE のほうが精度が良い）
+  $('#modelError').textContent = failed ? progress.error : '';
+  if (ready && !optional) $('#modelLicense').hidden = true;
 }
 
 export async function refreshModels() {
@@ -66,12 +76,15 @@ export function installFirstRun({ onOpen, onAi }) {
   $('#modelLicenseButton').addEventListener('click', () => {
     $('#modelLicense').hidden = !$('#modelLicense').hidden;
   });
-  $('#modelDownloadButton').addEventListener('click', async () => {
+  const start = async (ids) => {
+    optionalStarted = !!ids;
     progress = { phase: 'starting', bytes: 0, total: 0, model: '' };
     draw();
-    try { progress = await window.api.modelStart(); draw(); }
+    try { progress = await window.api.modelStart(ids); draw(); }
     catch (err) { progress = { phase: 'failed', error: String(err.message || err) }; draw(); }
-  });
+  };
+  $('#modelDownloadButton').addEventListener('click', () => start(null));
+  $('#modelOptionalButton').addEventListener('click', () => start(['rmvpe']));
   $('#modelCancelButton').addEventListener('click', () => void window.api.modelCancel());
   window.api.onModelProgress((next) => {
     progress = next;

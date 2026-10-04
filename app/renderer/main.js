@@ -4,7 +4,7 @@
 //   → load_project / new_project / open_project（旧形式）→ analyze_take（長いときはジョブなので get_job をポーリング）
 //   → export_view_data → 描画。
 // ファイル > 新規プロジェクト・開く・保存・名前を付けて保存（issue #33）もここ。
-import { analyzeTake, call, callJob, onDocument, status, $ } from './engine.js';
+import { analyzeTake, analyzed, call, callJob, onAnalyzed, onDocument, status, $ } from './engine.js';
 import { beginBusy, busyState, installBusy, laterBusy, refuseWhileBlocking } from './busy.js';
 import {
   S, adopt, bandOf, clearProject, defaultPitchView, editedCurve, phSpan, pitchOf, planWarp, spanOf, strokeData, totalSec,
@@ -38,7 +38,7 @@ import { aiOpen, closeAi, installAiDialog, openAi } from './aidlg.js';
 import { askText } from './askai.js';
 import { commandFor, keysOf, loadOverrides, overrides } from './keys.js';
 import { installFirstRun, setModelSizes, showFirstRun } from './first-run.js';
-import { f0State, onF0Change, refreshF0 } from './f0.js';
+import { adoptAnalysis, f0State, onF0Change, refreshF0 } from './f0.js';
 import { addonsOpen, addonsState, closeAddons, installAddons, openAddons } from './addons.js';
 import { adoptDoc, adoptSession, guideSuffix, loadSession, onDoc, phonemeSuffix, setTrack } from './session.js';
 import {
@@ -185,10 +185,10 @@ async function afterOpen(op0, { keepView = false, restoreTrack = false, take = n
   status(op.analyzed ? '解析済み。読み込んでいる…'
     : '解析している…（F0 → 音符 → ガイドとの対応付け → 音素）');
   try {
-    await callJob('analyze_take', { background: true }, (sec) => status(`解析している… ${sec} 秒`),
-      { busy: openingBusy, modal: true, label: 'プロジェクトを開いている', stage: 'トラックの解析' });
+    analyzed(await callJob('analyze_take', { background: true }, (sec) => status(`解析している… ${sec} 秒`),
+      { busy: openingBusy, modal: true, label: 'プロジェクトを開いている', stage: 'トラックの解析' }));
   } catch (err) {
-    // 解析モデル（RMVPE）が未取得: 落とさず、取得の画面へ案内する（取得したあと「開く…」で開き直す）
+    // 解析に要る重み（HubertFA）が未取得: 落とさず、取得の画面へ案内する（取得したあと「開く…」で開き直す）
     if (!err.cancelled && await analysisModelMissing()) {
       showFirstRun(true);
       throw new Error('解析モデルが未取得です。「ダウンロード」で取得してから、もう一度開いてください');
@@ -211,11 +211,12 @@ async function afterOpen(op0, { keepView = false, restoreTrack = false, take = n
   status(`${name}${g} — ノート ${S.pitched.length}${ph}${phonemeSuffix()}${note}`);
 }
 
-/** 解析に要る重み（RMVPE）がまだ無いか（エンジンに聞けなければ「無い」とは言わない）。 */
+/** 解析に要る重み（音素の HubertFA）がまだ無いか（エンジンに聞けなければ「無い」とは言わない）。
+ * RMVPE は任意（無ければエンジンは同梱の Gliss の F0 モデルで解析する）なので見ない。 */
 async function analysisModelMissing() {
   try {
     const info = await call('engine_info', {});
-    return info.ok !== false && !info.rmvpe_model_found;
+    return info.ok !== false && info.phonemes?.model_found === false;
   } catch { return false; }
 }
 
@@ -716,6 +717,7 @@ async function boot() {
     return;
   }
   onF0Change(syncAppMenu);
+  onAnalyzed(adoptAnalysis);      // 曲ごとの方式（前に解析した方式のまま）をメニューのチェックへ
   await refreshF0();              // ピッチ検出の方式（エンジンが実際に使うもの・RMVPE の重みの有無）をメニューのチェックへ
   const { take, guide } = b;
   try {

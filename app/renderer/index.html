@@ -324,7 +324,7 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 .lyr input:focus{border-color:#5c5c62}
 /* Empty window / first run */
 #mock.first-run .tb,#mock.first-run #roll,#mock.first-run #tv,#mock.first-run #split{display:none}
-#firstRun[hidden],#modelLicense[hidden],#modelActions [hidden],.fr-actions [hidden],.fr-license[hidden]{display:none}
+#firstRun[hidden],#modelLicense[hidden],#modelActions [hidden],.fr-actions [hidden],.fr-license[hidden],.fr-hint[hidden]{display:none}
 #firstRun{flex:1;min-height:0;display:flex;flex-direction:column;padding:0 24px 18px;gap:16px;color:#e6e8ee}
 .fr-model{border:1px solid #343946;background:#20232a;border-radius:7px;padding:12px 16px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:56px;font-size:13px}
 .fr-model strong{font-size:13px}.fr-muted{color:#9aa1af}.fr-spacer{flex:1}
@@ -339,6 +339,7 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 .fr-progress[hidden]{display:none}
 .fr-error{color:#ffb4a6;max-width:100%;overflow-wrap:anywhere}
 .fr-error:empty{display:none}
+.fr-hint{flex-basis:100%;font-size:12px}
 #modelLicense{border:1px solid #343946;border-radius:7px;background:#1d2026;padding:12px 16px;font-size:12px;line-height:1.8}
 #modelLicense a{color:#a9baff}
 /* 任意機能のアドオン（addons.js）。行は解析モデルと同じ見た目 */
@@ -400,8 +401,9 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
       <div class="fr-spacer"></div>
       <div class="fr-progress" id="modelProgress" hidden role="progressbar" aria-label="解析モデルのダウンロード" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="modelProgressFill"></span></div>
       <span class="fr-muted" id="modelPercent" hidden></span>
-      <div id="modelActions"><button class="fr-quiet" id="modelLicenseButton" hidden>ライセンス</button><button class="fr-primary" id="modelDownloadButton" hidden>ダウンロード</button><button class="fr-quiet" id="modelCancelButton" hidden>取り消し</button></div>
+      <div id="modelActions"><button class="fr-quiet" id="modelLicenseButton" hidden>ライセンス</button><button class="fr-primary" id="modelDownloadButton" hidden>ダウンロード</button><button class="fr-quiet" id="modelOptionalButton" hidden title="既定のピッチ検出の方式。取らなければ同梱の Gliss の F0 モデルで検出する">RMVPE も取得（任意）</button><button class="fr-quiet" id="modelCancelButton" hidden>取り消し</button></div>
       <span class="fr-error" id="modelError" role="alert"></span>
+      <span class="fr-muted fr-hint" id="modelHint" hidden>RMVPE が無いと、ピッチは同梱の Gliss で検出する（RMVPE のほうが精度が良い）</span>
     </div>
     <div id="modelLicense" hidden><div>RMVPE：記載なし · <a href="https://github.com/yxlllc/RMVPE/releases/download/230917/rmvpe-onnx.zip" target="_blank" rel="noopener">入手元</a></div><div>HubertFA：コードは Apache-2.0、重みは未確認 · <a href="https://github.com/wolfgitpr/HubertFA/releases/download/v0.0.7/1218_hfa_model_new_dict.zip" target="_blank" rel="noopener">入手元</a></div></div>
     <div id="addonRows" aria-label="追加の機能"></div>

@@ -123,7 +123,7 @@ test('(A2) メニュー: プロジェクト・書き出し・AI・更新が無�
   expect(by.ファイル).toEqual(['歌詞を読み込む（テキスト）…', '歌詞を読み込む（SVP / MIDI）…']);      // ガイドを開く…は C++ が対応するまで隠す
   expect(by.ヘルプ).toEqual(['ショートカット（キー・ホイール）…']);
   expect(by.表示).toContain('原音と比べる');
-  expect(by.編集).toEqual(expect.arrayContaining(['元に戻す', 'やり直す', 'すべて選択', 'テンポを入力', 'RMVPE（既定）', 'Gliss（試作）', 'Praat']));
+  expect(by.編集).toEqual(expect.arrayContaining(['元に戻す', 'やり直す', 'すべて選択', 'テンポを入力', 'RMVPE（既定）', 'Gliss', 'Praat']));
   const all = m.flatMap((x) => x.items).join('\n');
   for (const gone of ['保存', '書き出し', '新規プロジェクト', '開く…', 'トラックを追加', 'AI とつなぐ', '更新を確認', 'について', '終了', '最近使った', 'モデルと追加']) {
     expect(all, gone).not.toContain(gone);

@@ -39,7 +39,7 @@ contextBridge.exposeInMainWorld('api', {
 
   bootstrap: () => ipcRenderer.invoke('app.bootstrap'),
   modelState: () => ipcRenderer.invoke('app.modelState'),
-  modelStart: () => ipcRenderer.invoke('app.modelStart'),
+  modelStart: (ids) => ipcRenderer.invoke('app.modelStart', ids),
   modelCancel: () => ipcRenderer.invoke('app.modelCancel'),
   onModelProgress: (fn) => ipcRenderer.on('app.modelProgress', (_e, progress) => fn(progress)),
   /** 任意機能のアドオン（ヘルプ > モデルと追加の機能…。main の addons.mjs）。 */

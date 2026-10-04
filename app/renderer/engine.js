@@ -168,6 +168,11 @@ export async function callJob(name, args, onProgress, options = {}) {
   }
 }
 
+let analyzedHook = null;
+/** analyze_take が済んだら呼ぶ関数（結果を受け取る。f0.js がピッチ検出の方式のチェックを曲の方式に合わせる）。 */
+export function onAnalyzed(fn) { analyzedHook = fn; }
+export function analyzed(r) { analyzedHook?.(r); }
+
 /** トラックの解析（analyze_take。画面は常にジョブで頼む）。キャッシュで済めばその場で返り、何も出さない（issue #63）。
  * ジョブになったら（準備が終わっていない・重い計算が残る）止める処理のポップアップを出す。
  * hold（`laterBusy()`）を渡すと、終わった後もそのまま（描き直してから呼び出し側が finish する）。
@@ -179,6 +184,7 @@ export async function analyzeTake({ hold = null, label = 'トラックを準備�
     const r = await callJob('analyze_take', { background: true }, onProgress,
       { busy: h, stage: 'トラックの解析', cancel });
     S.awaitPrep = null;              // 解析が済んだ: 待つのをやめて空にしていた表示を描いてよい
+    analyzed(r);
     return r;
   } catch (err) {
     if (err.abandoned) await abandonHook?.(err);

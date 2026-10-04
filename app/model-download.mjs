@@ -8,7 +8,8 @@ import { extractZip } from './unzip.mjs';
 
 export const MODEL_SOURCES = [
   {
-    id: 'rmvpe', name: 'RMVPE',
+    // 任意（既定のピッチ検出の方式。無ければエンジンは同梱の Gliss の F0 モデルで検出する）
+    id: 'rmvpe', name: 'RMVPE', optional: true,
     url: 'https://github.com/yxlllc/RMVPE/releases/download/230917/rmvpe-onnx.zip',
     size: 334213248,
     sha256: '72b7cfda722bd2697cab537b38ece2698dfe18d8f3487735608d62e82a583ed8',
@@ -152,8 +153,9 @@ export function sourcesFromEnvironment(env = process.env) {
   });
 }
 
-export async function downloadModels({ net, sources, modelsDir, present, signal, progress }) {
-  const missing = sources.filter((s) => !present[s.id]);
+/** ids: 取得するモデル（省くと必須のものだけ。任意の RMVPE は初回画面の「RMVPE も取得」で ids に入れて頼む）。 */
+export async function downloadModels({ net, sources, modelsDir, present, signal, progress, ids = null }) {
+  const missing = sources.filter((s) => (ids ? ids.includes(s.id) : !s.optional) && !present[s.id]);
   const total = missing.reduce((n, s) => n + s.size, 0);
   let done = 0;
   if (!missing.length) { progress({ phase: 'done', bytes: 0, total }); return; }

@@ -5,7 +5,7 @@
 #   cd engine\packaging
 #   ..\..\.venv-exe\Scripts\pyinstaller.exe vocal-engine.spec --noconfirm        （フォルダ形式 = dist\vocal-engine\）
 #   set "VE_ONEFILE=1" && ..\..\.venv-exe\Scripts\pyinstaller.exe vocal-engine.spec --noconfirm  （1 ファイル = dist\vocal-engine-onefile.exe。実測用。配布はフォルダ形式）
-# .venv-exe は torch を入れていない環境（本体の .venv とは別。requirements-exe.txt）。重みは Gliss の F0 モデル（試作）だけ同梱する。
+# .venv-exe は torch を入れていない環境（本体の .venv とは別。requirements-exe.txt）。重みは Gliss の F0 モデル（RMVPE の重みが無いときのピッチ検出）だけ同梱する。
 import os
 import hashlib
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules

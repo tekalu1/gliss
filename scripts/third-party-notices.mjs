@@ -7,7 +7,7 @@
 //   - エンジン exe（PyInstaller）に入る Python のパッケージ: エンジン exe を作った venv（.venv-exe。scripts/build-engine.mjs）の
 //     *.dist-info（METADATA の License-Expression / License / 分類と、ライセンスのファイル）。Python 本体（PSF）も
 //   - 画面（app.asar）に入る Node のパッケージ: app/package.json の dependencies から辿れるもの（devDependencies は入らない）
-//   - エンジン exe に入る Gliss の F0 モデル（試作）の学習コード・学習データの出典（engine/vocal_engine/analysis/models/gliss-f0.NOTICE.txt）
+//   - エンジン exe に入る Gliss の F0 モデルの学習コード・学習データの出典（engine/vocal_engine/analysis/models/gliss-f0.NOTICE.txt）
 //   - 任意のアドオン（scripts/build-addon.mjs が作った engine/packaging/dist-addons/<id>.LICENSES.txt。作っていれば）
 //   - DAW のプラグイン（Gliss.vst3）に入れた依存: JUCE（AGPLv3）・ARA SDK・WebView2 のローダ・Signalsmith と、JUCE が同梱した第三者のコード
 //     （JUCE の SBOM の JUCE.spdx.json を、リンクするモジュールから辿る）。scripts/build-plugin.mjs を先に走らせる（依存の置き場を書く）
@@ -246,7 +246,7 @@ export function pluginPackages(info = readPluginBuild()) {
   return out;
 }
 
-/** Gliss の F0 モデル（試作）の出典の文書（モデルの隣に置いてある。CC BY・ODbL・CMU Arctic の表示を含む）。 */
+/** Gliss の F0 モデルの出典の文書（モデルの隣に置いてある。CC BY・ODbL・CMU Arctic の表示を含む）。 */
 export function f0ModelNotice(file = path.join(ROOT, 'engine', 'vocal_engine', 'analysis', 'models', 'gliss-f0.NOTICE.txt')) {
   return fs.readFileSync(file, 'utf8');
 }

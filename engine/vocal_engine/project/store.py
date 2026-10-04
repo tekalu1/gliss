@@ -315,6 +315,42 @@ def forget_open():
         _open_cache.clear()
 
 
+def recorded_estimator(analysis):
+    """解析の要約（project.json の analysis）から、テイクを前に解析した F0 の方式。まだ解析していなければ None。
+    方式を記録する前の要約（方式が RMVPE だけだったころ）は "rmvpe"。"""
+    ta = (analysis or {}).get("take")
+    if not ta:
+        return None
+    return ta.get("estimator") or "rmvpe"
+
+
+_recorded_cache = {}                # project.json のパス -> (署名, 方式)
+_recorded_lock = Lock()
+
+
+def recorded_estimator_in(pdir):
+    """ディレクトリの project.json に記録された F0 の方式（`recorded_estimator`）。裏の準備の署名
+    （`prep.track_sig`）が、開いていないトラックについても曲ごとの方式を知るため。project.json が変わったときだけ読む。"""
+    path = os.path.join(pdir, "project.json")
+    sig = _src_sig(path)
+    if sig is None:
+        return None
+    key = sig[0]
+    with _recorded_lock:
+        hit = _recorded_cache.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    try:
+        est = recorded_estimator(read_json(path).get("analysis"))
+    except (OSError, ValueError, AttributeError):
+        return None
+    with _recorded_lock:
+        if len(_recorded_cache) > 256:
+            _recorded_cache.clear()
+        _recorded_cache[key] = (sig, est)
+    return est
+
+
 def _src_sig(path):
     """解析ファイルの署名（パス・更新時刻・サイズ・ID）。描画の鍵と読み直し判定に使う。"""
     try:
@@ -459,6 +495,14 @@ class Project:
     @property
     def log_path(self):
         return os.path.join(self.dir, "engine.log")
+
+    def f0_estimator(self, estimator=None):
+        """この曲を解析する F0 の方式（`f0.resolve_estimator`）。estimator を省くと、このトラックで明示した方式
+        （`estimator_pref`）→ 選んだ方式 → この曲を前に解析した方式 → 既定（RMVPE。重みが無ければ Gliss）。
+        RMVPE の重みを後から取った・既定を替えたときも、解析・編集済みの曲の音符の区切りは変えない。"""
+        if estimator is None:
+            estimator = self.estimator_pref
+        return f0mod.resolve_estimator(estimator, recorded=recorded_estimator(self.analysis))
 
     def sub(self, name):
         p = os.path.join(self.dir, name)
@@ -1108,9 +1152,9 @@ class Project:
                 cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None):
         """F0 → 音符 → （ガイドがあれば）DTW。結果は cache/ に保存する。
 
-        estimator: F0 の方式。省くとこのトラックで明示した方式（`estimator_pref`）、無ければ選んでいる方式
-        （`f0.resolve_estimator`。画面の「ピッチ検出の方式」）。
-        保存した解析が別の方式のものなら、テイクの F0 から解析し直す（ガイドの解析は方式ごとの鍵付きの保存）。
+        estimator: F0 の方式。省くと `f0_estimator()`（画面の「ピッチ検出の方式」で選んだ方式 → この曲を前に
+        解析した方式 → 既定）。保存した解析が別の方式のものなら、テイクの F0 から解析し直す（ガイドの解析は
+        方式ごとの鍵付きの保存）。
 
         stage: 段の名前（"take_f0" / "lyrics" / "guide_f0" / "alignment" / "onsets" / "phonemes"）を
         段に入る前に受け取る関数（裏の準備の進み具合と、段の境目での取り消し。`prep.py`）。
@@ -1139,7 +1183,7 @@ class Project:
             else:
                 self._save_analysis()
 
-        estimator = f0mod.resolve_estimator(estimator if estimator is not None else self.estimator_pref)
+        estimator = self.f0_estimator(estimator)
         publish = not self.background   # 今の組み合わせを指す写しを書くか（裏の準備では書かない）
         advance(0.0)
         t0 = now_iso()
@@ -1359,12 +1403,12 @@ class Project:
 
     def analysis_cached(self, estimator=None, sweep=False):
         """analyze（既定の設定）が**キャッシュを読むだけで済む**か（重い計算・読み込みが無い）。
-        estimator を省くと選んでいる方式。保存したテイクの解析が別の方式のものなら False。
+        estimator を省くと `f0_estimator()`。保存したテイクの解析が別の方式のものなら False。
 
         analyze_take はこのときジョブにせず、裏の準備にも合流せずにすぐ返す（issue #63）。見るもの:
         テイクの解析・歌詞の推定（済みか、推定できない）・ガイドの解析と対応付け（鍵付きの保存）・
         発音の頭・音素（今の歌詞の鍵付きの保存か、同じ入力で失敗したことを覚えているか）。"""
-        estimator = f0mod.resolve_estimator(estimator if estimator is not None else self.estimator_pref)
+        estimator = self.f0_estimator(estimator)
         take_cache = self._cache_path("take-analysis.json")
         if not os.path.exists(take_cache):
             return False
