@@ -119,6 +119,8 @@ def test_every_tool_is_classified():
         "list_tracks", "select_track", "track_overview", "render_tracks",
         # 聞き取り（issue #54）: 候補を返すだけで確定の歌詞は変えない・使えるかを見るだけ
         "transcribe", "asr_status",
+        # 補正の前後のノートごとの残差（再合成はプロジェクトの中の一時の音だけ）
+        "measure_against_guide",
     }
     names = [f.__name__ for f in m.TOOLS]
     assert len(names) == len(set(names))

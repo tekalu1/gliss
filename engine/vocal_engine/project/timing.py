@@ -981,7 +981,7 @@ def _guide_pitch_shape(project, pairs, onset_pairs, selected, threshold_cents):
 
 
 def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
-               match_pitch_shape=True, interpolate=True):
+               match_pitch_shape=True, interpolate=True, edited_notes="adjust"):
     """「ガイドに合わせる」の 100% の計画（x = タイミングの強度、ピッチは別の強度で掛ける）。
 
     - 音程: 既定は対応するガイド F0 を発音の頭どうしで写して、フレームごとの線を近づける。
@@ -995,7 +995,11 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
       VocAlign と同じ。issue #53）。基準点が無い区間・基準点の間が 1 秒を超える所は動かさない。
       ノートごとの対応と理由は `plan.notes`（画面の対応線・未対応印、MCP の correspondence）。
     - しきい値（既定 0）はここで掛ける。プレビューも確定もこの計画を使うので、
-      しきい値で両者がずれることは無い。"""
+      しきい値で両者がずれることは無い。
+    - 音程は**今の（編集後の）音程**から寄せる（鉛筆・shift_pitch で直したノートも、直した線から
+      残りの差だけ）。edited_notes="skip" は音程を直し済みのノートの音程を動かさない（タイミングは動かす）。"""
+    if edited_notes not in ("adjust", "skip"):
+        raise TimingError("edited_notes は adjust か skip")
     if project.guide is None or project.alignment is None:
         raise TimingError("ガイドが無い（open_project の guide_path → analyze_take）")
     from ..analysis import guide_timing as GT
@@ -1005,17 +1009,21 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     st, tm = build_structure(project, attacks=_gap_attacks(project, gt, sel),
                              confirmed_only=True)
     pairs, pitch_target, _ = note_correspondence(project)
-    # ---- 音程
+    # ---- 音程（今の編集後の音程から。直し済みを飛ばすときはそのノートを外す）
+    from .pitch import edited_note_centers, pitch_edited_notes
+    skipped = set()
+    if edited_notes == "skip":
+        skipped = pitch_edited_notes(project, [tn[i] for i in sel if i in tn])
+    psel = sel - skipped
     curve, draws = [], []
     if match_pitch_shape:
         curve, draws, pitch = _guide_pitch_shape(project, pairs, gt.pairs if gt else [],
-                                                  sel, threshold_cents)
+                                                  psel, threshold_cents)
     else:
-        from ..view.export_data import current_note_pitches
-        curp = current_note_pitches(project)
+        curp = edited_note_centers(project, [tn[i] for i in psel if i in tn])
         pitch = {}
         for nid, g in pitch_target.items():
-            if nid not in sel or g.pitch_midi is None:
+            if nid not in psel or g.pitch_midi is None:
                 continue
             cur = curp.get(nid)
             if cur is None:
@@ -1038,7 +1046,8 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     plan = _finish(project, "guide",
                    {"note_ids": sorted(sel) if note_ids else None,
                     "threshold_cents": threshold_cents, "threshold_ms": threshold_ms,
-                    "match_pitch_shape": bool(match_pitch_shape)},
+                    "match_pitch_shape": bool(match_pitch_shape),
+                    "edited_notes": edited_notes},
                    st, anchors, pitch=pitch, pitch_curve=curve, pitch_draws=draws,
                    pairs=used_pairs)
     reach = 1.0
@@ -1071,6 +1080,7 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
                                         else round(gt.measured_offset_sec * 1000.0, 1)),
                  "basis": None if gt is None else gt.basis,
                  "repaired": repaired, "reach": round(reach, 4),
+                 "skipped_edited_notes": sorted(skipped),
                  "note": "タイミングは発音の頭（音の立ち上がり）を、タイムライン上のガイドの頭へ"
                          "（画面に描いているガイドの位置。置き場所の違う素材 = 全体のずれが 150 ms を"
                          "超えるときは「ガイドの頭 + 全体のずれ」へ）。1 対 1 に決まらない頭は動かさない。"

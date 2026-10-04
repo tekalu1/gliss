@@ -181,7 +181,7 @@ HISTORY_TOOLS = {
     "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
     "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "split_track", "join_track",
     "mute_track_range", "open_project",
-    "new_project", "load_project", "save_project",
+    "new_project", "load_project", "save_project", "apply_edits",
 }
 
 
@@ -896,9 +896,10 @@ def list_deviations(threshold_cents: float = 50.0, threshold_ms: float = 30.0,
     """ガイドとのずれ（セント / ms）の一覧。しきい値のどちらかを超えたノートだけ返す。
 
     歌詞があるときは **`timing`（音素境界ごとのタイミングのずれ）** も一緒に返す。
-    `correct_to_guide` のタイミングが見ているのは発音の頭どうしの組
-    （`plan_edit(op="guide")` の結果の `timing`）。ノートの timing_ms はノートの頭
-    （音程の変わり目）と、ガイドのノートの頭を「ガイドの時刻 + 全体のずれ」に置いたものとの差。
+    `deviations` は**元の音**（編集前）のずれ。ノートの timing_ms はノートの頭（音程の変わり目）と、
+    ガイドのノートの頭を「ガイドの時刻 + 全体のずれ」に置いたものとの差で、補正が合わせる物差しとは別。
+    **`onset_timing`** が `correct_to_guide` のタイミングの物差し（発音の頭の組。`plan_edit(op="guide")` の
+    `timing`）で、元の音（before_ms）と今の編集で移した位置（edited_ms）を返す。補正が効いたかはこちらで見る。
     """
     p = _project()
     devs, meta = p.deviations(threshold_cents, threshold_ms)
@@ -914,6 +915,7 @@ def list_deviations(threshold_cents: float = 50.0, threshold_ms: float = 30.0,
            "note": "pitch_cents は + がテイクの方が高い。timing_ms は + がテイクの方が遅い"
                    "（曲全体のずれ = timing_detrend_ms は引いてある）",
            "deviations": [d.to_json() for d in devs]}
+    out["onset_timing"] = _onset_timing_now(p, start_sec, end_sec, threshold_ms, limit)
     if p.has_lyrics("take"):
         bd, bmeta = p.boundary_deviations()
         if start_sec is not None or end_sec is not None:
@@ -937,6 +939,24 @@ def list_deviations(threshold_cents: float = 50.0, threshold_ms: float = 30.0,
                      "（set_lyrics(source='guide') を入れると精度が上がる）"),
         }
     return _ok(**out)
+
+
+def _onset_timing_now(p, start_sec, end_sec, threshold_ms, limit):
+    """発音の頭の組（correct_to_guide が合わせる物差し）ごとの、元の音（before_ms）と今の編集（edited_ms。
+    時間の写像で移した位置。再合成しない）のガイドの頭とのずれ。"""
+    from .project import guide_measure as GM
+    try:
+        t0, t1 = (None, None) if start_sec is None and end_sec is None else _range(start_sec, end_sec)
+        rows = GM.onset_rows(p, t0, t1)
+    except Exception as e:                  # noqa: BLE001  ずれの一覧そのものは返す
+        return {"pairs": 0, "note": "発音の頭の組を作れない: %s" % e}
+    s = GM.onset_summary(rows, threshold_ms)
+    hit = sorted([r for r in rows if abs(r["edited_ms"]) >= threshold_ms],
+                 key=lambda r: -abs(r["edited_ms"]))[:limit]
+    s.update(onsets=hit, note="correct_to_guide のタイミングが合わせる発音の頭の組。before_ms は元の音、"
+                              "edited_ms は今の編集で移した位置（+ がテイクの方が遅い）。onsets は edited_ms が"
+                              "しきい値を超える組。ノートごとの before / after は measure_against_guide")
+    return s
 
 
 @_tool
@@ -1252,7 +1272,8 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
                      pitch_strength: float = 0.7, timing_strength: float = 0.0,
                      threshold_cents: float = 0.0, threshold_ms: float = 0.0,
                      note_ids: list = None, author: str = "ai",
-                     match_pitch_shape: bool = True) -> dict:
+                     match_pitch_shape: bool = True, edited_notes: str = "adjust",
+                     pitch_mode: str = None, max_shift_cents: float = None) -> dict:
     """ガイドへ寄せる。強度 0〜1（1 = ガイドどおり）。1 つの changeset にまとめる。
 
     「ガイドどおり＝正解」ではないので、既定はピッチ 0.7・タイミング 0。
@@ -1272,6 +1293,17 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
       手前の音節の終わり）を基準点にし、その間のノート（発音の頭が無い音程の変わり目など）は前後の
       基準点に合わせて比例で動かす（同じフレーズの中、基準点の間が 1 秒以内）。基準点の無い所は動かさない
     - しきい値（既定 0 = 全部）は計画を作るときに掛ける
+    - 音程は**今の（編集後の）音程**から寄せる。鉛筆・shift_pitch で直したノートは、直した線から
+      残りの差だけ動く（二重にずらさない）。edited_notes="skip" は音程を直し済みのノートの音程を
+      動かさない（タイミングは動かす。結果の skipped_edited_notes）
+    - pitch_mode: 音程の寄せ方。"shape"（= match_pitch_shape=True。既定）/ "note"（= False。ノートの中心を一定量）/
+      **"contour"**（ガイドの平らな区間ごとに、同じ時刻に鳴るテイクの今の音程との差を測り、区間ごとに一定量・
+      隣とは 50 ms 以上でなだらかにつないだずらし量カーブをフレーズごとに当てる。ノートの対応を使わないので、
+      確かな発音の頭の組が無い所・音のつながったハモリ・1 つのノートに複数のガイドのノートが重なる所でも効く。
+      区間の中の揺れは残す。テイクが半分も歌っていない区間・ずれが max_shift_cents（既定 600）を超える区間は動かさない。
+      結果の contour）。contour のときの対象（範囲・note_ids）は、その時刻にかかるガイドの区間
+    - max_shift_cents: これを超える音程の寄せは飛ばす（別の音・オクターブ違いのテイクを間違って寄せない。
+      note と contour で効く。note は結果の skipped_large_notes）
     対象: note_ids、または範囲（範囲に頭が入るノート）、省略で全体。
 
     結果の `correspondence` はノートごとの対応: guide（音程の対応。1 対多は同じ組の範囲）、
@@ -1282,6 +1314,11 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
     from .project import timing as TM
     p = _project()
     p.reload_if_changed()
+    if pitch_mode is not None and pitch_mode not in ("shape", "note", "contour"):
+        raise ProjectError("pitch_mode は shape / note / contour")
+    if pitch_mode in ("shape", "note"):
+        match_pitch_shape = pitch_mode == "shape"
+    contour = pitch_mode == "contour"
     ids = None
     if note_ids or start_sec is not None or end_sec is not None:
         ids = _note_ids(None, note_ids,
@@ -1289,11 +1326,38 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
                         p.duration_sec + 1 if end_sec is None else end_sec)
     plan = TM.plan_guide(p, ids, threshold_cents=float(threshold_cents),
                          threshold_ms=float(threshold_ms),
-                         match_pitch_shape=bool(match_pitch_shape))
-    r = _apply_now(plan, float(timing_strength) or None, author,
-                   "ガイドへ寄せる（ピッチ %.0f%% / タイミング %.0f%%）"
-                   % (pitch_strength * 100, timing_strength * 100),
-                   pitch=float(pitch_strength) or None, hist="ガイドに合わせる")
+                         match_pitch_shape=bool(match_pitch_shape) and not contour,
+                         edited_notes=edited_notes)
+    skipped_large = []
+    if max_shift_cents is not None and not contour and plan.pitch and not plan.pitch_draws:
+        skipped_large = sorted(n for n, c in plan.pitch.items() if abs(c) > float(max_shift_cents))
+        plan.pitch = {n: c for n, c in plan.pitch.items() if n not in set(skipped_large)}
+    label = ("ガイドへ寄せる（ピッチ %.0f%%%s / タイミング %.0f%%）"
+             % (pitch_strength * 100, "・区間カーブ" if contour else "", timing_strength * 100))
+    if contour:
+        from .project import guide_contour as GC
+        spans = None
+        if note_ids:
+            ns = {n.id: n for n in p.take_notes}
+            spans = [(ns[i].start_sec, ns[i].end_sec) for i in ids if i in ns]
+        lo = 0.0 if start_sec is None else float(start_sec)
+        hi = p.duration_sec if end_sec is None else float(end_sec)
+        if spans:
+            lo, hi = min(a for a, _ in spans), max(b for _, b in spans)
+        x = float(np.clip(float(timing_strength), plan.x_lo, plan.x_hi)) if timing_strength else None
+        cs, info = GC.apply_contour(p, plan, x, float(pitch_strength), (lo, hi),
+                                    threshold_cents=float(threshold_cents),
+                                    max_shift_cents=(GC.DEFAULT_MAX_SHIFT if max_shift_cents is None
+                                                     else float(max_shift_cents)),
+                                    src_spans=spans, author=author, label=label)
+        _rec(p, cs, "ガイドに合わせる")
+        r = {"ok": True, "changeset": cs.id if cs else None, "total_edits": len(p.edits),
+             "x": x, "window_sec": info.get("window_sec"), "contour": info.get("contour")}
+    else:
+        r = _apply_now(plan, float(timing_strength) or None, author, label,
+                       pitch=float(pitch_strength) or None, hist="ガイドに合わせる")
+    if skipped_large:
+        r["skipped_large_notes"] = skipped_large
     r.update(pairs=len(plan.pairs), matched_notes=plan.info.get("matched_notes"),
              unmatched_notes=plan.info.get("unmatched_notes"),
              confirmed_notes=plan.info.get("confirmed_notes"),
@@ -1305,6 +1369,7 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
              correspondence=TM.correspondence_summary(plan),
              pitch_notes=len(plan.pitch), repaired=plan.info.get("repaired"),
              reach=plan.info.get("reach"),
+             skipped_edited_notes=plan.info.get("skipped_edited_notes"),
              next="remeasure で残ったずれを見る。戻すなら undo('%s')" % r.get("changeset"))
     if plan.info.get("timing_message"):
         r["timing_message"] = plan.info["timing_message"]
@@ -1316,7 +1381,7 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
 def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = None,
               detach: bool = False, start_sec: float = None, end_sec: float = None,
               threshold_cents: float = 0.0, threshold_ms: float = 0.0,
-              match_pitch_shape: bool = True) -> dict:
+              match_pitch_shape: bool = True, edited_notes: str = "adjust") -> dict:
     """**計画**を作る（まだ編集しない）。画面がドラッグの開始・「ガイドに合わせる」を開いた時点で呼ぶ。
 
     計画 = 「節（ノートの頭・尻・音素境界）の編集後の秒 = cur + d × x」。
@@ -1350,7 +1415,8 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
                             p.duration_sec + 1 if end_sec is None else end_sec)
         plan = TM.plan_guide(p, ids, threshold_cents=float(threshold_cents),
                              threshold_ms=float(threshold_ms),
-                             match_pitch_shape=bool(match_pitch_shape))
+                             match_pitch_shape=bool(match_pitch_shape),
+                             edited_notes=edited_notes)
     else:
         raise ProjectError("op は edge / move / guide")
     _remember(plan)
@@ -1410,7 +1476,8 @@ def _replan(p, plan):
         return TM.plan_move(p, a["note_ids"])
     if k == "guide":
         return TM.plan_guide(p, a.get("note_ids"), a.get("threshold_cents", 0.0),
-                             a.get("threshold_ms", 0.0), a.get("match_pitch_shape", True))
+                             a.get("threshold_ms", 0.0), a.get("match_pitch_shape", True),
+                             edited_notes=a.get("edited_notes", "adjust"))
     if k == "range":
         return TM.plan_range_stretch(p, a["start_sec"], a["end_sec"], a["ratio"])
     if k == "reset":
@@ -2180,6 +2247,9 @@ TOOLS += _mcp_document.TOOLS
 # 区間の音声認識で歌詞を確かめる（issue #54）
 from . import mcp_asr as _mcp_asr   # noqa: E402
 TOOLS += _mcp_asr.TOOLS
+# 補正後のノートごとの残差・音程の編集をまとめて当てる
+from . import mcp_measure as _mcp_measure   # noqa: E402
+TOOLS += _mcp_measure.TOOLS
 
 
 def build_server():

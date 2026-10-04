@@ -155,7 +155,8 @@ def test_export_tool_is_registered():
     assert m.set_f0_estimator in m.TOOLS and m.unmute_notes in m.TOOLS
     names = [f.__name__ for f in m.TOOLS]
     assert {"split_track", "join_track", "mute_track_range"} <= set(names)    # クリップの分割・部分のミュート
-    assert len(m.TOOLS) == 65
+    assert {"measure_against_guide", "apply_edits"} <= set(names)           # ノートごとの残差・まとめて当てる
+    assert len(m.TOOLS) == 67
 
 
 @pytest.mark.parametrize("subtype", ["FLOAT", "PCM_16"])

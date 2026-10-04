@@ -2,7 +2,7 @@
 
 Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジンを MCP（stdio）で公開する。サーバーの名前は `gliss`（Python のパッケージは内部名の `vocal_engine` のまま）。
 Claude Code などの MCP クライアントから
-「測る／直す／確かめる」ができる。ツールは 65 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
+「測る／直す／確かめる」ができる。ツールは 67 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
 プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、区間の聞き取り（音声認識）の 3 個は §1-1）。
 
 起動:
@@ -34,9 +34,11 @@ open_project(take_path, guide_path?, lyrics?, guide_lyrics?)   ← テイクの 
      ├ set_fade                                             ← ノートのフェードイン／アウト（音量だけ）
      ├ move_boundary / stretch / move_note                  ← 直す（タイミング。後ろはずらさない）
      ├ list_connections / set_connection                    ← 隣との接続 / 切り離し（となだらかさ）
-     ├ correct_to_guide(pitch_strength, timing_strength, match_pitch_shape) ← ガイドへ寄せる
+     ├ correct_to_guide(pitch_strength, timing_strength, pitch_mode) ← ガイドへ寄せる（pitch_mode="contour" = 区間カーブ）
+     ├ apply_edits(edits=[...])                             ← 音程の編集をまとめて当てる（取り消し 1 回）
      ├ plan_edit → apply_plan                               ← 計画を作って確定（画面が使う）
      └ render_preview / render_region / render_audition / render_view / remeasure / list_changes   ← 確かめる
+          ├ measure_against_guide(range)  ← ノートごと・ガイドの区間ごとの残差（before / edited / after）
           └ undo() / redo()               ← 曲で 1 本の履歴を戻す（画面の Ctrl+Z と同じ。§2-9）
 ```
 
@@ -334,6 +336,20 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 **歌詞があると `timing`（音素境界ごとのずれ）が付く**（段階2）。
 `correct_to_guide` のタイミングが見ているのは発音の頭どうしの組（`plan_edit(op="guide")` の JSON の `timing`。
 `docs/guide-timing.md`）。ここの timing_ms はノートの頭と、ガイドのノートの頭を画面に描く位置に置いたものとの差。
+`deviations` は**元の音（編集前）**のずれ（補正しても変わらない）。
+
+**`onset_timing`** が `correct_to_guide` のタイミングと同じ物差し（発音の頭の組）。`before_ms` は元の音、`edited_ms` は
+今の編集で移した位置（時間の写像。再合成しない）のガイドの頭とのずれ（+ がテイクの方が遅い）。タイミングを
+合わせたら `edited_ms` が下がる。`onsets` は `edited_ms` がしきい値を超える組（多い順に `limit` まで）。
+ノートごとの残差・再合成して測り直した値は `measure_against_guide`（§3）。
+
+```json
+{"onset_timing": {"pairs": 41, "before_ms": {"n": 41, "abs_median": 21.0, "abs_p90": 48.5, "abs_max": 92.0},
+                  "edited_ms": {"n": 41, "abs_median": 0.0, "abs_p90": 4.0, "abs_max": 35.0},
+                  "over_threshold_before": 12, "over_threshold_edited": 1,
+                  "onsets": [{"take_sec": 2.196, "edited_sec": 2.25, "target_sec": 2.215,
+                              "before_ms": -19.0, "edited_ms": 35.0}]}}
+```
 
 ```json
 {"timing": {"unit": "音素境界", "source": "guide_phonemes", "matched": 35, "total": 35,
@@ -466,6 +482,10 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 結合（`merge_notes`）は、境目にあった無音の挿入（切り離して縮めた隙間の `silence`）も外す。外したぶんは結合した
 ノート全体を伸ばして埋め、頭と尻の編集後の位置は変えない（後ろはずらさない）。返り値の `removed_silence`。
 
+`set_pitch_curve(mode="offset")`・`shift_pitch` を範囲で別々に当てた**境目の段差**にも、自動のなだらかさ（最大 250 ms、
+ノートの長さの半分まで。`set_transition`）が掛かる。隣り合う範囲に大きく違う量を入れると、短い方の量が長い方へにじむ。
+1 本の曲線の中で値をなだらかにつないで渡せば段差にならない（`correct_to_guide(pitch_mode="contour")` はそうしている）。
+
 #### `set_pitch_curve(points, mode="draw", ramp_ms?)` — 鉛筆
 
 `points = [[素材の秒（編集前）, MIDI ノート番号], ...]`。その時間範囲のピッチを**描いた音程に置き換え**、
@@ -519,7 +539,7 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
            "min_phoneme_ms": 20.0}}
 ```
 
-### `correct_to_guide(start_sec?, end_sec?, pitch_strength?, timing_strength?, threshold_cents?, threshold_ms?, note_ids?, match_pitch_shape?)`
+### `correct_to_guide(start_sec?, end_sec?, pitch_strength?, timing_strength?, threshold_cents?, threshold_ms?, note_ids?, match_pitch_shape?, pitch_mode?, edited_notes?, max_shift_cents?)`
 
 画面の「ガイドに合わせる」と**同じ計画**（`plan_edit(op="guide")`）を作り、強度を掛けて確定する。
 1 つの changeset。強度 0〜1（1 = ガイドどおり）。既定は `pitch_strength=0.7` / `timing_strength=0.0`
@@ -544,6 +564,23 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
   無いフレーズは動かさない。テイク・ガイドとも**確定の**歌詞がある所は、休みの手前の音節の終わりも
   基準点にする（推定の読みは使わない）。
 - **しきい値**（既定 0 = 全部）は計画を作るときに掛ける。プレビューと確定で同じに効く。
+- **今の（編集後の）音程から寄せる**: 鉛筆（`set_pitch_curve(mode="draw")`）・`shift_pitch` で直したノートは、直した線から
+  残りの差だけ動く（以前は `match_pitch_shape=false` が鉛筆を含まない中心から差を求め、鉛筆の線に二重に足していた）。
+  `edited_notes="skip"` は音程を直し済みのノート（音程の編集が掛かっているノート）の音程を動かさない（タイミングは動かす。
+  結果の `skipped_edited_notes`）。既定は `"adjust"`。
+- **`pitch_mode`**: `"shape"`（= `match_pitch_shape=true`。既定）/ `"note"`（= `false`）/ **`"contour"`（区間カーブ）**。
+  contour はノートの対応を使わず、**ガイドの平らな区間**（ガイドの音程ノート。タイムライン上のガイドの位置）ごとに、区間の
+  中央部（両端 2 割を除く）のガイドの音程の中央値と、同じ時刻に鳴るテイクの今の音程（鉛筆・なだらかさ込み）の中央値の差を
+  測り、区間ごとに一定・隣の区間とは 50 ms 以上かけて直線でつないだ**ずらし量カーブ**を、フレーズ（区間の間が 0.25 秒以下で
+  続く所）ごとに 1 本の `pitch_curve` にして当てる（両端は 0 から 20 ms で入るので範囲の端に段差を作らない）。確かな発音の頭の組の
+  無い所・音のつながったハモリ・細かく切れたノート・1 つのノートに高さの違うガイドのノートが重なる所でも効く。区間の中の揺れ
+  （ビブラート・しゃくり）は残る。テイクが区間の半分も歌っていない区間と、差が `max_shift_cents`（contour の既定 600）を超える
+  区間は動かさない（`contour.skipped_segments`）。同じ範囲に前からある `pitch_curve` は後勝ちで消えるので、その値をカーブに
+  足し込む。タイミングも一緒に当てるときは、当てた後の時間で区間を測り、**1 つの changeset** にする。
+  例（ハモリ 1 本、133 秒・ガイドの区間 318）: 区間の残差の中央値 21.9 → 1.1 セント（再合成して測り直した値。±10 セント以内
+  26% → 95%）。同じ素材で `"note"` は 13.8 セント（±10 以内 42%）。
+- `max_shift_cents`: これを超える寄せは飛ばす（別の音・オクターブ違いのテイクを間違って寄せない）。`"note"` は結果の
+  `skipped_large_notes`、`"contour"` は `contour.skipped_segments`。
 
 ```json
 {"ok": true, "changeset": "c001", "x": 0.7, "pairs": 10, "matched_notes": 14,
@@ -557,6 +594,9 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
  "pitch_notes": 14, "repaired": 0, "reach": 1.0,
  "window_sec": [0.0, 3.48], "next": "remeasure で残ったずれを見る。戻すなら undo('c001')"}
 ```
+
+contour の結果の `contour` = `{guide_segments, moved_segments, phrases, skipped_segments: [{guide, cents?, reason}],
+abs_cents_median_before}`。
 
 `repaired` は 100% で守れない制約（追い越し・短すぎ）を直した回数、`reach` は直しきれずに
 全体を縮めたときの到達率（1.0 = ガイドどおりに届く）。
@@ -654,6 +694,20 @@ move_boundary）は、範囲の端をまたぐ組があれば、時間の対応�
 +45 ms のずれが残った。分割・結合（ノートの切れ目）は残す。`whole_track=true` はトラック全体（0〜素材の長さ）を同じ規則で戻す
 （取り消し 1 回）。ノート（`note_ids`）だけで渡したときは今までどおり（接続された隣は伸び縮みで合わせる）。
 
+### `apply_edits(edits, label?, group?)` — 音程の編集をまとめて当てる
+
+複数の `shift_pitch` / `set_pitch_curve` を **1 つの changeset**（取り消し 1 回）で当てる。中身と順番は 1 件ずつ呼んだのと同じ
+（鉛筆の後のずらしは鉛筆の線にも足される）。1 件でも不正なら何も当てずに `ok: false`（`error` に `edits[i]`）。2000 件まで。
+`measure_against_guide(suggest_cents=…)` の `suggested_edits` をそのまま渡せる。
+
+```json
+// apply_edits(edits=[{"op": "shift_pitch", "cents": -12.5, "note_id": "n012"},
+//                    {"op": "shift_pitch", "cents": 8, "start_sec": 41.20, "end_sec": 41.38},
+//                    {"op": "set_pitch_curve", "mode": "offset", "points": [[0, 0], [0.2, -20]], "note_id": "n013"},
+//                    {"op": "set_pitch_curve", "mode": "draw", "points": [[42.10, 70.0], [42.30, 70.2]], "ramp_ms": 40}])
+{"ok": true, "changeset": "c014", "applied": 4, "replaced": 0, "total_edits": 37}
+```
+
 ### 2-9. 取り消し `undo(changeset_id?)` / `redo()` — 曲で 1 本の履歴（issue #16）
 
 **曲に保存されるものを変えた操作はすべて取り消せる**。履歴は**トラックをまたいで 1 曲で 1 本**
@@ -742,6 +796,7 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `render_audition(note_id, cents?, start_sec?, end_sec?, backend?)` | **画面向け**: つかんだノートのプレビュー音（issue #27）。ノートを `cents` 動かした**つもり**で範囲（既定はノートの範囲）を再合成したモノラルの WAV（`renders/audition.wav`。毎回上書き）のパス。**プロジェクトは書き換えない**。中身は `shift_pitch` を当ててから `render_region` したものと同じ |
 | `render_view(start_sec?, end_sec?, show_guide?, title?)` | ピアノロール PNG のパス（波形・テイク F0・ガイド F0・ノートの帯・編集区間） |
 | `export_view_data(start_sec?, end_sec?, peak_ms?, path?)` | **画面（UI）向け**の描画データ JSON のパス。**LLM 向けではない** |
+| **`measure_against_guide(start_sec?, end_sec?, note_ids?, render?, threshold_cents?, threshold_ms?, suggest_cents?, limit?)`** | **補正の前後の残差**。ノートごと（`rows`）とガイドの平らな区間ごと（`summary.guide_segments`）に、元の音・今の編集・再合成して測り直した音の 3 つ。下の「補正の前後の残差」 |
 | `remeasure(start_sec?, end_sec?, backend?, keep_wav?)` | 編集後の音を測り直した結果。ガイドがあれば `deviation_summary.before/after` |
 | `list_changes(include_undone?)` | changeset と編集リストの一覧 |
 | `get_job(job_id)` | 長い処理の結果。`status`・`progress`・`cancellable`。裏の準備に合流した `analyze_take` は `joined`・`stage`・`stage_label` も（§1 `analyze_take`） |
@@ -848,6 +903,46 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
  "after":  {"median_hz": 440.1, "median_note": "A4", "n_voiced": 238},
  "deviation_summary": {"before": {"abs_pitch_cents_median": 489.8, "over_50_cents": 14},
                        "after":  {"abs_pitch_cents_median": 148.7, "over_50_cents": 11}}}
+```
+
+### `measure_against_guide` — 補正の前後の残差
+
+`remeasure` の `deviation_summary` は、編集後の音をノートに切り直してガイドと突き合わせるので、補正で音名がガイドとそろうと
+輪郭が外れていても良く見える。タイミングもノートの頭で測る。`measure_against_guide` は `correct_to_guide` と同じ物差しで測る:
+
+- **音程（ノートごと）**: 音程で対応するガイドのノートの中心との差（セント。+ がテイクの方が高い）。中心は有声のフレームの
+  MIDI の中央値。対応の無いノートは `guide: null` と `reason`。
+- **タイミング（ノートごと）**: ノートの頭の近く（頭の 60 ms 前〜尻）にある**発音の頭の組**（「ガイドに合わせる」が合わせる
+  1 対 1 の組）の、合わせる先（タイムライン上のガイドの頭）との差（ms。+ がテイクの方が遅い）。組の無いノートは
+  `onset_paired: false` と `timing_reason`（タイミングは測らない）。
+- **音程（ガイドの区間ごと）**: `summary.guide_segments` = ガイドの平らな区間の中央部で、ガイドの音程と同じ時刻に鳴るテイクの
+  音程の差（`pitch_mode="contour"` と同じ物差し）。ノートの切れ方に左右されない。`within_10` / `within_25` は ±10 / ±25 セント
+  以内の区間の割合（%）。
+
+それぞれ `before`（元の音）・`edited`（編集の中身から。再合成しない。音程は shift_pitch・曲線・鉛筆を足した中心、頭は時間の写像で
+移した位置）・`after`（`render=true`（既定）のとき、範囲を `render_region` と同じ中身で再合成し、解析と同じ F0 の方式・
+`onsets.detect` で測り直した値。頭は移した位置から 50 ms 以内のもの）。`rows[]` には `shape_abs_cents_median`（編集後の音と
+その時刻のガイドの音程の差のフレームごとの中央値）・`edited_start_sec` / `edited_end_sec`（編集後の秒）・`confidence`（解析の
+ノートの確信度）も入る。`summary` は全部のノートの |値| の中央値・90% 点・最大。
+
+- `threshold_cents` / `threshold_ms`: どちらかを超えるノートだけ `rows` に入れる（after → edited → before の順にある値を見る）。
+- `suggest_cents`: |残差| がこれ以上のノートに、打ち消す `shift_pitch` を `suggested_edits` に入れる（`apply_edits` にそのまま
+  渡せる。`render=true` なら after、false なら edited の値）。
+- 全部の行は `renders/measure-<id>.json`（`path`）にも書く。`rows` は `limit`（既定 300）まで。範囲が 10 秒を超えて再合成する
+  ときはジョブ（`get_job`）。
+
+```json
+{"ok": true, "range_sec": [40.0, 55.0], "total": 42, "returned": 42, "path": "...\\renders\\measure-1a2b3c4d.json",
+ "summary": {"notes": 42, "matched_notes": 39, "onset_paired_notes": 30,
+             "pitch_cents": {"before": {"n": 39, "abs_median": 55.8, "abs_p90": 120.4, "abs_max": 310.2},
+                             "edited": {"n": 39, "abs_median": 3.1, ...}, "after": {"n": 38, "abs_median": 6.4, ...}},
+             "timing_ms": {"before": {"n": 30, "abs_median": 20.0, ...}, "edited": {...}, "after": {...}},
+             "guide_segments": {"n": 35, "before": {"abs_median": 48.2, "within_10": 14.3, ...}, "after": {...}}},
+ "rows": [{"note_id": "n068", "start_sec": 41.0, "end_sec": 41.46, "edited_start_sec": 40.99, "edited_end_sec": 41.46,
+           "guide": "g031", "guide_note": "A#4", "pitch_cents": {"before": -48.1, "edited": -2.0, "after": -5.2},
+           "timing_ms": {"before": 15.0, "edited": 0.0, "after": 5.0}, "onset_paired": true,
+           "shape_abs_cents_median": 9.8, "confidence": 0.71}],
+ "suggested_edits": [{"op": "shift_pitch", "note_id": "n068", "cents": 5.2}]}
 ```
 
 ## 3-2. トラック（複数トラックのセッション。issue #7・`docs/track-view.md`）
@@ -1080,9 +1175,9 @@ Claude Code から: `load_project("D:/…/曲.gliss")` → `list_tracks` → `se
 
 | 許可 | ツール |
 |---|---|
-| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`split_track`・`join_track`・`mute_track_range`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
+| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`apply_edits`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`split_track`・`join_track`・`mute_track_range`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
 | **保存・書き出し** | `save_project`・`export_wav`・`prepare_asr_model`（聞き取り用の数 GB のモデルをダウンロードして書く）、`render_region(path=…)`・`export_view_data(path=…)`・`render_preview(name=<フォルダーを含むパス>)`（ユーザーが指定した場所に書くとき） |
-| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info` |
+| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`measure_against_guide`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info` |
 
 `select_track` は編集対象を切り替えるだけ（履歴に入らない）なので許可なし。`plan_edit` は計画を作るだけで、当てるのは `apply_plan`（編集）。
 `transcribe` は候補を返すだけで確定の歌詞を変えない（取り込む `set_lyrics` / `set_note_syllable` が編集）。`prepare_asr_model` は大きなダウンロードを AI が勝手に始めないよう「保存・書き出し」に入れている。
