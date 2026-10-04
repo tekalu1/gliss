@@ -157,4 +157,5 @@ def test_export_tool_is_registered():
     assert {"split_track", "join_track", "mute_track_range"} <= set(names)    # クリップの分割・部分のミュート
     # DAW（ARA）の ara_*（プラグイン用 9 と、外部の AI が DAW の文書を選ぶ ara_documents / ara_attach / ara_detach）
     assert all(f in m.TOOLS for f in m._mcp_ara.TOOLS) and len(m._mcp_ara.TOOLS) == 12
-    assert len(m.TOOLS) == 77
+    assert "make_score_guide" in names                  # 譜面ガイド（ガイドとの対応 v3）
+    assert len(m.TOOLS) == 78

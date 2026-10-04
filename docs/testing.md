@@ -75,6 +75,7 @@ cd ..\app; pnpm test
 | `H` | 短いせりふ（約 2 秒） |
 | `W`・`W0` | 囁き（ノイズ除去の後・前） |
 | `SONG` | 曲全体（約 158 秒。最後の 4 フレーズだけ歌う） |
+| `S3_*` | 別の曲 S3（約 165 秒・48 kHz）。テイクとガイドを**同じ DAW の時間軸**で書き出したもの（`engine/tests/test_guide_align_song.py`・[guide-coverage.md](guide-coverage.md) の「同じ時間軸の素材」）。テイク: `S3_M1`・`S3_M2`（主旋律。曲の一部だけ歌う）・`S3_RS`（主旋律の録り直し。生の録音で 1.2 秒長い）・`S3_HU`・`S3_HL`（上・下のハモリ）・`S3_A1`・`S3_A2`（息の多いパートの録り直し）・`S3_AS`（息の多いパート）。ガイド: `S3_GM`（主旋律）・`S3_GA`（息の多いパート。音程の取れない区間がある）・`S3_GU`・`S3_GL`（ハモリ）。`S3_MID`: 主旋律・ハモリ・オクターブ違いの 5 トラックの MIDI（テンポのメタイベント無し、Intro と間奏のラップは無い） |
 
 **データのキー**:
 
@@ -92,6 +93,10 @@ cd ..\app; pnpm test
 | `SONG.duration_sec` | `SONG` の長さ（秒） |
 | `SONG.lyrics` | `SONG` の 4 区間の歌詞（`[{"start_sec", "end_sec", "text"}]`。2 番目と 4 番目の区間を編集する） |
 | `SONG.kana` | アラインの結果のかなに含まれるはずの文字列の配列 |
+| `S3.midi_bpm` / `S3.midi_start_sec` | `S3_MID` を読むテンポと、譜面の 0 拍のタイムライン上の秒（正解を作るときにずらす量） |
+| `S3.midi_track` | ガイドの記号 → そのガイドに当たる `S3_MID` のトラックの番号 |
+| `S3.pairs` | 評価の組 `[名前, テイク, ガイド]` の配列 |
+| `S3.expect` | テストの期待値（組ごとの DTW の外れの上限・被覆率の下限・前の値） |
 
 回帰値（`regression-baseline.json`）は素材が変われば変わるので、素材を差し替えたら作り直す:
 `python engine/tests/regression_measure.py`（素材と重みが要る）。

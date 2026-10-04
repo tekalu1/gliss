@@ -956,7 +956,8 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     sel = set(note_ids) if note_ids else set(tn)
     st, tm = build_structure(project, attacks=_gap_attacks(project, gt, sel),
                              confirmed_only=True)
-    pairs, pitch_target, _ = note_correspondence(project)
+    pairs, pitch_target, gspan = note_correspondence(project)
+    many = _one_to_many(project, tn, sel, gspan)
     # ---- 音程
     curve, draws = [], []
     if match_pitch_shape:
@@ -972,7 +973,8 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
             cur = curp.get(nid)
             if cur is None:
                 continue
-            c = (float(g.pitch_midi) - cur) * 100.0
+            target = many[nid]["pitch_midi"] if nid in many else float(g.pitch_midi)
+            c = (target - cur) * 100.0
             if abs(c) >= threshold_cents and abs(c) > 1e-6:
                 pitch[nid] = c
     # ---- タイミング: テイクの発音の頭（ノートの頭）をガイドの頭（基準は gt.basis）へ（1 対 1 の組だけ）
@@ -1018,6 +1020,7 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
                  "timing_interp_notes": sum(1 for r in rows if r["timing"] == "interp"),
                  "timing_reached_notes": sum(1 for r in rows if r["reached"]),
                  "timing_possible": bool(gt is not None and gt.pairs),
+                 "one_to_many": [dict(v, note=k) for k, v in sorted(many.items())],
                  "offset_ms": None if gt is None else round(gt.offset_sec * 1000.0, 1),
                  "measured_offset_ms": (None if gt is None
                                         else round(gt.measured_offset_sec * 1000.0, 1)),
@@ -1031,6 +1034,77 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     if not plan.info["timing_possible"]:
         plan.info["timing_message"] = "このガイドとはタイミングを合わせられない（確かな発音の頭の組が無い）"
     return plan
+
+
+MANY_MIN_SEC = 0.04         # 1 対多: テイクのノートとこれ以上重なるガイドのノートが 2 つ以上
+
+
+def _one_to_many(project, tn, sel, gspan):
+    """テイクの 1 ノートに、高さの違うガイドのノートが 2 つ以上重なる所（ガイドが動くのにテイクは 1 つの音）。
+
+    {ノート: {"guide": [id], "pitch_midi": 寄せる先, "source"}}。寄せる先は、ノートの有声フレームでのガイドの F0 と
+    テイクの F0 の差の中央値をノートの高さに足したもの（source = frames。両方有声のフレームが 5 未満なら、重なった時間で
+    重み付けたガイドのノートの高さの中央値 = notes）。ノートの中心を一定量ずらす寄せ方（match_pitch_shape=False）は、
+    組の 1 つのノート（いちばん重なる音）ではなくここへ寄せる（以前は組の最後の低い音へ寄せて −230 セント外した。
+    補正の担当の報告）。"""
+    out = {}
+    gn = [g for g in project.guide_notes if g.kind == "note" and g.pitch_midi is not None and g.id in gspan]
+    g2t_inv = _guide_inverse(project)
+    for nid in sel:
+        n = tn.get(nid)
+        if n is None:
+            continue
+        ov = []
+        for g in gn:
+            a, b = gspan[g.id]
+            o = min(n.end_sec, b) - max(n.start_sec, a)
+            if o >= MANY_MIN_SEC:
+                ov.append((float(g.pitch_midi), o, g.id))
+        if len(ov) < 2 or max(v[0] for v in ov) - min(v[0] for v in ov) < 0.5:
+            continue
+        d = _frame_diff(project, n, g2t_inv) if n.pitch_midi is not None else None
+        if d is not None:
+            target = float(n.pitch_midi) + d                 # フレームごとの差（ガイド − テイク）の中央値
+        else:
+            ov.sort()
+            w = np.cumsum([o for _, o, _ in ov])
+            target = ov[int(np.searchsorted(w, w[-1] / 2.0))][0]   # 重なった時間で重み付けた高さの中央値
+        out[nid] = {"guide": sorted(i for _, _, i in ov), "pitch_midi": round(target, 3),
+                    "source": "frames" if d is not None else "notes"}
+    return out
+
+
+def _guide_inverse(project):
+    """テイクの秒 → ガイドの秒（画面に描くガイドの位置の逆）。"""
+    try:
+        f, _ = project.guide_to_take()
+    except Exception:        # noqa: BLE001
+        al = project.alignment
+        return lambda t: np.asarray(al.to_guide(t))
+    gd = float(project.guide["frames"]) / float(project.guide["sr"])
+    grid = np.arange(0.0, gd + 0.01, 0.01)
+    tk = np.maximum.accumulate(np.asarray(f(grid), dtype="float64"))
+    return lambda t: np.interp(t, tk, grid)
+
+
+def _frame_diff(project, n, g2t_inv, min_frames=5):
+    """テイクのノートの有声フレームで、ガイドの F0 − テイクの F0（半音）の中央値。両方有声のフレームが少なければ None。"""
+    tf, gf = project.take_f0, project.guide_f0
+    if tf is None or gf is None:
+        return None
+    hop = tf.hop_s
+    a, b = int(round(n.start_sec / hop)), int(round(n.end_sec / hop))
+    t = np.arange(a, b) * hop
+    f = np.asarray(tf.f0, dtype="float64")[a:b]
+    v = np.asarray(tf.voiced)[a:b].astype(bool) & (f > 0)
+    gi = np.round(np.asarray(g2t_inv(t)) / gf.hop_s).astype(int)
+    ok = v & (gi >= 0) & (gi < len(gf.f0))
+    gi = np.clip(gi, 0, len(gf.f0) - 1)
+    g = np.asarray(gf.f0, dtype="float64")[gi]
+    ok &= np.asarray(gf.voiced).astype(bool)[gi] & (g > 0)
+    if ok.sum() < min_frames:
+        return None
+    return float(np.median(12.0 * np.log2(g[ok] / f[ok])))
 
 
 def correspondence_summary(plan):

@@ -193,7 +193,8 @@ HISTORY_TOOLS = {
     "set_lyrics", "import_lyrics", "shift_pitch", "set_pitch_curve", "set_transition", "split_note", "merge_notes",
     "move_note", "stretch", "move_boundary", "correct_to_guide", "apply_plan", "set_connection",
     "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
-    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "split_track", "join_track",
+    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "make_score_guide",
+    "split_track", "join_track",
     "mute_track_range", "open_project",
     "new_project", "load_project", "save_project",
 }
@@ -1304,6 +1305,7 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
     plan = TM.plan_guide(p, ids, threshold_cents=float(threshold_cents),
                          threshold_ms=float(threshold_ms),
                          match_pitch_shape=bool(match_pitch_shape))
+    fit = _plan_fit(p, plan, timing_strength, pitch_strength, ids)     # 当てる前の状態で予測する
     r = _apply_now(plan, float(timing_strength) or None, author,
                    "ガイドへ寄せる（ピッチ %.0f%% / タイミング %.0f%%）"
                    % (pitch_strength * 100, timing_strength * 100),
@@ -1318,11 +1320,37 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
              timing_possible=plan.info.get("timing_possible"),
              correspondence=TM.correspondence_summary(plan),
              pitch_notes=len(plan.pitch), repaired=plan.info.get("repaired"),
-             reach=plan.info.get("reach"),
+             reach=plan.info.get("reach"), one_to_many=plan.info.get("one_to_many"),
+             fit=fit,
              next="remeasure で残ったずれを見る。戻すなら undo('%s')" % r.get("changeset"))
     if plan.info.get("timing_message"):
         r["timing_message"] = plan.info["timing_message"]
+    if r["fit"] and r["fit"].get("warning"):
+        r["warning"] = r["fit"]["warning"]
     return r
+
+
+def _plan_fit(p, plan, timing, pitch, ids):
+    """計画を当てる前と後のガイドとの当てはまり（予測。`project/guide_fit.py`）。悪化した所があれば warning。"""
+    from .project import guide_fit as GF
+    try:
+        f = GF.plan_fit(p, plan, timing=float(timing or 0), pitch=float(pitch or 0), note_ids=ids)
+    except Exception as e:                  # noqa: BLE001  当てはまりは補足。補正そのものは止めない
+        log.get().warning("当てはまりを測れない: %s", e)
+        return None
+    if not f:
+        return f
+    worse = []
+    if f.get("timing") and f["timing"]["worse"]:
+        worse.append("タイミングで発音の強さの包絡がガイドから離れたフレーズ %d（%s 秒）"
+                     % (len(f["timing"]["worse"]), "・".join("%.1f" % w["start_sec"] for w in f["timing"]["worse"][:8])))
+    if f.get("pitch") and f["pitch"]["worse"]:
+        worse.append("音程がガイドから %.0f セント以上離れたノート %d（%s）"
+                     % (GF.WORSE_CENTS, len(f["pitch"]["worse"]),
+                        "・".join(w["note"] for w in f["pitch"]["worse"][:8])))
+    if worse:
+        f["warning"] = "補正で悪化した所がある（予測）: " + "／".join(worse) + "。その所は undo して手で直す"
+    return f
 
 
 # ---------------------------------------------------------------- 計画（画面と共有）
@@ -1330,7 +1358,7 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
 def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = None,
               detach: bool = False, start_sec: float = None, end_sec: float = None,
               threshold_cents: float = 0.0, threshold_ms: float = 0.0,
-              match_pitch_shape: bool = True) -> dict:
+              match_pitch_shape: bool = True, fit: bool = False) -> dict:
     """**計画**を作る（まだ編集しない）。画面がドラッグの開始・「ガイドに合わせる」を開いた時点で呼ぶ。
 
     計画 = 「節（ノートの頭・尻・音素境界）の編集後の秒 = cur + d × x」。
@@ -1345,7 +1373,9 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
                 ピッチは apply_plan の pitch に強度を渡す
     返り値: plan_id、x の範囲（隣を追い越す／短すぎる手前）、`snap_x`（切り離された端が隣に
     ぶつかる位置。ここで離すと接続になる）、中身の JSON のパス（画面が読む）。
-    guide では `correspondence`（ノートごとの対応と理由。`correct_to_guide` と同じ）も返す。
+    guide では `correspondence`（ノートごとの対応と理由。`correct_to_guide` と同じ）と `info.one_to_many`
+    （テイクの 1 ノートに高さの違うガイドのノートが 2 つ以上重なる所）も返す。fit=True なら、タイミング・ピッチとも
+    100% で当てたときの当てはまりの予測（`fit`。`correct_to_guide` と同じ。少し時間がかかる）。
     """
     from .project import timing as TM
     p = _project()
@@ -1372,6 +1402,8 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
     extra = {}
     if plan.kind == "guide":
         extra["correspondence"] = TM.correspondence_summary(plan)
+        if fit:
+            extra["fit"] = _plan_fit(p, plan, 1.0, 1.0, ids)
     return _ok(plan_id=plan.id, kind=plan.kind, path=path,
                x_range=[round(plan.x_lo, 6), round(plan.x_hi, 6)],
                snap_x=None if plan.snap_x is None else round(plan.snap_x, 6),
@@ -1965,8 +1997,9 @@ def remeasure(start_sec: float = None, end_sec: float = None, backend: str = "pr
             res["deviation_summary"] = {
                 "before": _dev_stats([d for d in devs_old if d.end_sec > t0 and d.start_sec < t1]),
                 "after": _dev_stats(devs_new),
-                "note": "after は編集後の音を測り直してガイドと突き合わせた値",
+                "note": "after は編集後の音を測り直してガイドと突き合わせた値（タイミングはノートの頭）",
             }
+            res["onset_timing"] = _onset_timing(p, y, sr, t0, t1)
         if not keep_wav:
             try:
                 os.remove(out)
@@ -1978,6 +2011,45 @@ def remeasure(start_sec: float = None, end_sec: float = None, backend: str = "pr
     if background:
         return _submit_job("remeasure", work)
     return _ok(**work())
+
+
+ONSET_MATCH_SEC = 0.05     # 編集後の音で、写した位置からこの範囲の発音の頭を「同じ頭」とみなす
+
+
+def _onset_timing(p, y, sr, t0, t1):
+    """発音の頭の組（「ガイドに合わせる」が合わせる組。`guide_timing`）ごとの、ガイドの頭とのずれ（ms）。
+
+    before = 元の音の発音の頭 − ガイドの頭（タイムライン上）。after = 編集後の音から拾い直した発音の頭
+    （元の頭を編集の時間写像で移した位置から `ONSET_MATCH_SEC` 以内）− ガイドの頭。+ はテイクが遅い。
+    ノートの頭で測る deviation_summary の timing と違い、計画（plan_edit("guide") の timing）と同じ物差し。"""
+    from .analysis import onsets as ON
+    try:
+        gt = p.guide_timing()
+    except Exception as e:                      # noqa: BLE001
+        return {"pairs": 0, "note": "発音の頭の組を作れない: %s" % e}
+    prs = [pr for pr in (gt.pairs if gt else []) if t0 <= pr.take_sec < t1]
+    if not prs:
+        return {"pairs": 0, "note": "この範囲に発音の頭の組が無い"}
+    new = np.asarray(ON.detect(y, sr), dtype="float64") + t0
+    src, out = p.time_map()
+    before, after = [], []
+    for pr in prs:
+        before.append((pr.take_sec - pr.target_sec) * 1000.0)
+        if len(new):
+            at = float(np.interp(pr.take_sec, src, out))
+            j = int(np.argmin(np.abs(new - at)))
+            if abs(new[j] - at) <= ONSET_MATCH_SEC:
+                after.append((new[j] - pr.target_sec) * 1000.0)
+
+    def stats(v):
+        if not v:
+            return None
+        v = np.asarray(v)
+        return {"n": int(len(v)), "abs_ms_median": round(float(np.median(np.abs(v))), 1),
+                "abs_ms_p90": round(float(np.percentile(np.abs(v), 90)), 1),
+                "ms_median": round(float(np.median(v)), 1)}
+    return {"pairs": len(prs), "before": stats(before), "after": stats(after),
+            "note": "発音の頭の組ごとのガイドの頭とのずれ（+ はテイクが遅い）。after は編集後の音から拾い直した頭"}
 
 
 def _shifted(f0r, t0, hop):
