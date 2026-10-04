@@ -1942,6 +1942,22 @@ class Project:
         return [(e, e.target.note_id) for e in self.edits
                 if e.target.type == "note" and e.target.note_id not in ids]
 
+    def missing_note_targets_with(self, estimator):
+        """テイクを `estimator` で解析したとしたとき、ノート対象の編集の対象になるノートが無いもの（ノート ID の一覧）。
+        F0 の推定とノートの切り出しだけを新しくやり、キャッシュ・解析の要約・メモリの解析は変えない。
+        補正を作った方式が分からないアーカイブで、編集が当たる方式を探すため（`mcp_ara._fit_estimator`）。"""
+        wanted = {e.target.note_id for e in self.edits if e.target.type == "note"}
+        if not wanted:
+            return []
+        x, sr = self.audio("take")
+        f0r = estimate_f0(x=x, sr=sr, estimator=estimator, sweep=False)
+        notes = segment_notes(f0r, source="take")
+        ops = [e for e in self.edits if e.kind in ("split", "merge")]
+        if ops:
+            from .notes_edit import apply_note_edits
+            notes = apply_note_edits(notes, ops, f0r)
+        return sorted(wanted - {n.id for n in notes})
+
     def _redo_target(self):
         """直近に undo した changeset = 末尾に続く undone の並びの先頭（捨てたものは飛ばす）。"""
         target = None

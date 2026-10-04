@@ -37,6 +37,7 @@ def tr(tmp_path, monkeypatch):
     R.stop()
     R.detach()
     F.set_preferred_estimator(None)
+    F.set_default_estimator(None)
     md._clear()
     a._reset_render()
 
@@ -339,6 +340,167 @@ def test_missing_note_targets_are_reported(tr, tmp_path):
     assert r["estimator"] is None and r["estimator_applied"] is None
     r = _ok(a.import_edits(archive=no_est, estimator="praat", replace=True))
     assert r["estimator_applied"] == "praat"
+
+
+# ================================================================ プラグインの起動時の set_f0_estimator
+def _as_plugin(monkeypatch):
+    """DAW のプラグインが起動したエンジンの真似: GLISS_CLIENT=ara・利用者が選んだ方式は無い（フィクスチャの praat を外す）。"""
+    from vocal_engine.analysis import f0 as F
+    monkeypatch.setenv("GLISS_CLIENT", "ara")
+    F.set_preferred_estimator(None)
+
+
+def _second_voice(a, m, tmp_path):
+    from vocal_engine import mcp_tracks as mt
+    other = _wav(tmp_path / "ara-src" / "mod-2.wav", _voice(transpose=2, seed=3))
+    r = _add(a, "mod-2", other, name="別のテイク")
+    s = m._state["session"]
+    _ok(mt.select_track(s.find_ara("mod-2")["id"]))
+    return r
+
+
+def test_plugin_startup_set_f0_estimator_keeps_the_method_of_each_modification(tr, tmp_path, monkeypatch):
+    """プラグインは起動のとき、設定の方式で set_f0_estimator を呼ぶ。それが、取り込み・解析で決めた修飾ごとの方式を外すと、
+    ノートの ID が合わなくなって補正が崩れる。プラグインの方式は、方式の決まっていない新しい修飾だけの既定。"""
+    m, a, md, R = tr
+    from vocal_engine.analysis import f0 as F
+    gl, src, ref, n_edits, tid = _standalone(m, md, tmp_path)         # 補正は praat で作った（ノートの ID に頼る編集を含む）
+    _as_plugin(monkeypatch)
+    daw_src, _t = _daw_doc(a, tmp_path, src)
+    _ok(a.import_edits(gliss_path=gl, estimator="praat"))
+    c = _sync_all(a, "mod-1", daw_src)
+    _same_as(c, ref)
+
+    r = _ok(m.set_f0_estimator("gliss"))                              # プラグインの設定（plugin-state.json）の方式
+    assert r["estimator"] == "gliss" and r["effective"] == "praat" and r["changed"] is False
+    s = m._state["session"]
+    assert s.estimator_of(s.find_ara("mod-1")) == "praat"             # 明示した方式は残る
+    assert m._state["project"].f0_estimator() == "praat"
+    c.sync(a, "mod-1")                                                # DAW への描画は同じまま・失敗しない
+    _same_as(c, ref)
+    _ok(m.analyze_take(background=False))
+    assert m._state["project"].analysis["take"]["estimator"] == "praat"
+    assert _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]["f0_estimator"] == "praat"
+    assert m._state["project"]._missing_note_targets() == []
+
+    # 方式の決まっていない新しい修飾は、プラグインの設定の方式で解析する
+    _second_voice(a, m, tmp_path)
+    _ok(m.analyze_take(background=False))
+    assert m._state["project"].analysis["take"]["estimator"] == "gliss"
+    assert m.engine_info()["f0_estimator"] == "gliss"
+
+
+def test_plugin_startup_set_f0_estimator_before_the_archive_is_restored(tr, tmp_path, monkeypatch):
+    """開き直し: エンジンが起動して set_f0_estimator が先に届いても、アーカイブの方式で解析する。"""
+    m, a, md, R = tr
+    gl, src, ref, n_edits, tid = _standalone(m, md, tmp_path)
+    arc = _ok(a.export_edits(gl, estimator="praat"))["archive"]
+    md._clear()
+    monkeypatch.setenv("VOCAL_ENGINE_WORK_DIR", str(tmp_path / "work2"))      # 作業場所に前の解析は無い
+    _as_plugin(monkeypatch)
+    _ok(m.set_f0_estimator("gliss"))
+    daw_src, _t = _daw_doc(a, tmp_path, src)
+    r = _ok(a.ara_restore("mod-1", arc))
+    assert r["mismatch"] is False and r["estimator_applied"] == "praat"
+    _ok(m.set_f0_estimator("gliss"))                                  # 復元の後にもう一度届いても同じ
+    _ok(m.analyze_take(background=False))                             # 解析が済むまで描画は原音のまま（analysis_pending）
+    c = _sync_all(a, "mod-1", daw_src)
+    _same_as(c, ref)
+    assert m._state["project"].analysis["take"]["estimator"] == "praat"
+
+
+def test_set_f0_estimator_scope(tr, tmp_path, monkeypatch):
+    """scope: "default"（プラグインのエンジンの既定）= 新しい修飾の既定だけ。"all"（画面のエンジンの既定）= 全体の方式を選び直し、
+    明示した方式は外す。"""
+    m, a, md, R = tr
+    from vocal_engine.analysis import f0 as F
+    gl, src, ref, n_edits, tid = _standalone(m, md, tmp_path)
+    _as_plugin(monkeypatch)
+    daw_src, _t = _daw_doc(a, tmp_path, src)
+    _ok(a.import_edits(gliss_path=gl, estimator="praat"))
+    s = m._state["session"]
+    r = _ok(m.set_f0_estimator("gliss", scope="default"))
+    assert F.chosen_estimator() is None and F.default_estimator() == "gliss" and r["effective"] == "praat"
+    assert s.estimator_of(s.find_ara("mod-1")) == "praat"
+    r = _ok(m.set_f0_estimator("gliss", scope="all"))                 # 利用者が選び直した: 全体の方式にする
+    assert F.chosen_estimator() == "gliss" and r["effective"] == "gliss" and r["changed"] is True
+    assert s.estimator_of(s.find_ara("mod-1")) is None
+    assert m.set_f0_estimator("gliss", scope="nope")["ok"] is False
+    monkeypatch.setenv("GLISS_CLIENT", "app")                         # 画面のエンジン: 既定は "all"
+    _ok(m.set_f0_estimator("praat"))
+    assert F.chosen_estimator() == "praat"
+
+
+# ================================================================ 方式の合っていないアーカイブを救う
+def _without_first_note(monkeypatch, estimators=("gliss", "rmvpe")):
+    """praat 以外の方式では、解析のノート n002 が無いことにする（方式の違いでノートの切れ目が変わる真似）。"""
+    from vocal_engine.project import store
+    real = store.segment_notes
+
+    def fake(f0r, **kw):
+        ns = real(f0r, **kw)
+        return [n for n in ns if n.id != "n002"] if f0r.estimator in estimators else ns
+
+    monkeypatch.setattr(store, "segment_notes", fake)
+
+
+def test_archive_with_a_wrong_estimator_is_fitted_by_its_note_targets(tr, tmp_path, monkeypatch):
+    """アーカイブに方式が無い（古い曲）・方式が合っていない（開き直しの不具合で別の方式のまま保存された）とき、
+    ノートの ID に頼る編集が全部当たる方式を探してそのトラックの方式にする。"""
+    m, a, md, R = tr
+    gl, src, ref, n_edits, tid = _standalone(m, md, tmp_path)
+    arc = _ok(a.export_edits(gl, estimator="praat"))["archive"]
+    assert any(o["edit"]["target"].get("note_id") == "n002"
+               for c_ in arc["changesets"] for o in c_["ops"] if "edit" in o)
+    md._clear()
+    monkeypatch.setenv("VOCAL_ENGINE_WORK_DIR", str(tmp_path / "work2"))
+    _as_plugin(monkeypatch)
+    _without_first_note(monkeypatch)
+    _ok(m.set_f0_estimator("gliss"))                                  # プラグインの設定は gliss
+    for wrong in (None, "gliss"):
+        md._clear()
+        a._reset_render()
+        monkeypatch.setenv("VOCAL_ENGINE_WORK_DIR", str(tmp_path / ("work-%s" % wrong)))
+        daw_src, _t = _daw_doc(a, tmp_path, src)
+        r = _ok(a.ara_restore("mod-1", dict(arc, f0_estimator=wrong)))
+        assert r["mismatch"] is False
+        s = m._state["session"]
+        _ok(m.analyze_take(background=False))                         # 解析が済むと、プラグインの描画が方式を確かめる
+        c = _sync_all(a, "mod-1", daw_src)
+        assert s.estimator_of(s.find_ara("mod-1")) == "praat"
+        assert m._state["project"].analysis["take"]["estimator"] == "praat"
+        _same_as(c, ref)
+        assert _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]["f0_estimator"] == "praat"
+        n_calls = len(c.calls)
+        c.sync(a, "mod-1")                                            # 直った後は何も変わらない
+        assert not c.calls[n_calls]["windows"]
+
+
+def test_archive_that_fits_no_estimator_is_left_alone_and_probed_once(tr, tmp_path, monkeypatch):
+    """どの方式でも当たらない（素材の解析と合わない）ときは、方式を変えず、試した結果を覚えて毎回は調べない。"""
+    m, a, md, R = tr
+    from vocal_engine.project import store
+    gl, src, ref, n_edits, tid = _standalone(m, md, tmp_path)
+    arc = copy.deepcopy(_ok(a.export_edits(gl, estimator="praat"))["archive"])
+    arc["changesets"][0]["ops"][0]["edit"]["target"]["note_id"] = "n999"
+    arc["f0_estimator"] = "gliss"
+    md._clear()
+    monkeypatch.setenv("VOCAL_ENGINE_WORK_DIR", str(tmp_path / "work2"))
+    _as_plugin(monkeypatch)
+    daw_src, _t = _daw_doc(a, tmp_path, src)
+    _ok(a.ara_restore("mod-1", arc))
+    _ok(m.analyze_take(background=False))
+    calls = []
+    real = store.estimate_f0
+    monkeypatch.setattr(store, "estimate_f0", lambda **kw: calls.append(kw["estimator"]) or real(**kw))
+    for _ in range(3):
+        try:
+            a.ara_render_dirty("mod-1")
+        except Exception:                                             # noqa: BLE001  当たらない編集の描画の失敗は別の話
+            pass
+    s = m._state["session"]
+    assert s.estimator_of(s.find_ara("mod-1")) == "gliss"
+    assert calls.count("rmvpe") == 1 and calls.count("praat") == 1    # 1 回ずつだけ調べた
 
 
 # ================================================================ 外部の AI の中継

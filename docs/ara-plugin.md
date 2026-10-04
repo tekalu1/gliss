@@ -43,6 +43,10 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
   - `archive` の `f0_estimator` は、補正を作った F0 の方式（`rmvpe`・`gliss`・`praat`。未解析で明示も無ければ `null`）。
     再合成は F0 を使うので、方式が違うと音が変わる（実測: gliss で補正した編集を rmvpe で解析し直すと約 19 秒分が変わる）。
     `ara_restore` はこの方式をその修飾の方式にして、別の PC・別の作業場所で開き直しても同じ方式で解析する。
+    プラグインが起動のたびに呼ぶ `set_f0_estimator`（設定 `plugin-state.json` の `f0Estimator`）は、方式の決まっていない新しい修飾の既定にだけ効く
+    （エンジンは `GLISS_CLIENT=ara` のとき `scope=default` として扱い、修飾ごとの方式・前に解析した方式を外さない）。これを外すと、rmvpe で作った補正が
+    開き直したときに gliss で解析し直されて、ノートの ID が合わず補正が当たらなくなる（描画が毎秒 `ノートが無い` で失敗し続ける）。
+    方式の記録が無い・合っていないアーカイブは、`ara_render_dirty` がノートの ID に頼る編集の対象が全部ある方式を探して、その修飾の方式にする（`engine/docs/MCP.md`）。
     `ArchiveIO` は `archive` を不透明な JSON として持つだけなので、このキーは C++ を変えずに保たれる（`AraTests.cpp` が確かめる）。
   - 保存のときは、エンジンが動いていれば `ara_archive` を取り直してから書く（エンジンのロックを取らないので、解析の最中も待たない）。部分的な保存（`ARAStoreObjectsFilter`）では渡された修飾だけを書く。
   - 戻すと、修飾ごとの編集を**保留**し、ソースの音を読んで `ara_set_modification` した後に `ara_restore` で当てる。保留の間・素材が違って当てられなかった（`mismatch`）間に保存されると、保留のものをそのまま書く（読み込み直後に保存しても編集が消えない。利用者がその修飾を編集したら捨てる）。

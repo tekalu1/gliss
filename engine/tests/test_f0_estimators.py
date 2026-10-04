@@ -33,6 +33,7 @@ def _tone(sec=2.0, sr=SR, semis=(0, 5), base=220.0):
 @pytest.fixture(autouse=True)
 def _reset_preferred(monkeypatch):
     monkeypatch.setattr(F, "_preferred", None)
+    monkeypatch.setattr(F, "_default", None)
     monkeypatch.delenv(F.ESTIMATOR_ENV, raising=False)
 
 
@@ -119,6 +120,25 @@ def test_resolve_estimator(tmp_path, monkeypatch):
     assert not F.same_estimator("gliss", None, "gliss")          # 版が違う: 作り直す
     assert not F.same_estimator("rmvpe", None, "praat")
     assert F.same_estimator("gliss", v, "auto") and F.same_estimator("rmvpe", None, "auto")
+
+
+def test_default_estimator_is_weaker_than_the_chosen_and_the_recorded(monkeypatch):
+    """`set_default_estimator`（DAW のプラグインの設定）: 方式の決まっていない曲だけの既定。選んだ方式・曲を前に解析した方式が先。"""
+    monkeypatch.setattr(F, "RMVPE_PATH", os.path.join(os.path.dirname(__file__), "no-such-rmvpe.onnx"))
+    assert F.default_estimator() is None
+    assert F.set_default_estimator("praat") == "praat"
+    assert F.default_estimator() == "praat" and F.chosen_estimator() is None
+    assert F.preferred_estimator() == "praat"
+    assert F.resolve_estimator() == "praat"                       # 新しい曲
+    assert F.resolve_estimator(recorded="gliss") == "gliss"       # 前に解析した方式が先
+    assert F.resolve_estimator("gliss") == "gliss"                # 名前の指定が先
+    F.set_preferred_estimator("gliss")
+    assert F.resolve_estimator(recorded="praat") == "gliss"       # 利用者が選んだ方式は曲の方式より強い
+    F.set_preferred_estimator(None)
+    with pytest.raises(ValueError):
+        F.set_default_estimator("nope")
+    F.set_default_estimator(None)
+    assert F.default_estimator() is None and F.preferred_estimator() == "rmvpe"
 
 
 def test_bundled_model_exists():
