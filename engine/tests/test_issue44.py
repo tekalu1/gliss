@@ -7,7 +7,7 @@ import pytest
 
 from conftest import CLIP_A, CLIP_E, TAKE, needs_clips, needs_model
 
-pytestmark = [needs_clips, needs_model]
+pytestmark = [needs_clips, needs_model, pytest.mark.usefixtures("rmvpe_f0")]   # ノートの ID・区切りは RMVPE の解析のもの
 SILENT_TAKE = CLIP_E
 
 

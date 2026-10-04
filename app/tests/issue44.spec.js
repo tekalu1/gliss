@@ -21,7 +21,7 @@ for (const [kind, clip] of [
     const userData = `${project}-userdata`;
     fs.rmSync(project, { recursive: true, force: true });
     fs.rmSync(userData, { recursive: true, force: true });
-    const env = { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
+    const env = { ...process.env, ...M.RMVPE_ENV, ELECTRON_DISABLE_SECURITY_WARNINGS: '1',
       VOCAL_EDITOR_MUTE: '1', VOCAL_ENGINE_CWD: path.join(ROOT, 'engine') };
     delete env.ELECTRON_RUN_AS_NODE;
     const app = await electron.launch({ args: [APP, '--take', M.clip(clip),

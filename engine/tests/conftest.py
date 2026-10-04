@@ -58,6 +58,22 @@ def needs_material(*symbols):
                               reason="テスト素材 %s が無い（GLISS_TEST_MATERIALS）" % ", ".join(symbols))
 
 
+@pytest.fixture(scope="module")
+def rmvpe_f0():
+    """このモジュールのテストは F0 を RMVPE で解析する（`pytestmark` の `usefixtures("rmvpe_f0")`）。
+    ノートの ID・数・区切りの位置を RMVPE の解析で書いた、編集・接続・ガイド・書き出しのテスト用（F0 の方式を
+    確かめるテストではない）。既定の Gliss の F0 モデルでは、同じ素材でも区切りが変わる（`docs/testing.md`）。
+    子のプロセス（stdio のサーバー）にも効くように、環境変数でも渡す。"""
+    from vocal_engine.analysis import f0 as F
+    before = F._preferred
+    mp = pytest.MonkeyPatch()
+    mp.setenv(F.ESTIMATOR_ENV, "rmvpe")
+    F.set_preferred_estimator("rmvpe")
+    yield
+    F.set_preferred_estimator(before)
+    mp.undo()
+
+
 @pytest.fixture(scope="session")
 def f0_take():
     """テイクの F0（画面と同じ既定の方式。GLISS_F0_ESTIMATOR で替えられる）。"""

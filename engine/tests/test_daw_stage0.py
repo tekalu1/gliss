@@ -22,7 +22,7 @@ import soundfile as sf
 import materials as MAT
 from conftest import GUIDE, TAKE, needs_clips, needs_model, stem
 
-pytestmark = [needs_clips, needs_model]
+pytestmark = [needs_clips, needs_model, pytest.mark.usefixtures("rmvpe_f0")]   # ノートの ID・区切りは RMVPE の解析のもの
 
 OFF_SEC, LEN_SEC = 0.5, 2.5
 

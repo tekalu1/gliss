@@ -46,6 +46,12 @@ cd ..\app; pnpm test
 テストのコードには素材のファイル名・歌詞を書かない。テストは記号（`C` など）とデータのキーで素材を引く
 （`engine/tests/materials.py`・`app/tests/materials.js`）。
 
+既定の F0 の方式は Gliss の F0 モデル。ノートの ID（`n007` など）・数・区切りの位置を RMVPE の解析の結果で書いた素材のテスト
+（編集・接続・ガイド・書き出し・音素）は、F0 を RMVPE で解析させて回す（エンジンは `conftest.py` の `rmvpe_f0` を
+`pytestmark` で使う、画面は起動の env に `materials.js` の `RMVPE_ENV` を足す）。どれも前から RMVPE の重みが無いと skip になるテスト。
+同じ素材でも Gliss の F0 モデルでは区切りが変わる（有声と判定する割合が数ポイント低く、短いノートが 1 割ほど少ない）。
+新しく書く素材のテストは、ID ではなく時刻や種類でノートを引くと、方式に依らずに回る。
+
 ### materials.json
 
 ```json

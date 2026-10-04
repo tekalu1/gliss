@@ -10,7 +10,7 @@ import pytest
 import materials as M
 from conftest import CLIP_E, GUIDE, TAKE, needs_clips, needs_model
 
-pytestmark = [needs_clips, needs_model]
+pytestmark = [needs_clips, needs_model, pytest.mark.usefixtures("rmvpe_f0")]   # ノートの ID・区切りは RMVPE の解析のもの
 
 LYRICS_C = M.text("C.lyrics_marked")       # 素材 C の歌詞（区切りの「！」つき）
 
