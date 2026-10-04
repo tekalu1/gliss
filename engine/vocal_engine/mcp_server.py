@@ -2004,9 +2004,13 @@ def remeasure(start_sec: float = None, end_sec: float = None, backend: str = "pr
                 pass
         return res
 
+    def yielded():
+        with _prep_yield():          # 裏の準備（ほかのトラックの解析）と CPU を取り合わない
+            return work()
+
     if background:
-        return _submit_job("remeasure", work)
-    return _ok(**work())
+        return _submit_job("remeasure", yielded)
+    return _ok(**yielded())
 
 
 def _shifted(f0r, t0, hop):

@@ -433,6 +433,7 @@ class Project:
         self._onsets = {}           # role -> (鍵, 発音の頭の秒)
         self._audio_cache = {}
         self._audio_sigs = {}
+        self._note_index = None
         self._media_changed = False
         self._onset_sigs = {}
         self.guide_take_cache_path = None  # セッション中のガイドトラック自身の解析結果
@@ -1562,6 +1563,9 @@ class Project:
     def take_notes(self):
         """テイクのノート（解析の結果に、編集リストの分割 `split` / 結合 `merge` を当てたもの）。"""
         self.ensure_analyzed()
+        return self._notes_with_edits()
+
+    def _notes_with_edits(self):
         base = self._take_notes or []
         ops = [e for e in self.edits if e.kind in ("split", "merge")]
         if not ops:
@@ -1590,6 +1594,22 @@ class Project:
     def alignment(self):
         self.ensure_analyzed()
         return self._alignment
+
+    def _note_quick(self, note_id):
+        """編集の範囲を引く用の `note()`。解析を読み込み済みなら、ファイルの版を確かめ直さずに引く
+        （編集リストの範囲を求めるたびに音声ファイルの版を確かめていて、編集の多いトラックで 1 回の
+        再合成の前に stat が 1000 回を超えていた。クラウドの仮想ドライブで 1 秒以上）。版の確かめは
+        呼び出し元のツールの頭（`ensure_analyzed`）で済んでいる。"""
+        if self._take_f0 is None:
+            return self.note(note_id)
+        ns = self._notes_with_edits()
+        idx = getattr(self, "_note_index", None)
+        if idx is None or idx[0] is not ns:
+            idx = self._note_index = (ns, {n.id: n for n in ns})
+        n = idx[1].get(note_id)
+        if n is None:
+            return self.note(note_id)
+        return n
 
     def note(self, note_id):
         for n in self.take_notes:
@@ -1912,7 +1932,7 @@ class Project:
 
     def edit_span(self, edit):
         if edit.target.type == "note":
-            n = self.note(edit.target.note_id)
+            n = self._note_quick(edit.target.note_id)
             return n.start_sec, n.end_sec
         return float(edit.target.start_sec), float(edit.target.end_sec)
 
