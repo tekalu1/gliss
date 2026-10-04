@@ -78,7 +78,7 @@ public:
             DocumentArchive a;
             a.workKey = archive::makeWorkKey();
             a.guide = "mod \"B\"";
-            a.modifications["mod A"] = { "Vocal 1", parseJson (R"({"format":"gliss-archive","changesets":[{"id":"c001"}],"lyrics":{"text":"あ"}})") };
+            a.modifications["mod A"] = { "Vocal 1", parseJson (R"({"format":"gliss-archive","f0_estimator":"gliss","changesets":[{"id":"c001"}],"lyrics":{"text":"あ"}})") };
             a.modifications["mod \"B\""] = { "ガイド\\1", {} };
             a.modifications[juce::String::fromUTF8 ("修飾/3")] = { "", parseJson (R"({"changesets":[]})") };
 
@@ -100,6 +100,8 @@ public:
             expect (! b.modifications["mod \"B\""].archive.isObject());
             expectEquals (juce::JSON::toString (b.modifications["mod A"].archive, true), juce::JSON::toString (a.modifications["mod A"].archive, true));
             expect (b.modifications[juce::String::fromUTF8 ("修飾/3")].archive.isObject());
+            // the engine's archive keys the plug-in does not know (f0_estimator: the F0 method the edits were made with) are kept as they are
+            expectEquals (b.modifications["mod A"].archive.getProperty ("f0_estimator", {}).toString(), juce::String ("gliss"));
         }
 
         beginTest ("archive without a guide writes null and reads empty");

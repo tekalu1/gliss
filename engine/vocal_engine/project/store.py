@@ -793,7 +793,10 @@ class Project:
         """**編集の状態だけ**を UI・マシンと無関係な dict にする（ARA のアーカイブに入れる単位）。
 
         入るもの: 素材の参照（ソース ID・SHA-256・ソース内オフセット・長さ。パスは手がかり）、
-        歌詞、編集リスト（changeset の列 = 取り消し履歴ごと）、採番、DTW の方式。
+        歌詞、編集リスト（changeset の列 = 取り消し履歴ごと）、採番、DTW の方式、
+        F0 の方式（`f0_estimator`。明示した方式、無ければ前に解析した方式、未解析なら None）。
+        F0 の方式が編集の「音」を決める（再合成は F0 を使う）ので、別の PC・別の作業場所で開き直しても
+        同じ方式で解析するために持つ。
         入らないもの: プロジェクトのディレクトリ、解析のキャッシュ（F0・ノート・音素。素材から作り直せる）、
         画面の状態（表示範囲・選択・ツール。画面は userData の `state.json` に別に持つ）、ログ、時刻の更新日。
         JSON にそのまま書ける（数値・文字列・真偽・None・配列・dict だけ）。
@@ -815,6 +818,7 @@ class Project:
             "lyrics": {k: [dict(e) for e in v] for k, v in self.lyrics.items()},
             "auto_lyrics_attempted": "auto_lyrics" in self.analysis,
             "align_method": self.align_method,
+            "f0_estimator": self.estimator_pref or recorded_estimator(self.analysis),
             "seq": dict(self._seq),
             "changesets": [c.to_json() for c in self.changesets],
         }
@@ -900,6 +904,9 @@ class Project:
         if archive.get("auto_lyrics_attempted"):
             p.analysis["auto_lyrics"] = {"attempted": True, "entries": 0}
         p.align_method = archive.get("align_method") or p.align_method
+        est = archive.get("f0_estimator")
+        if est in f0mod.ESTIMATORS and (est != "rmvpe" or f0mod.rmvpe_available()):
+            p.estimator_pref = est                   # 補正を作った方式で解析する（使えない方式は選んでいる方式に任せる）
         p._seq = dict(archive.get("seq") or {"edit": 0, "changeset": 0})
         p.changesets = [Changeset.from_json(c) for c in archive.get("changesets", [])]
         p._phonemes = {"take": None, "guide": None}
