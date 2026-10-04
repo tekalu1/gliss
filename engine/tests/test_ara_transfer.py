@@ -500,7 +500,9 @@ def test_archive_that_fits_no_estimator_is_left_alone_and_probed_once(tr, tmp_pa
             pass
     s = m._state["session"]
     assert s.estimator_of(s.find_ara("mod-1")) == "gliss"
-    assert calls.count("rmvpe") == 1 and calls.count("praat") == 1    # 1 回ずつだけ調べた
+    from vocal_engine.analysis import f0 as F
+    assert calls.count("rmvpe") == (1 if F.rmvpe_available() else 0)   # 使える方式を 1 回ずつだけ調べた（重みが無ければ rmvpe は試さない）
+    assert calls.count("praat") == 1
 
 
 # ================================================================ 外部の AI の中継
