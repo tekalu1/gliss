@@ -2,9 +2,9 @@
 
 Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジンを MCP（stdio）で公開する。サーバーの名前は `gliss`（Python のパッケージは内部名の `vocal_engine` のまま）。
 Claude Code などの MCP クライアントから
-「測る／直す／確かめる」ができる。ツールは 80 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
+「測る／直す／確かめる」ができる。ツールは 82 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
 プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、DAW（ARA プラグイン）専用の 9 個は §3-4、DAW の中の Gliss の文書を
-外部の AI から操作する 3 個は §3-5、区間の聞き取り（音声認識）の 3 個は §1-1）。
+外部の AI から操作する 3 個は §3-5、単体の `.gliss` の編集を DAW の文書へ移す 2 個（`export_edits`・`import_edits`）は §3-4、区間の聞き取り（音声認識）の 3 個は §1-1）。
 
 起動:
 
@@ -244,7 +244,7 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 そのトラックで明示した方式 → 選んだ方式（画面の 編集 > ピッチ検出の方式・`set_f0_estimator`。画面は起動時に環境変数 `GLISS_F0_ESTIMATOR` で渡す）→
 その曲を前に解析した方式（`project.json` の `analysis.take.estimator`。記録の無い古い解析は `rmvpe`）→ 既定の `rmvpe`。
 `rmvpe` になったのに重みが無ければ `gliss`。RMVPE の重みを後から取った・消したときや既定を替えたときも、前に解析・編集した曲は前の方式のまま（音符の区切りと、付けた編集の当たり方を変えない）。
-**`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator` で選び直すと、全体の方式に戻る。
+**`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator` で選び直すと、全体の方式に戻る（DAW のプラグインのエンジンでは、`set_f0_estimator` は「方式の決まっていない曲の既定」で、トラックの方式も前に解析した方式も変えない。§3-4）。
 
 | `estimator` | 中身 |
 |---|---|
@@ -838,7 +838,7 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `prep_status()` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない |
 | `pause_prep(paused?)` | 裏の準備を一時停止／再開（走っている段は最後まで進み、次の段の前で止まる。合流して待っているトラックは止めない） |
 | `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝これから解析する曲の方式（選んだ方式か既定）、`f0_estimator_chosen`＝選んだ方式（選んでいなければ null）、`f0_estimator_effective`＝開いている曲で実際に使う方式、`f0_estimator_default`、`f0_estimators`、`gliss_f0_model_found`） |
-| `set_f0_estimator(estimator?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。そのエンジン全体の方式で、曲は変えない）。この後の `analyze_take`・裏の準備がその方式で解析する（前に別の方式で解析した曲も解析し直す。`analyze_take(estimator=…)` でトラックごとに明示した方式は、ここで選び直すと外れる）。返り値の `effective` が開いている曲で実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
+| `set_f0_estimator(estimator?, scope?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。曲は変えない）。`scope`: `all`（画面のエンジンの既定）= そのエンジン全体の方式にする。この後の `analyze_take`・裏の準備がその方式で解析する（前に別の方式で解析した曲も解析し直す。`analyze_take(estimator=…)` でトラックごとに明示した方式は、ここで選び直すと外れる）。`default`（DAW のプラグインのエンジン（`GLISS_CLIENT=ara`）の既定）= 方式の決まっていない曲（まだ解析しておらず、方式も明示していない修飾）だけの既定にする。前に解析した方式・トラックで明示した方式（`ara_restore`・`import_edits`・`analyze_take(estimator=…)` で決まったもの）は変えない（プラグインは起動のたびに設定の方式を渡す。それで開き直した曲の補正の解析が変わらないように）。返り値の `effective` が開いている曲で実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
 
 `backend` は `praat`（既定。Praat（praat-parselmouth）の TD-PSOLA）、`psola`（自前の TD-PSOLA）、`world` のどれか。
 praat-parselmouth が import できない環境では `praat` を頼んでも `psola` で再合成し、engine.log に警告を書く
@@ -1179,11 +1179,13 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 | `ara_set_modification` | `ara_id`, `source_path`, `source_id?`, `name?`, `offset_sec?`（新しいトラックの既定 0。既存で省けば今のまま）, `group?`（DAW のトラック名）, `clone_of?`（複製元の `ara_id`） | `{track: {id, ara_id, name, group, offset_sec, duration_sec, sr, channels, source_frames, source_id, path, project_dir, current, guide}, created, source_changed, cloned, selected, analyzed, session}`。トラックを作る／直す。編集対象が無ければ編集対象にする（`selected`）。素材のファイルが変わっても音が同じなら編集はそのまま、音が変わったら `source_changed: true`（編集は残し、解析は捨てる）。外した `ara_id` を足し直すと前の id・前の編集。`clone_of` は新しく作るときだけ、素材の中身が同じならその編集を写す |
 | `ara_remove_modification` | `ara_id` | `{removed, track, switched_to, reopened, session}`。外す（ボーカルが 0 本でもよい。プロジェクトのディレクトリは残す）。無ければ `removed: false` |
 | `ara_sync` | `tracks: [{ara_id, offset_sec?, name?, group?}]`, `tempo?: {bpm, numerator, denominator, start_sec}`, `guide?`（ガイドにする修飾の `ara_id`。`""` で外す。アーカイブのガイドを戻すとき用） | `{changed: [track_id], unknown: [ara_id], tempo, tempo_changed, guide, guide_changed, reopened, session}`。位置は 1 サンプル未満の差なら変えない。ガイドの指定も履歴に入れない（画面の `set_guide_track` は入る）。編集対象のガイドの重ね方が変われば開き直す（`reopened: true` → 画面は `analyze_take` から描き直す） |
-| `ara_render_dirty` | `ara_id`, `since?`（前に受け取った `rev`）, `backend?`（`praat`）, `channels?`（`all` / `mono`）, `max_sec?`（1 回で再合成する窓の長さの上限。既定 10） | `{track, rev, reset, more, analysis_pending, sr, channels, source_frames, restore: [[start_frame, frames]], windows: [{start_frame, frames, byte_offset}], path, rendered_sec, backend, timing_sec}`。下の「差分の再合成」 |
+| `ara_render_dirty` | `ara_id`, `since?`（前に受け取った `rev`）, `backend?`（`praat`）, `channels?`（`all` / `mono`）, `max_sec?`（1 回で再合成する窓の長さの上限。既定 10） | `{track, rev, reset, more, analysis_pending, sr, channels, source_frames, restore: [[start_frame, frames]], windows: [{start_frame, frames, byte_offset}], path, rendered_sec, backend, timing_sec}`。下の「差分の再合成」。テイクの解析が済んだ修飾で、ノートの ID に頼る編集の対象のノートが今の方式の解析に無いときは、全部の対象が見つかる方式（`rmvpe` → `gliss` → `praat` の順。F0 の推定だけを試す）をその修飾の方式にして解析し直す（方式の記録が無い古いアーカイブ・記録が別の方式になって保存されたアーカイブを救う。今の方式で全部当たるなら何もしない。見つからなければ方式を変えず、同じ組み合わせは 1 回しか試さない）。ノートの ID は解析の方式で決まるので、対象の ID が全部ある方式が複数あれば、その順で最初のものになる |
 | `ara_revs` | なし | `{revs: {ara_id: rev}, track_ids: {ara_id: track_id}, errors, external}`。**ロックを取らない**（ディスクの project.json から）。プロジェクトがまだ無い修飾は `"empty"`。`external`: §3-5 の中継が開いていれば `{seq, session_seq, track_id}`（外部の AI が曲を変えるたびに `seq`、セッションを変えうるもの（`set_track`・`set_guide_track`・`set_tempo`・`undo`・`redo`）は `session_seq` も進む。`track_id` は最後に変えたトラック）、無ければ `null` |
-| `ara_archive` | `ara_ids?`（省けば全部） | `{archives: {ara_id: {name, track, archive}}, guide: <ガイドの ara_id> \| null, tempo, errors, missing}`。`archive` は `Project.to_archive()` の形（素材の参照・歌詞・changeset の列。ガイドは入れない）。**ロックを取らない**（解析のジョブの最中も保存を止めない）。素材の照合のハッシュはトラックを作ったときに覚えた値を使う。プロジェクトがまだ無い修飾は `archive: null` |
-| `ara_restore` | `ara_id`, `archive` | `{track, mismatch, reason?, edits, changesets, reopened, session}`。編集を戻す（履歴に入れず、戻した changeset も Ctrl+Z の列に入れない）。素材の長さ・音の中身が違えば**戻さずに** `mismatch: true`（`ok` は true。プラグインはアーカイブを持ち続ける）。編集対象なら開き直す |
+| `ara_archive` | `ara_ids?`（省けば全部） | `{archives: {ara_id: {name, track, archive}}, guide: <ガイドの ara_id> \| null, tempo, errors, missing}`。`archive` は `Project.to_archive()` の形（素材の参照・歌詞・changeset の列・`f0_estimator`。ガイドは入れない）。`f0_estimator` は補正を作った F0 の方式（トラックに明示した方式 → 前に解析した方式。未解析で明示も無ければ `null`）で、`ara_restore` が戻す（別の PC で開き直しても同じ方式で解析する）。**ロックを取らない**（解析のジョブの最中も保存を止めない）。素材の照合のハッシュはトラックを作ったときに覚えた値を使う。プロジェクトがまだ無い修飾は `archive: null` |
+| `ara_restore` | `ara_id`, `archive` | `{track, mismatch, reason?, edits, changesets, reopened, estimator_applied, estimator_note, session}`。編集を戻す（履歴に入れず、戻した changeset も Ctrl+Z の列に入れない）。素材の長さ・音の中身が違えば**戻さずに** `mismatch: true`（`ok` は true。プラグインはアーカイブを持ち続ける）。編集対象なら開き直す。`archive.f0_estimator`（補正を作った F0 の方式）があれば、その修飾の方式にする（`estimator_applied`。選んでいる方式・プラグインの既定の方式より優先し、裏の準備も追従する。後から届く `set_f0_estimator` でも外れない）。この PC で使えない方式（`rmvpe` の重みが無い・知らない名前）は当てず `estimator_note` に理由を返す。方式の記録が無い・合っていないアーカイブは、`ara_render_dirty` が直す（下） |
 | `ara_notes` | `ara_ids?`（省けば全部） | `{notes: {ara_id: {track, rev, state, edited, notes, source_notes}}, errors, missing}`。DAW に返すノート（ARA の content reader の `kARAContentTypeNotes`）。`state`: `ready`（解析が済んだ）/ `pending`（解析がまだ）/ `empty`（プロジェクトがまだ無い）。`ready` のときだけ `notes`（編集を当てた後。無音にしたノートは除く）と `source_notes`（解析だけ）が入る。どちらもソースの秒・頭の順・音程のあるノートだけで `[{id, start_sec, end_sec, hz, midi, volume}]`（位置・音程は `export_view_data` の `edited_start_sec`・`edited_end_sec`・`edited_pitch_midi` と同じ定義、`hz` はその Hz、`volume` はノートの音量の山を -60 dB → 0・0 dB → 1）。`edited` = 編集リストが空でない（プラグインは DAW に adjusted と出す）。`rev` は `ara_revs` と同じ。解析は待たない・始めない（裏の準備が済むと版が変わる）。編集対象は変えない |
+| `export_edits` | `gliss_path`（`.gliss`）, `track?`（id か名前。省けばボーカルが 1 本ならそれ）, `estimator?`（方式を決め打ちする）, `include_archive?`（既定 true） | `{archive, track: {id, name, sr, channels, source_frames, duration_sec, gliss}, material: {name, path, frames, sr, channels, sha256, clip_audio_sha256}, estimator, stats: {edits, changesets, undone, authors: {human, ai}, kinds, note_targets, changeset_authors}, not_transferred, warnings}`。**読むだけ**（許可なし）。`.gliss` のトラックの `take`・歌詞・`changesets`（author・取り消しの履歴ごと）を ARA のアーカイブ（`Project.to_archive()` の形）にする。`material` が素材の識別（`clip_audio_sha256` = 音の中身のハッシュ。ARA 側が照らす）。`estimator` = `estimator` 引数 → トラックに明示した方式（記録の無い `.gliss` は `null` で、`warnings` に出す）。`stats.note_targets` = ノートの ID に頼る編集の数（`target` が note・`connection`・`transition`・`merge`）。`not_transferred` = 移らないもの（`mutes`・`cuts`・ミキサー・ガイドの指定。`.gliss` のセッションの項目）。クリップ（素材の一部）のトラック・音声が無いトラック・編集がまだ無い（開いたことが無い）トラックはエラー。AI のエンジンが DAW の文書を選んでいる間も転送しない（ファイルを読むのは AI のエンジン） |
+| `import_edits` | `archive?` または `gliss_path?` + `track?`（どちらか 1 つ）, `replace?`（既定 false）, `estimator?`, `analyze?`（既定 true） | `{mismatch, imported, track, ara_id, edits, changesets, authors, estimator, estimator_applied, analysis: {estimator, ran}, missing_note_targets: {count, ids} \| null, replaced, not_transferred, warnings, next}`。**選んでいる修飾**（外部の AI は `ara_attach` で選ぶ）へ編集を当てる。許可は**編集**（`EDIT_TOOLS`。外部の AI は `ara_` で始まらない名前なので中継を通る。`GLISS_ARA_AI=read` は `permission: "edit"` で断る）。素材の長さ・音の中身が違えば**何も変えずに** `mismatch: true` と `reason`（`ok` は true）。修飾に別の編集があれば `replace: true` が要る（無ければエラー。`replaced` に消えた編集の数と author の内訳。同じ編集の入れ直しは要らない）。`estimator`（省けば `archive.f0_estimator`）はその修飾の方式にして（`ara_restore` と同じ）、解析がその方式でなければここで解析する（`analysis.ran`。`analyze: false` で省く）。ノートの ID に頼る編集の対象のノートが解析に無ければ `missing_note_targets`（解析が済んでいなければ `null`）と `warnings`。`author` は archive のまま保たれる（中継が `author` を `"ai"` に上書きするのは引数に `author` のあるツールだけで、このツールは取らない）。取り込んだ編集は `ara_restore` と同じく**取り消しの履歴（Ctrl+Z）に入らない**（1 つの undo にまとめる仕組みは無い。戻すには `undo(changeset_id)`・`reset_to_original(whole_track=true)`・元の編集の `replace: true`）。当てた後は外部の編集と同じ道で再合成・`ara_revs` の版・プラグインへの通知に乗る |
 
 **差分の再合成**（`ara_render_dirty`。`render/region.py` の `EditCache` をファイルで渡すもの）:
 
@@ -1229,6 +1231,10 @@ AI のエンジンは**呼び出しをプラグインのエンジンへ転送す
    `plan_edit`/`apply_plan`・`set_guide_track`・`undo`/`redo` など。返り値の dict には `ara: {document, work_key, ara_id}` が付く。
    別の修飾へは `select_track(track_id)`（外部の選択だけを変える。プラグインの画面の編集対象は変えない）か `ara_attach` をもう一度。
 4. `ara_detach()` — やめる（以後のツールはこのエンジン＝単体の Gliss の曲に戻る）。
+
+単体の `.gliss` の補正を移すときは、2 と 3 の間で `export_edits(gliss_path, track?)`（AI のエンジンで `.gliss` を読む。`estimator`・`stats`・
+`not_transferred` を確かめる）、3 で `import_edits(gliss_path=…, track=…, estimator?, replace?)`（§3-4 の表）。素材が違えば `mismatch`、
+補正を作った F0 の方式と違うと音が変わるので方式をそろえる（`docs/ara-plugin.md` の「単体の `.gliss` の補正を DAW の文書へ移す」）。
 
 - 使えないもの（許可に関係なく `permission: "ara"`）: DAW の文書の作り・トラックの増減・保存・書き出し（`new_project`・`load_project`・
   `open_project`・`save_project`・`close_project`・`add_track`・`remove_track`・`export_wav`・`render_tracks`・`split_track`・`join_track`・
@@ -1348,10 +1354,10 @@ AI のエンジンは**呼び出しをプラグインのエンジンへ転送す
 
 | 許可 | ツール |
 |---|---|
-| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`apply_edits`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`make_score_guide`・`split_track`・`join_track`・`mute_track_range`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
+| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`apply_edits`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`make_score_guide`・`split_track`・`join_track`・`mute_track_range`・`set_tempo`・`import_edits`（DAW の文書へ編集を取り込む。§3-4）、`close_project(discard=true)`（保存していない変更を捨てる） |
 | **保存・書き出し** | `save_project`・`export_wav`・`prepare_asr_model`（聞き取り用の数 GB のモデルをダウンロードして書く）、`render_region(path=…)`・`export_view_data(path=…)`・`render_preview(name=<フォルダーを含むパス>)`（ユーザーが指定した場所に書くとき） |
 | AI からは呼べない | DAW のプラグイン専用の `ara_*`（§3-4。`bridge.py` の `ARA_TOOLS`。`permission: "ara"` で断る） |
-| 許可なしで呼べる（DAW の文書） | `ara_documents`・`ara_attach`・`ara_detach`（§3-5。選んだ後のツールは DAW の Gliss の `GLISS_ARA_AI` に従い、`bridge.json` の許可は見ない） |
+| 許可なしで呼べる（DAW の文書） | `ara_documents`・`ara_attach`・`ara_detach`・`export_edits`（§3-4・§3-5。選んだ後のツールは DAW の Gliss の `GLISS_ARA_AI` に従い、`bridge.json` の許可は見ない） |
 | 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`measure_against_guide`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info` |
 
 `select_track` は編集対象を切り替えるだけ（履歴に入らない）なので許可なし。`plan_edit` は計画を作るだけで、当てるのは `apply_plan`（編集）。

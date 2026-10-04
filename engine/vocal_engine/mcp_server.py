@@ -2307,22 +2307,33 @@ def engine_info(reload_addons: bool = False) -> dict:
 
 
 @_tool
-def set_f0_estimator(estimator: str = "rmvpe") -> dict:
+def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict:
     """ピッチ（F0）検出の方式を選ぶ（このエンジン全体。画面の「ピッチ検出の方式」）。曲は変えない。
 
     estimator: "rmvpe"（既定。重みは別に取得）/ "gliss"（Gliss の F0 モデル。同梱）/ "praat"。
-    この後の analyze_take・裏の準備がこの方式で解析する（前に別の方式で解析した曲も、この方式で解析し直す）。
-    選ぶまでは、曲ごとに前に解析した方式（まだ解析していない曲は既定の "rmvpe"）で解析する。
+    scope: "all"（画面のエンジンの既定）= この後の analyze_take・裏の準備がこの方式で解析する
+      （前に別の方式で解析した曲も、トラックで明示した方式も、この方式で解析し直す）。選ぶまでは、曲ごとに前に解析した
+      方式（まだ解析していない曲は既定の "rmvpe"）で解析する。
+      "default"（DAW のプラグインのエンジンの既定）= 方式の決まっていない新しい修飾だけの既定にする。前に解析した方式・
+      トラックで明示した方式（ara_restore・import_edits・analyze_take(estimator=…) で決まったもの）は変えない
+      （プラグインは起動のたびに設定の方式を渡すので、開き直した曲の補正の解析が変わらないように）。
     "rmvpe" を選んでいても重みが無ければ "gliss" で解析する（返り値の `effective`。開いている曲の方式）。
     """
     p = _project(required=False)
+    scope = scope or ("default" if bridge.is_ara() else "all")
+    if scope not in ("all", "default"):
+        raise ProjectError("scope は all か default（%r は知らない）" % scope)
 
     def now():
         return p.f0_estimator() if p is not None else f0mod.resolve_estimator()
 
     before, chosen = now(), f0mod.chosen_estimator()
-    f0mod.set_preferred_estimator(estimator)
-    cleared = _mcp_tracks.forget_track_estimators()      # analyze_take(estimator=…) で明示した方式は、選び直しで全体の方式に戻る
+    if scope == "default":
+        f0mod.set_default_estimator(estimator)
+        cleared = False
+    else:
+        f0mod.set_preferred_estimator(estimator)
+        cleared = _mcp_tracks.forget_track_estimators()  # analyze_take(estimator=…) で明示した方式は、選び直しで全体の方式に戻る
     effective = now()
     if effective != before or f0mod.chosen_estimator() != chosen or cleared:
         _mcp_tracks.reschedule_prep()            # 裏の準備の組み合わせ（方式を含む）を入れ直す

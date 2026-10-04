@@ -16,6 +16,8 @@
 | `ara_archive(ara_ids?)` | 保存用の編集リスト（ロックを取らない） |
 | `ara_restore(ara_id, archive)` | アーカイブから編集を戻す（素材が違えば当てない） |
 | `ara_notes(ara_ids?)` | DAW に返すノート（編集を当てた後と、解析だけのもの。ソースの秒） |
+| `export_edits(gliss_path, track?, estimator?, include_archive?)` | `.gliss` のトラックの編集を ARA のアーカイブにして返す（読むだけ） |
+| `import_edits(archive? / gliss_path?, track?, replace?, estimator?, analyze?)` | アーカイブを選んでいる修飾へ当てる（外部の AI から中継で呼べる編集ツール） |
 
 共通: `author` を取らず、**取り消しの履歴に入れない**（DAW が決めたことを Gliss の Ctrl+Z で戻させない）。
 画面の編集（`shift_pitch` など）・`undo` / `redo`・`select_track`・`analyze_take` は今までのツールをそのまま使う。
@@ -45,6 +47,7 @@ from .audio import file_sig
 from .project import Project, ProjectError
 from .project import document as D
 from .project.session import Session, SessionError, norm_tempo
+from .project import transfer as _tr
 from .project.store import ARCHIVE_FORMAT, dir_lock
 
 _ok = _srv._ok
@@ -140,6 +143,9 @@ def _mark_all(s, tid, p):
         s.history_marks[tid] = n
 
 
+_fit_tried = set()                          # (ara_id, 今の方式, 当たらないノートの ID) — 方式を探して見つからなかった組み合わせ
+
+
 def _drop_render(ara_id):
     _render.pop(ara_id, None)
     _renderers.pop(ara_id, None)
@@ -148,6 +154,7 @@ def _drop_render(ara_id):
 def _reset_render():
     _render.clear()
     _renderers.clear()
+    _fit_tried.clear()
 
 
 def _analyzed(s, t):
@@ -245,6 +252,7 @@ def _archive_of(t, pdir):
     arc["take"] = _ref(take, known)
     arc["guide"] = None
     (arc.get("lyrics") or {}).pop("guide", None)
+    arc["f0_estimator"] = t.get("estimator") or arc.get("f0_estimator")     # トラックで明示した方式 → 前に解析した方式
     return arc
 
 
@@ -277,6 +285,70 @@ def _restore_into(s, t, archive):
     _forget_history(s, t["id"])
     _mark_all(s, t["id"], p)
     return p
+
+
+def _estimator_problem(est):
+    """アーカイブの F0 の方式をこの PC で使えない理由（使えるなら None）。"""
+    from .analysis import f0 as F
+    if est not in F.ESTIMATORS:
+        return "知らない F0 の方式: %r（%s）" % (est, " / ".join(F.ESTIMATORS))
+    if est == "rmvpe" and not F.rmvpe_available():
+        return "F0 の方式 rmvpe の重み（rmvpe.onnx）がこの PC に無い（補正を作ったときと音が変わる）"
+    return None
+
+
+def _apply_estimator(s, t, est):
+    """アーカイブの `f0_estimator` を、トラックの方式（session.json の `estimator`）にする。(方式 | None, 理由 | None)。
+
+    選んでいる方式と同じでも明示で持つ（保存し直したアーカイブから方式が消えない）。使えない方式（重みが無い）は
+    当てずに理由を返す。呼び出し側が `s.save()` と裏の準備の入れ直しをする。"""
+    if not est:
+        return None, None
+    why = _estimator_problem(est)
+    if why:
+        return None, why
+    t["estimator"] = est
+    return est, None
+
+
+def _fit_estimator(s, t, p):
+    """ノートの ID に頼る編集の対象が、今の方式の解析に無いとき、全部の対象が見つかる方式を探してそのトラックの方式にする。
+    方式の記録の無い（古い）アーカイブ・記録が別の方式になってしまったアーカイブ（開き直しで方式が外れたまま保存された曲）を
+    救う。ノートの ID は解析の方式で変わるので、補正を作った方式でなければ編集が当たらない。今の方式で全部当たるなら何もしない。
+    探す（F0 の推定は方式ごとに数秒〜数十秒）のは、同じ組み合わせにつき 1 回だけ。見つかれば True（解析し直した）。"""
+    from .analysis import f0 as F
+    missing = sorted({nid for _e, nid in p._missing_note_targets()})
+    if not missing:
+        return False
+    cur = p.f0_estimator()
+    key = (t["ara_id"], cur, tuple(missing))
+    if key in _fit_tried:
+        return False
+    _fit_tried.add(key)
+    for cand in F.ESTIMATORS:
+        if cand == cur or _estimator_problem(cand):
+            continue
+        try:
+            lost = p.missing_note_targets_with(cand)
+        except Exception as e:                   # noqa: BLE001  その方式は試せない（素材が読めないなど）
+            log.get().warning("修飾 %s: F0 の方式 %s で編集の対象を調べられない: %s", t["ara_id"], cand, e)
+            continue
+        if lost:
+            continue
+        log.get().warning("修飾 %s: 編集の対象のノート %s が方式 %s の解析に無い。全部当たる %s に替える",
+                          t["ara_id"], ", ".join(missing[:5]), cur, cand)
+        _apply_estimator(s, t, cand)
+        p.estimator_pref = cand
+        s.save()
+        with prep.exclusive(p.dir):
+            p.analyze(estimator=cand)
+        _srv._invalidate_renderer()
+        _drop_render(t["ara_id"])
+        _mt._schedule(s)
+        return True
+    log.get().warning("修飾 %s: 編集の対象のノート %s が、どの方式の解析にも揃わない（今の方式 %s のまま）",
+                      t["ara_id"], ", ".join(missing[:5]), cur)
+    return False
 
 
 # ---------------------------------------------------------------- 版
@@ -638,6 +710,7 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     else:
         if p.edits and not pending_analysis:
             p.ensure_analyzed()
+            _fit_estimator(s, t, p)              # 編集の対象のノートが無いとき、当たる方式に替える（アーカイブの方式が合わない曲）
         asig, erev = _rev_parts(p)
         rev = "%s:%s" % (asig, erev)
         if p.edits and not pending_analysis:
@@ -775,7 +848,10 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
 
     archive: ara_archive の archives[ara_id].archive（`Project.to_archive()` の形）。
     素材（長さ・音の中身）がトラックの今の素材と違えば**戻さずに** mismatch = true と reason を返す（ok は true。
-    プラグインはアーカイブを捨てずに持ち続ける）。編集対象のトラックなら開き直す（reopened）。"""
+    プラグインはアーカイブを捨てずに持ち続ける）。編集対象のトラックなら開き直す（reopened）。
+    archive の `f0_estimator`（補正を作った F0 の方式）があれば、そのトラックの方式にする（estimator_applied。
+    別の PC・別の作業場所で開き直しても同じ方式で解析する）。この PC で使えない方式（重みが無い）は当てず、
+    estimator_note に理由を返す。"""
     s = _session()
     t = _track(s, ara_id)
     why = _mismatch(t, archive)
@@ -783,6 +859,9 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
         log.get().warning("修飾 %s のアーカイブを当てない: %s", ara_id, why)
         return _ok(track=t["id"], ara_id=ara_id, mismatch=True, reason=why, edits=None, changesets=None,
                    reopened=False)
+    applied, note = _apply_estimator(s, t, archive.get("f0_estimator"))
+    if note:
+        log.get().warning("修飾 %s の F0 の方式を当てない: %s", ara_id, note)
     p = _restore_into(s, t, archive)
     s.save()
     reopened = False
@@ -791,7 +870,7 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
         reopened = True
     _mt._schedule(s)
     return _ok(track=t["id"], ara_id=ara_id, mismatch=False, edits=len(p.edits), changesets=len(p.changesets),
-               reopened=reopened, session=_mt.summary(s))
+               reopened=reopened, estimator_applied=applied, estimator_note=note, session=_mt.summary(s))
 
 
 def _note_row(n, start, end, midi):
@@ -875,6 +954,145 @@ def ara_notes(ara_ids: list | None = None) -> dict:
     return _ok(notes=out, errors=errors or None, missing=missing or None)
 
 
+# ---------------------------------------------------------------- 単体の .gliss の編集を DAW の文書へ移す
+@_tool(lock=False)
+def export_edits(gliss_path: str, track: str | None = None, estimator: str | None = None,
+                 include_archive: bool = True) -> dict:
+    """`.gliss`（単体のプロジェクト）のトラックの編集を、ARA のアーカイブ（`Project.to_archive()` の形）にして返す（読むだけ）。
+
+    gliss_path: `.gliss` のファイル（保存した中身を読む）。track: トラックの id か名前（省くと、ボーカルが 1 本ならそれ）。
+    estimator: F0 の方式を決め打ちする（省くと、トラックに明示した方式。記録が無ければ null）。
+    include_archive: false なら archive を省く（要約だけ見る。`import_edits(gliss_path=…)` はこの archive を自分で作る）。
+    返り値: archive・track（id・name・gliss）・material（素材の識別: name・frames・sr・channels・sha256・
+    clip_audio_sha256 = 音の中身のハッシュ。ARA 側が照らす値）・estimator（補正を作った F0 の方式 | null）・
+    stats（edits・changesets・authors・kinds・note_targets = ノートの ID に頼る編集の数）・
+    not_transferred（移らないセッションの項目: mutes・cuts・ミキサー・ガイドの指定）・warnings。
+    クリップ（素材の一部）のトラック・音声が見つからないトラックはエラー（ARA の文書は素材の全体を 1 つの修飾にする）。
+    DAW の文書を選んでいる間（ara_attach の後）も、このエンジンの中で動く（ファイルを読むのは AI のエンジン）。"""
+    r = _tr.archive_from_gliss(gliss_path, track=track, estimator=estimator)
+    if not include_archive:
+        r.pop("archive")
+    return _ok(**r)
+
+
+def _import_target(s):
+    """`import_edits` の宛先: 選んでいる修飾のトラック（外部の AI なら ara_attach で選んだもの）。"""
+    tid = _srv._state.get("track")
+    t = None
+    if tid:
+        try:
+            t = s.track(tid)
+        except SessionError:
+            t = None
+    if t is None or not t.get("ara_id"):
+        raise ProjectError("DAW の文書の修飾が選ばれていない（外部の AI は ara_documents → ara_attach で修飾を選ぶ。"
+                           "単体の曲に当てるなら load_project で .gliss を開く）")
+    return t
+
+
+def _json_equal(a, b):
+    return json.dumps(a, sort_keys=True, ensure_ascii=False) == json.dumps(b, sort_keys=True, ensure_ascii=False)
+
+
+@_tool
+def import_edits(archive: dict | None = None, gliss_path: str | None = None, track: str | None = None,
+                 replace: bool = False, estimator: str | None = None, analyze: bool = True) -> dict:
+    """**DAW の Gliss の文書の、選んでいる修飾**へ、編集（ARA のアーカイブ）を当てる。単体の `.gliss` の補正を、
+    DAW の中の Gliss（ARA）へ移すためのツール（外部の AI は ara_attach → import_edits → ara_detach）。
+
+    archive: `export_edits` の archive（または `ara_archive` の形）。gliss_path・track: archive の代わりに `.gliss` の
+      トラックを直接指す（`export_edits` と同じ。中で archive を作る）。どちらか 1 つ。
+    素材が違えば（長さ・音の中身のハッシュ）**何も変えずに** mismatch = true と reason を返す（ok は true）。
+    修飾に編集が既にあるとき、取り込む編集と違うなら replace = true が要る（画面で手を入れた編集を黙って消さない。
+    replaced に消えた編集の数と author の内訳を返す）。
+    estimator: F0 の方式を決め打ちする（省くと archive の `f0_estimator`）。方式があれば、その修飾の方式にして
+      （裏の準備も追従する）、解析がその方式でなければ**ここで解析する**（analyze = true。数秒〜数十秒、エンジンを占有する）。
+      補正を作った方式と違うと再合成の音が変わり、ノートの ID に頼る編集は当たらなくなる。方式の記録が無い archive は
+      estimator を指定するか、`analyze_take(estimator=…)` で方式を決め、missing_note_targets が 0 になる方式にする。
+      この PC で使えない方式（rmvpe の重みが無い）は当てず warnings に出す。
+    取り込んだ編集は**取り消しの履歴（Ctrl+Z）に入らない**（`ara_restore` と同じ。DAW の読み込みを Ctrl+Z で戻させない）。
+    author は archive のまま（human / ai が保たれる）。戻すには `undo(changeset_id)`・`reset_to_original(whole_track=true)`、
+    または元の編集を `replace = true` で入れ直す。
+    当てた後は外部の編集と同じ道で再合成・DAW への反映（ara_revs の版・プラグインへの通知）に乗る。
+    返り値: mismatch・imported・track・ara_id・edits・changesets・authors・estimator・estimator_applied・analysis
+    （estimator・ran）・missing_note_targets（{count, ids}。解析が済んでいなければ null）・replaced・
+    not_transferred（gliss_path で指したときだけ）・warnings・next。"""
+    s = _session()
+    t = _import_target(s)
+    info = None
+    if (archive is None) == (gliss_path is None):
+        raise ProjectError("archive か gliss_path のどちらか 1 つを渡す")
+    if gliss_path is not None:
+        info = _tr.archive_from_gliss(gliss_path, track=track, estimator=estimator)
+        archive = info["archive"]
+    elif estimator:
+        archive = dict(archive, f0_estimator=estimator)
+    why = _mismatch(t, archive)
+    if why:
+        log.get().warning("修飾 %s に編集を取り込まない: %s", t.get("ara_id"), why)
+        return _ok(track=t["id"], ara_id=t["ara_id"], mismatch=True, imported=False, reason=why)
+    pdir = s.project_dir_of(t)
+    replaced = None
+    if os.path.exists(os.path.join(pdir, "project.json")):
+        q = Project(pdir).load()
+        if q.changesets:
+            same = _json_equal([c.to_json() for c in q.changesets], archive.get("changesets") or [])
+            if not same and not replace:
+                st = _tr.edit_stats(q.to_archive())
+                raise ProjectError("この修飾には別の編集がある（編集 %d 件・author %s）。入れ替えるなら replace=true"
+                                   % (st["edits"], st["authors"]))
+            if not same:
+                st = _tr.edit_stats(q.to_archive())
+                replaced = {"edits": st["edits"], "changesets": st["changesets"], "authors": st["authors"]}
+    warnings = list((info or {}).get("warnings") or [])
+    est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
+    if note:
+        warnings.append(note)
+    p = _restore_into(s, t, archive)
+    pref = s.estimator_of(t)
+    p.estimator_pref = pref
+    s.save()
+    cur = _srv._state.get("project")
+    if cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
+        cur.load()                               # 画面の編集対象が古い Project のまま（同じトラック）: 読み直す
+        cur._forget_analysis()
+        cur.estimator_pref = pref
+    ran, analysis_error = False, None
+    if analyze and est:
+        try:
+            if not p.analysis_cached(est):
+                with prep.exclusive(p.dir):
+                    p.analyze(estimator=est)
+                ran = True
+        except Exception as e:                   # noqa: BLE001  編集は取り込んだ。解析は analyze_take で
+            analysis_error = str(e)
+            log.get().warning("取り込んだ後の解析に失敗: %s", e)
+            warnings.append("解析に失敗した（analyze_take(estimator=%r) でやり直す）: %s" % (est, e))
+    if ran and cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
+        cur.load()
+        cur._forget_analysis()
+    _srv._invalidate_renderer()
+    _drop_render(t["ara_id"])
+    missing = None
+    if _analysis_ready(p) and analysis_error is None and (est is None or ran or p.analysis_cached(est)):
+        p.ensure_analyzed()
+        ids = [nid for _e, nid in p._missing_note_targets()]
+        missing = {"count": len(ids), "ids": sorted(set(ids))[:20]}
+        if ids:
+            warnings.append("ノートの ID に頼る編集 %d 件の対象のノートが無い（解析の方式が補正を作った方式と違う）。"
+                            "estimator を合わせる" % len(ids))
+    _mt._schedule(s)
+    st = _tr.edit_stats(archive)
+    ta = (p.analysis or {}).get("take") or {}
+    return _ok(track=t["id"], ara_id=t["ara_id"], mismatch=False, imported=True, edits=len(p.edits),
+               changesets=len(p.changesets), authors=st["authors"], estimator=archive.get("f0_estimator"),
+               estimator_applied=est, analysis={"estimator": ta.get("estimator"), "ran": ran},
+               missing_note_targets=missing, replaced=replaced,
+               not_transferred=(info or {}).get("not_transferred"), warnings=warnings,
+               next="list_changes・list_notes で確かめる。方式の記録が無いときは analyze_take(estimator=…) → "
+                    "missing_note_targets が 0 になる方式。DAW の再生・書き出しは約 1 秒で追従する")
+
+
 # ---------------------------------------------------------------- 外部の AI から DAW の文書を操作する（ara_relay.py）
 def _relay_local():
     from . import bridge
@@ -928,4 +1146,4 @@ def ara_detach() -> dict:
 
 
 TOOLS = [ara_open, ara_set_modification, ara_remove_modification, ara_sync, ara_render_dirty, ara_revs,
-         ara_archive, ara_restore, ara_notes, ara_documents, ara_attach, ara_detach]
+         ara_archive, ara_restore, ara_notes, export_edits, import_edits, ara_documents, ara_attach, ara_detach]

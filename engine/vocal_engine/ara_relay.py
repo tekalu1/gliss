@@ -48,8 +48,9 @@ CONNECT_TIMEOUT = 3.0
 LIST_TIMEOUT = 5.0
 CALL_TIMEOUT = 900.0               # 30 秒を超える処理はジョブで返るので、普通はこれより十分短い
 
-# AI のエンジンで転送せずに自分で答えるツール
-LOCAL_TOOLS = frozenset({"ara_documents", "ara_attach", "ara_detach"})
+# AI のエンジンで転送せずに自分で答えるツール（export_edits は .gliss を読むだけ。ファイルを読むのは AI のエンジンで、
+# プラグインのエンジンのロックを握らない）
+LOCAL_TOOLS = frozenset({"ara_documents", "ara_attach", "ara_detach", "export_edits"})
 # DAW の文書では使えないツール（プラグインの画面と同じ。plugin/src/ara/EngineCalls.cpp の isForbidden）
 FORBIDDEN = frozenset({"new_project", "load_project", "open_project", "save_project", "close_project",
                        "add_track", "remove_track", "export_wav", "render_tracks",

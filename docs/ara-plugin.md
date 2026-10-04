@@ -40,6 +40,14 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 ```
 
   - `work_key` は作業場所 `%LOCALAPPDATA%\Gliss\work\ara\<work_key>` の名前。新しいドキュメントで UUID を作り、アーカイブにあれば（まだエンジンで開いていなければ）それを使う（同じ PC なら前の解析のキャッシュが使える）。
+  - `archive` の `f0_estimator` は、補正を作った F0 の方式（`rmvpe`・`gliss`・`praat`。未解析で明示も無ければ `null`）。
+    再合成は F0 を使うので、方式が違うと音が変わる（実測: gliss で補正した編集を rmvpe で解析し直すと約 19 秒分が変わる）。
+    `ara_restore` はこの方式をその修飾の方式にして、別の PC・別の作業場所で開き直しても同じ方式で解析する。
+    プラグインが起動のたびに呼ぶ `set_f0_estimator`（設定 `plugin-state.json` の `f0Estimator`）は、方式の決まっていない新しい修飾の既定にだけ効く
+    （エンジンは `GLISS_CLIENT=ara` のとき `scope=default` として扱い、修飾ごとの方式・前に解析した方式を外さない）。これを外すと、rmvpe で作った補正が
+    開き直したときに gliss で解析し直されて、ノートの ID が合わず補正が当たらなくなる（描画が毎秒 `ノートが無い` で失敗し続ける）。
+    方式の記録が無い・合っていないアーカイブは、`ara_render_dirty` がノートの ID に頼る編集の対象が全部ある方式を探して、その修飾の方式にする（`engine/docs/MCP.md`）。
+    `ArchiveIO` は `archive` を不透明な JSON として持つだけなので、このキーは C++ を変えずに保たれる（`AraTests.cpp` が確かめる）。
   - 保存のときは、エンジンが動いていれば `ara_archive` を取り直してから書く（エンジンのロックを取らないので、解析の最中も待たない）。部分的な保存（`ARAStoreObjectsFilter`）では渡された修飾だけを書く。
   - 戻すと、修飾ごとの編集を**保留**し、ソースの音を読んで `ara_set_modification` した後に `ara_restore` で当てる。保留の間・素材が違って当てられなかった（`mismatch`）間に保存されると、保留のものをそのまま書く（読み込み直後に保存しても編集が消えない。利用者がその修飾を編集したら捨てる）。
   - `format` が違う・`version` が新しすぎるものは復元に失敗として返す。段階 1 の形（`gliss-ara-document`）は読まない（配布していない）。
@@ -124,6 +132,33 @@ AI からの手順:
   画面が断るものと同じ）は許可に関係なく断る。プラグインの画面にはまだ切り替えが無い。
 - 記録は `%APPDATA%\Gliss\ara-sessions\<エンジンの pid>.json`（接続先・トークン・DAW の pid（プラグインが `GLISS_ARA_HOST_PID` で渡す）・文書の鍵）。
   エンジンが終わる（DAW が文書を閉じる）と消え、落ちて残ったものは AI 側が pid の生存で無視して消す。
+
+#### 単体の `.gliss` の補正を DAW の文書へ移す（`export_edits` → `import_edits`）
+
+単体の Gliss で作った補正（`.gliss` のトラックの編集）を、DAW の中の Gliss（ARA）の**同じ素材**の修飾へ移せる。DAW には補正済みの音を
+書き出して載せるのではなく、元の音の上に Gliss の編集が乗るので、DAW の中でも手で直し続けられる。編集の秒は素材の秒でトラックの位置に
+依らないので、`.gliss` のトラックの `take`・`lyrics`・`changesets`（取り消しの履歴・author）をそのまま当てる。
+
+1. DAW に**補正前の元の音**のイベントを置き、Gliss（ARA）を挿してエディタを 1 回開く（`ara_documents` に出る）。同じ音のイベントを複数の
+   トラックに置くと修飾が共有されるかは DAW 次第なので、取り込み用の専用のトラックを作る。
+2. `export_edits(gliss_path, track?)`（読むだけ）で `estimator`（補正を作った F0 の方式）・`stats`（編集の数・author・ノート ID に頼る編集の数）・
+   `not_transferred`・`warnings` を見る。`estimator` が `null`（方式を記録する前の `.gliss`。`.gliss` に残るのはトラックに明示した方式だけ）なら、
+   `import_edits` に `estimator` を指定する（ノート ID に頼る編集があれば、`missing_note_targets` が 0 になる方式を試す）。
+3. `ara_attach(ara_id)` → `import_edits(gliss_path=…, track=…)`（または `archive=<export_edits の archive>`）。素材（長さ・音の中身のハッシュ）が違えば
+   `mismatch: true` と `reason` を返して**何も変えない**。修飾に別の編集が既にあるときは `replace: true` が要る。F0 の方式は
+   その修飾の方式になり（裏の準備も追従する）、解析がその方式でなければここで解析する（数秒〜数十秒、エンジンを占有する）。
+4. 確かめる: `list_changes`（件数・author）・`list_notes`、DAW の再生・書き出し。外部の編集と同じ道なので、約 1 秒で再合成・画面の描き直し・
+   ソングの保存に乗る。書き出しは、同じ方式で解析したとき、単体の `render_region` とサンプル単位で同じ。終わったら `ara_detach()`。
+
+- 方式は音を決める: 補正を作ったのと違う方式で解析すると再合成の音が変わる（実測: gliss で補正した編集を rmvpe で解析し直すと約 19 秒分）。
+  取り込んだ後は `archive.f0_estimator` として DAW のソングに保存され、開き直す（`ara_restore`）と同じ方式で解析する。この PC で使えない方式
+  （`rmvpe` の重みが無い）は当てずに `warnings` / `estimator_note` に出る。
+- 移らないもの: `.gliss` のセッションの項目（`mutes`・`cuts`・ゲイン・パン・ミュート・ソロ・ガイドの指定・テンポ）とクリップ（素材の一部）のトラック
+  （ARA の修飾は素材の全体）。`export_edits` / `import_edits` の `not_transferred` に一覧が出る。区間のミュートは DAW のリージョンのミュートで作り直す。
+- 取り込んだ編集は取り消しの履歴（Ctrl+Z）に入らない（`ara_restore` と同じ。DAW の読み込みを Ctrl+Z で戻させない）。1 つの undo にまとめる仕組みは
+  無い。戻すときは `undo(changeset_id)`・`reset_to_original(whole_track=true)`、または元の編集を `replace: true` で入れ直す。
+- `import_edits` は外部の AI から中継で呼べる**編集**の許可（`GLISS_ARA_AI=edit` 以上）。`export_edits` は AI のエンジンの中で `.gliss` を読む
+  だけ（許可なし。DAW の文書を選んでいる間も転送しない）。画面で開いていて未保存の編集は入らない（保存した `.gliss` の中身）。
 
 #### 外部の AI からの操作を DAW で確かめる（Fender Studio Pro 8。人の許可を取って）
 

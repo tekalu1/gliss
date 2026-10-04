@@ -121,6 +121,8 @@ def test_every_tool_is_classified():
         "transcribe", "asr_status",
         # DAW の Gliss の文書を見る・選ぶ・やめる（ara_relay.py。選んだ後のツールは DAW の Gliss の許可に従う）
         "ara_documents", "ara_attach", "ara_detach",
+        # .gliss を読んで ARA のアーカイブにするだけ（読むだけ。import_edits が編集の許可）
+        "export_edits",
         # 補正の前後のノートごとの残差（再合成はプロジェクトの中の一時の音だけ）
         "measure_against_guide",
     }

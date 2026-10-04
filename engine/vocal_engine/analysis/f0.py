@@ -58,6 +58,7 @@ ESTIMATOR_ENV = "GLISS_F0_ESTIMATOR"     # 利用者が選んだ方式（画面�
 _MODEL_CACHE = {}
 _MODEL_LOCK = threading.Lock()     # 裏の準備（issue #63）と表が同時に初めて読むとき、2 回読まない
 _preferred = None                  # set_preferred_estimator で選んだ方式（None なら環境変数）
+_default = None                    # set_default_estimator の方式（DAW のプラグインの設定。曲の方式が決まっていないときだけ使う）
 
 
 class ModelMissingError(RuntimeError):
@@ -79,9 +80,14 @@ def chosen_estimator():
     return env if env in ESTIMATORS else None
 
 
+def default_estimator():
+    """`set_default_estimator` で決めた、方式の決まっていない曲の既定（無ければ None）。"""
+    return _default
+
+
 def preferred_estimator():
-    """これから解析する曲の方式（選んだ方式。選んでいなければ既定の "rmvpe"）。重みの有無は見ない（`resolve_estimator`）。"""
-    return chosen_estimator() or DEFAULT_ESTIMATOR
+    """これから解析する新しい曲の方式（選んだ方式 → 既定の方式 → "rmvpe"）。重みの有無は見ない（`resolve_estimator`）。"""
+    return chosen_estimator() or _default or DEFAULT_ESTIMATOR
 
 
 def set_preferred_estimator(name):
@@ -94,16 +100,27 @@ def set_preferred_estimator(name):
     return resolve_estimator()
 
 
+def set_default_estimator(name):
+    """方式の決まっていない曲（まだ解析しておらず、方式も明示していない曲）の既定の方式を決める。
+    `set_preferred_estimator` と違い、前に解析した曲・トラックで明示した方式は変えない（DAW のプラグインが、
+    設定の方式を起動のたびに渡す。それで開き直した曲の補正の解析が変わってはいけない）。None で戻す。"""
+    global _default
+    if name is not None and name not in ESTIMATORS:
+        raise ValueError("estimator は %s のどれか（%r は知らない）" % (" / ".join(ESTIMATORS), name))
+    _default = name
+    return resolve_estimator()
+
+
 def rmvpe_available():
     return os.path.exists(RMVPE_PATH)
 
 
 def resolve_estimator(name=None, recorded=None):
-    """実際に使う方式。name を省くと、選んだ方式 → recorded（その曲を前に解析した方式）→ 既定 の順で決め、
-    それが RMVPE なのに重みが無ければ Gliss のモデル。
+    """実際に使う方式。name を省くと、選んだ方式 → recorded（その曲を前に解析した方式）→ 既定の方式
+    （`set_default_estimator`）→ 既定の RMVPE の順で決め、それが RMVPE なのに重みが無ければ Gliss のモデル。
     名前を指定したときは、そのまま使う（RMVPE の重みが無ければ ModelMissingError になる）。"""
     if name is None:
-        name = chosen_estimator() or (recorded if recorded in ESTIMATORS else None) or DEFAULT_ESTIMATOR
+        name = chosen_estimator() or (recorded if recorded in ESTIMATORS else None) or _default or DEFAULT_ESTIMATOR
         if name == "rmvpe" and not rmvpe_available():
             return "gliss"
         return name
