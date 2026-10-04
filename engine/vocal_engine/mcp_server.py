@@ -307,7 +307,7 @@ def open_project(take_path: str, guide_path: str = None, project_dir: str = None
     source_id: ソースの ID（DAW のオーディオソースの ID など。省略時は中身の SHA-256 の頭）
     guide_offset_sec / guide_length_sec: ガイドもファイルの一部なら同じように
     guide_path: ガイドボーカル（任意）。あると list_deviations / correct_to_guide が使える
-    project_dir: プロジェクトの置き場（省略時は <リポジトリ>/projects/<名前>-<hash>。配布版は %LOCALAPPDATA%\Gliss\projects）
+    project_dir: プロジェクトの置き場（省略時は <リポジトリ>/projects/<名前>-<hash>。配布版は %LOCALAPPDATA%\\Gliss\\projects）
     lyrics: テイクの歌詞（任意）。かな・カナ・漢字混じりのどれでもよい。
         例: "さくらさくら やよいのそらは"。与えると analyze_take で
         音素アラインメント（HubertFA）が走り、get_phonemes / move_boundary が使える
