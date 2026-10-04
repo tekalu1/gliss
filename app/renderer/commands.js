@@ -152,9 +152,9 @@ export const COMMANDS = [
   ['keys', 'ショートカット（キー・ホイール）…', GR.edit, ['Ctrl+,'], () => host.openKeys()],
   // ピッチ（F0）検出の方式（ユーザー設定。替えたら開いているトラックを解析し直す。f0.js）。
   // チェックは開いている曲でエンジンが実際に使う方式（前に解析した方式のまま。RMVPE の重みが無ければ Gliss）
-  ['f0-gliss', 'Gliss（既定）', GR.f0, [], () => chooseF0('gliss'), null, () => f0State().effective === 'gliss'],
-  ['f0-rmvpe', 'RMVPE', GR.f0, [], () => chooseF0('rmvpe'), () => f0State().rmvpe,
+  ['f0-rmvpe', 'RMVPE（既定）', GR.f0, [], () => chooseF0('rmvpe'), () => f0State().rmvpe,
     () => f0State().effective === 'rmvpe'],
+  ['f0-gliss', 'Gliss', GR.f0, [], () => chooseF0('gliss'), null, () => f0State().effective === 'gliss'],
   ['f0-praat', 'Praat', GR.f0, [], () => chooseF0('praat'), null, () => f0State().effective === 'praat'],
 
   ['guide-match', 'ガイドに合わせる…', GR.note, ['G'], (ctx) => { const p = pos(ctx); openPop(p.x, p.y); }, guideShown],
@@ -308,7 +308,7 @@ const MENUBAR = [
   ['ファイル', ['new-project', 'open-take', { recent: true, label: '最近使ったプロジェクト' }, SEP, 'save', 'save-as', SEP,
     'add-track', 'open-guide', 'load-lyrics', 'import-lyrics', SEP, 'export', 'export-as', SEP, { role: 'quit', label: '終了' }]],
   ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes',
-    { label: 'ピッチ検出の方式', submenu: ['f0-gliss', 'f0-rmvpe', 'f0-praat'] }, 'keys']],
+    { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
   ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute', 'unmute',
     SEP, 'ask-ai']],
   ['表示', ['guide-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
@@ -347,7 +347,7 @@ export function appMenuTemplate() {
     let en = isEnabled(it);
     if (it === 'undo') { l = u ? `元に戻す: ${u}` : '元に戻す'; en = !!u; }
     if (it === 'redo') { l = rd ? `やり直す: ${rd}` : 'やり直す'; en = !!rd; }
-    if (it === 'f0-rmvpe' && !en) l = 'RMVPE（モデル未取得）';
+    if (it === 'f0-rmvpe' && !en) l = 'RMVPE（既定・モデル未取得）';     // 重みが無い: チェックは代わりに使う Gliss に付く
     const k = keysOf(it)[0];
     return { cmd: it, label: l, accelerator: accelerator(k), enabled: en,
       ...(c.checked ? { checked: !!c.checked() } : {}) };

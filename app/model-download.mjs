@@ -8,7 +8,7 @@ import { extractZip } from './unzip.mjs';
 
 export const MODEL_SOURCES = [
   {
-    // 任意（編集 > ピッチ検出の方式 で RMVPE を選ぶときに使う。既定の Gliss の F0 モデルはエンジンに同梱）
+    // 任意（既定のピッチ検出の方式。無ければエンジンは同梱の Gliss の F0 モデルで検出する）
     id: 'rmvpe', name: 'RMVPE', optional: true,
     url: 'https://github.com/yxlllc/RMVPE/releases/download/230917/rmvpe-onnx.zip',
     size: 334213248,

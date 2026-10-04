@@ -1,22 +1,22 @@
 // ピッチ（F0）検出の方式（編集 > ピッチ検出の方式）。ユーザー設定（state.json の f0Estimator。取り消しの履歴に入れない）。
 // 選んだ方式は、起動するときに環境変数 GLISS_F0_ESTIMATOR でエンジンに渡す（main.mjs）。替えたら set_f0_estimator で
 // エンジンの方式を替え、開いているトラックを解析し直す（エンジンは保存した解析が別の方式のものなら解析し直す）。
-// 選んでいなければ、エンジンは曲ごとに前に解析した方式で解析する（まだ解析していない曲は既定の Gliss。
-// 既定を替えても、解析・編集済みの曲の音符の区切りを変えない）。チェックは開いている曲の方式。
+// 選んでいなければ、エンジンは曲ごとに前に解析した方式で解析する（まだ解析していない曲は既定の RMVPE。
+// RMVPE の重みを後から取っても、解析・編集済みの曲の音符の区切りを変えない）。チェックは開いている曲の方式。
 // RMVPE の重みが無いときは、RMVPE を選んでいてもエンジンは同梱の Gliss の F0 モデルで解析する（effective）。
 import { S } from './state.js';
 import { call, status } from './engine.js';
 import { setF0Estimator } from './edits.js';
 
 export const F0_ESTIMATORS = [
-  { id: 'gliss', label: 'Gliss（既定）' },
-  { id: 'rmvpe', label: 'RMVPE' },
+  { id: 'rmvpe', label: 'RMVPE（既定）' },
+  { id: 'gliss', label: 'Gliss' },
   { id: 'praat', label: 'Praat' },
 ];
 
 // chosen: 選んでいる方式（選んでいなければ既定）、effective: 開いている曲でエンジンが実際に使う方式、
 // rmvpe: RMVPE の重みがあるか
-const F = { chosen: 'gliss', effective: 'gliss', rmvpe: true };
+const F = { chosen: 'rmvpe', effective: 'rmvpe', rmvpe: true };
 let changed = () => {};
 
 export function f0State() { return { ...F }; }

@@ -118,6 +118,10 @@ test('重み無し・ダウンロード中・準備完了（RMVPE は任意で�
   const f = await fixture({ slow: true });
   try {
     fs.mkdirSync(SHOTS, { recursive: true });
+    // RMVPE（既定のピッチ検出）を取らないと Gliss で検出すること・RMVPE のほうが精度が良いことを添える
+    await expect(f.win.locator('#modelHint')).toBeVisible();
+    await expect(f.win.locator('#modelHint')).toContainText('Gliss');
+    await expect(f.win.locator('#modelHint')).toContainText('精度');
     await f.win.screenshot({ path: path.join(SHOTS, 'first-run-missing.png') });
     await f.win.locator('#modelLicenseButton').click();
     await expect(f.win.locator('#modelLicense')).toContainText('重みは未確認');
@@ -142,6 +146,7 @@ test('重み無し・ダウンロード中・準備完了（RMVPE は任意で�
     await expect(f.win.locator('#modelSummary')).toHaveText('準備完了');
     await expect(f.win.locator('#modelOptionalButton')).toBeHidden();
     await expect(f.win.locator('#modelLicenseButton')).toBeHidden();
+    await expect(f.win.locator('#modelHint')).toBeHidden();
   } finally { await f.close(); }
 });
 

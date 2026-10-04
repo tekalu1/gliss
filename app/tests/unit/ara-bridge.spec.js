@@ -177,8 +177,8 @@ const TPL = [
     { cmd: 'redo', label: 'やり直す', accelerator: 'CmdOrCtrl+Shift+Z', enabled: false },
     { sep: true },
     { label: 'ピッチ検出の方式', submenu: [
-      { cmd: 'f0-rmvpe', label: 'RMVPE', accelerator: null, enabled: true, checked: true },
-      { cmd: 'f0-gliss', label: 'Gliss（既定）', accelerator: null, enabled: true, checked: false },
+      { cmd: 'f0-rmvpe', label: 'RMVPE（既定）', accelerator: null, enabled: true, checked: true },
+      { cmd: 'f0-gliss', label: 'Gliss', accelerator: null, enabled: true, checked: false },
     ] },
   ] },
   { label: '空', submenu: [{ role: 'about', label: 'Gliss について' }] },

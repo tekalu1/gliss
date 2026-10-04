@@ -7,8 +7,8 @@ let models = { rmvpe: false, hubertfa: false };
 let sizes = { rmvpe: 334213248, hubertfa: 256589553 };
 let progress = { phase: 'idle', bytes: 0, total: 0 };
 let installed = false;
-// 解析に要る重み。RMVPE は任意（編集 > ピッチ検出の方式 で RMVPE を選ぶときに使う。既定の Gliss の F0 モデルは
-// エンジンに同梱）なので「準備完了」の条件に入れず、別のボタン（RMVPE も取得）で取る
+// 解析に要る重み。RMVPE（既定のピッチ検出の方式）は任意（無ければエンジンは同梱の Gliss の F0 モデルで検出する）なので
+// 「準備完了」の条件に入れず、別のボタン（RMVPE も取得）で取る
 const REQUIRED = ['hubertfa'];
 let optionalStarted = false;     // 最後に始めたのが任意の RMVPE だけの取得か（失敗したときの「再試行」を出すボタン）
 
@@ -38,6 +38,7 @@ function draw() {
   $('#modelOptionalButton').textContent = failed && optionalStarted ? 'RMVPE を再試行'
     : `RMVPE も取得（任意・${formatBytes(sizes.rmvpe)}）`;
   $('#modelCancelButton').hidden = !active();
+  $('#modelHint').hidden = !optional;          // RMVPE が無いと Gliss で検出すること（RMVPE のほうが精度が良い）
   $('#modelError').textContent = failed ? progress.error : '';
   if (ready && !optional) $('#modelLicense').hidden = true;
 }
