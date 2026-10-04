@@ -42,14 +42,22 @@ def _center(p, n):
     return float(np.median(v))
 
 
-def _target(p):
-    """ガイドと対応する、いちばん長い音程ノートとガイドの音程。"""
+def _target(p, many=False):
+    """ガイドと対応する、いちばん長い音程ノートとガイドの音程。
+
+    many=True は、ノートの中心を一定量ずらす寄せ方（match_pitch_shape=False）の寄せ先: テイクの 1 ノートに
+    高さの違うガイドのノートが重なる所（1 対多）は、組の 1 つのノートの音ではなく、フレームごとの差から出した高さ。"""
     from vocal_engine.project import timing as TM
-    _, pitch_target, _ = TM.note_correspondence(p)
+    _, pitch_target, gspan = TM.note_correspondence(p)
     ns = {n.id: n for n in TM.pitched_notes(p)}
     nid = max((i for i, g in pitch_target.items() if g.pitch_midi is not None and i in ns),
               key=lambda i: ns[i].end_sec - ns[i].start_sec)
-    return ns[nid], float(pitch_target[nid].pitch_midi)
+    g = float(pitch_target[nid].pitch_midi)
+    if many:
+        m = TM._one_to_many(p, ns, {nid}, gspan)
+        if nid in m:
+            g = float(m[nid]["pitch_midi"])
+    return ns[nid], g
 
 
 def _draw_to(p, n, midi):
@@ -63,7 +71,7 @@ def _draw_to(p, n, midi):
 def test_guide_pitch_keeps_pencil_fix(plain, shape):
     """鉛筆でガイドの音程に直したノートは、ピッチ 100% を掛けてもガイドの音程のまま（二重にずらさない）。"""
     from vocal_engine import mcp_server as S
-    n, g = _target(plain)
+    n, g = _target(plain, many=not shape)
     orig = _center(plain, n)
     off = g + 0.6 if abs(orig - (g + 0.6)) > 0.3 else g - 0.6
     _draw_to(plain, n, off)                                # 鉛筆で 60 セントずらした線を描く
@@ -81,7 +89,7 @@ def test_guide_pitch_keeps_pencil_fix(plain, shape):
 def test_guide_pitch_half_strength_from_edited(plain):
     """強度 50% は、今の（編集後の）音程とガイドの中間へ。"""
     from vocal_engine import mcp_server as S
-    n, g = _target(plain)
+    n, g = _target(plain, many=True)
     S.shift_pitch(80.0, note_id=n.id, author="human")
     cur = _center(plain, n)
     r = S.correct_to_guide(note_ids=[n.id], pitch_strength=0.5, timing_strength=0.0,
