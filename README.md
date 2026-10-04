@@ -147,7 +147,7 @@ DAW のプラグイン（`Gliss.vst3`）は JUCE（AGPLv3 の側で使う）と�
 |---|---|---|
 | RMVPE（[yxlllc/RMVPE](https://github.com/yxlllc/RMVPE) `230917` の `rmvpe.onnx`） | F0 推定（既定） | **記載なし**（リポジトリ・リリースにライセンス表記が無い） |
 | HubertFA v0.0.7（[wolfgitpr/HubertFA](https://github.com/wolfgitpr/HubertFA) `1218_hfa_model_new_dict`） | 音素アラインメント | **未確認**（コードは Apache-2.0。重み単体の表記は確認できていない） |
-| **Gliss の F0 モデル（試作）**（同梱。`gliss-f0.onnx`、135 KB） | F0 推定（RMVPE が無いとき・選んだとき） | **試作のため当面は Gliss 本体に含めて GPL-3.0-or-later で配る**（重み単体の扱いは未定）。[SwiftF0](https://github.com/lars76/swift-f0)（MIT）の学習コードの構造で、VocalSet・PTDB-TUG・CMU Arctic・LibriSpeech・NSynth・DEMAND・GuitarSet（CC BY 4.0・ODbL・CMU の許諾文。NC・SA は使っていない）だけで学習した。出典と表示は [gliss-f0.NOTICE.txt](engine/vocal_engine/analysis/models/gliss-f0.NOTICE.txt)（配布版の THIRD_PARTY_NOTICES.txt にも入る） |
+| **Gliss の F0 モデル（試作）**（同梱。`gliss-f0.onnx`、135 KB） | F0 推定（RMVPE が無いとき・選んだとき） | **試作のため当面は Gliss 本体に含めて GPL-3.0-or-later で配る**（重み単体の扱いは未定）。[SwiftF0](https://github.com/lars76/swift-f0)（MIT）の学習コードの構造で、VocalSet・PTDB-TUG・CMU Arctic・LibriSpeech・NSynth・DEMAND・GuitarSet・Choral Singing Dataset・Cantoría・ESMUC Choir・Dagstuhl ChoirSet・BUT Speech@FIT Reverb Database（CC BY 4.0・ODbL・CMU の許諾文。NC・SA は使っていない）だけで学習した。出典と表示は [gliss-f0.NOTICE.txt](engine/vocal_engine/analysis/models/gliss-f0.NOTICE.txt)（配布版の THIRD_PARTY_NOTICES.txt にも入る） |
 | Whisper large-v3（[Systran/faster-whisper-large-v3](https://huggingface.co/Systran/faster-whisper-large-v3) `edaa852`。3.09 GB） | 聞き取り（任意） | **MIT**（[OpenAI の原版](https://huggingface.co/openai/whisper-large-v3)も MIT）。初めて「聞き取る」を使うときに確認してから `%LOCALAPPDATA%\Gliss\models\asr` へダウンロードする |
 
 非商用（NC）の重み・データ、ライセンス不明の重みは同梱しない。
