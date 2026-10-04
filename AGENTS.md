@@ -47,7 +47,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 | `GLISS_ADDONS_DIR` | アドオンの置き場。配布版の既定 `%LOCALAPPDATA%\Gliss\addons`。開発版は指定したときだけ扱う |
 | `GLISS_ADDON_BASE_URL`・`GLISS_ADDON_CATALOG` | アドオンの取得先・目録の差し替え（試験用。`app/addons.mjs`） |
 | `VOCAL_ENGINE_CWD` | 開発版の画面が起動するエンジンの作業ディレクトリ（worktree 用） |
-| `VOCAL_ENGINE_WORK_DIR` | 作業場所。既定 `%LOCALAPPDATA%\Gliss\work`。エンジンのテストで new/save するときは一時フォルダに向ける |
+| `VOCAL_ENGINE_WORK_DIR` | 作業場所。既定 `%LOCALAPPDATA%\Gliss\work`。エンジンのテストで new/save するときは一時フォルダに向ける。`VOCAL_ENGINE_PROJECTS` を渡さなければ、`open_project` の旧形式のプロジェクトもこの下の `projects` に作る |
 | `VOCAL_ENGINE_LOG_DIR` | 曲を開く前の `engine.log` の置き場。既定 `~/.vocal-editor`（曲を開いた後は作業場所の `engine.log`） |
 | `GLISS_TEST_PYTHON` | 画面のテスト（`first-run`・`addons-view`）がフィクスチャを作る python。既定はエンジンと同じ |
 | `VOCAL_EDITOR_MUTE`・`VOCAL_EDITOR_HIDDEN`・`VOCAL_EDITOR_IGNORE_MOUSE` | テスト用。音を出さない・透明で前面を奪わない・人のマウスを素通しする。`app/playwright.config.js` が入れる（見るときは `pnpm test:headed`） |

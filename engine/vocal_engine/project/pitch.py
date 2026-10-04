@@ -800,6 +800,50 @@ def edits_base_index(project):
     return _base_index(project)
 
 
+def edited_note_centers(project, notes=None):
+    """{note id: 編集後の中心の音程（MIDI）}。基本の段（shift_pitch・曲線）と**鉛筆**を含む。
+
+    `current_note_pitches`（基本の段だけ）から寄せると、鉛筆で直したノートでは鉛筆の線の上に
+    「元の中心 → 目標」の差が二重に乗る（鉛筆の線は後から入ったずらしを足すので）。
+    つなぎ（なだらかさ）は含めない（寄せた後の段差で変わり、寄せる量が決まらなくなるため）。"""
+    from ..render.pipeline import edits_to_segments
+    f0r = project.take_f0
+    segs = edits_to_segments(project.edits, project.edit_span)
+    base = _SegIndex(segs)
+    lay = Layered(base, [], draws(project))
+    hop = f0r.hop_s
+    out = {}
+    for n in (project.take_notes if notes is None else notes):
+        if n.pitch_midi is None:
+            continue
+        a = max(0, int(round(n.start_sec / hop)))
+        b = min(len(f0r.times), int(round(n.end_sec / hop)))
+        if b <= a:
+            out[n.id] = float(n.pitch_midi)
+            continue
+        off = [lay.at(float(f0r.times[i]), "right") for i in range(a, b)]
+        out[n.id] = float(n.pitch_midi) + float(np.mean(off)) / 100.0
+    return out
+
+
+def pitch_edited_notes(project, notes):
+    """notes のうち、音程の編集（shift_pitch・曲線・鉛筆）が掛かっているノートの id の集合。"""
+    out = set()
+    eds = [e for e in project.edits if e.kind in PITCH_KINDS + ("pitch_draw",)]
+    for n in notes:
+        for e in eds:
+            if e.target.type == "note":
+                if e.target.note_id == n.id:
+                    out.add(n.id)
+                    break
+                continue
+            a, b = float(e.target.start_sec), float(e.target.end_sec)
+            if b > n.start_sec + 1e-6 and a < n.end_sec - 1e-6:
+                out.add(n.id)
+                break
+    return out
+
+
 def pitch_model(project):
     """(基本の段の Segment 列, 層を当てた Segment 列, Layered)。画面のデータ用。"""
     from ..render.pipeline import edits_to_segments

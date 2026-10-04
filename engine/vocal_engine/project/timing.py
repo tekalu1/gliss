@@ -684,6 +684,54 @@ def plan_reset_timing(project, note_ids):
     return plan
 
 
+IDENTITY_TOL_SEC = 1e-5      # 時間の対応が元どおり（編集後の秒 = 編集前の秒）とみなすずれ
+
+
+def reset_timing_window(project, start_sec, end_sec):
+    """範囲の「オリジナルに戻す」のタイミング: (外す編集の id, [A, B])。
+
+    範囲にかかるタイミングの編集（stretch / crop / silence / move / move_boundary）を、
+    時間の対応が元どおりの所（編集後の秒 = 編集前の秒。後ろをずらさない編集の組の切れ目）まで
+    [A, B] を広げて丸ごと外す。外した後の [A, B] は原音の時間、その外は今のまま。
+    ノートの頭・尻を元の位置へ戻す計画（`plan_reset_timing`）は、今のノートの切れ目と合わない編集
+    （解析の方式・版が変わった後の古い編集）を外しきれず、補う伸縮を足してしまう。範囲で戻すときはこちら。"""
+    tm = current_map(project)
+    src = tm.src
+    dur = float(project.duration_sec)
+
+    def delta(t, side):
+        return tm.at(t, side) - t
+
+    def span(e):
+        a, b = project.edit_span(e)
+        return float(a), float(b)
+
+    timing = [e for e in project.edits if e.kind in TIMING_KINDS]
+    A, B = float(start_sec), float(end_sec)
+    for _ in range(1000):
+        lo, hi = A, B
+        for e in timing:
+            a, b = span(e)
+            if (b > A and a < B) or (A - 1e-9 <= a <= B + 1e-9 and b - a <= 1e-9):
+                lo, hi = min(lo, a), max(hi, b)
+        # 左端は「そこより前の編集の積み上げ」が 0、右端は「そこまでの積み上げ」が 0 の所まで広げる
+        if abs(delta(lo, "left")) > IDENTITY_TOL_SEC:
+            ok = [s for s in src if s < lo and abs(delta(s, "left")) <= IDENTITY_TOL_SEC]
+            lo = float(max(ok)) if ok else 0.0
+        if abs(delta(hi, "right")) > IDENTITY_TOL_SEC:
+            ok = [s for s in src if s > hi and abs(delta(s, "right")) <= IDENTITY_TOL_SEC]
+            hi = float(min(ok)) if ok else dur
+        if lo == A and hi == B:
+            break
+        A, B = lo, hi
+    rm = []
+    for e in timing:
+        a, b = span(e)
+        if (b > A and a < B) or (A - 1e-9 <= a <= B + 1e-9 and b - a <= 1e-9):
+            rm.append(e.id)
+    return rm, [A, B]
+
+
 def plan_range_stretch(project, start_sec, end_sec, ratio):
     """範囲 [start, end]（1 つのノートの中）を ratio 倍。同じノートの残りが吸収する。"""
     st, tm = build_structure(project)
@@ -933,7 +981,7 @@ def _guide_pitch_shape(project, pairs, onset_pairs, selected, threshold_cents):
 
 
 def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
-               match_pitch_shape=True, interpolate=True):
+               match_pitch_shape=True, interpolate=True, edited_notes="adjust"):
     """「ガイドに合わせる」の 100% の計画（x = タイミングの強度、ピッチは別の強度で掛ける）。
 
     - 音程: 既定は対応するガイド F0 を発音の頭どうしで写して、フレームごとの線を近づける。
@@ -947,7 +995,11 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
       VocAlign と同じ。issue #53）。基準点が無い区間・基準点の間が 1 秒を超える所は動かさない。
       ノートごとの対応と理由は `plan.notes`（画面の対応線・未対応印、MCP の correspondence）。
     - しきい値（既定 0）はここで掛ける。プレビューも確定もこの計画を使うので、
-      しきい値で両者がずれることは無い。"""
+      しきい値で両者がずれることは無い。
+    - 音程は**今の（編集後の）音程**から寄せる（鉛筆・shift_pitch で直したノートも、直した線から
+      残りの差だけ）。edited_notes="skip" は音程を直し済みのノートの音程を動かさない（タイミングは動かす）。"""
+    if edited_notes not in ("adjust", "skip"):
+        raise TimingError("edited_notes は adjust か skip")
     if project.guide is None or project.alignment is None:
         raise TimingError("ガイドが無い（open_project の guide_path → analyze_take）")
     from ..analysis import guide_timing as GT
@@ -958,17 +1010,21 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
                              confirmed_only=True)
     pairs, pitch_target, gspan = note_correspondence(project)
     many = _one_to_many(project, tn, sel, gspan)
-    # ---- 音程
+    # ---- 音程（今の編集後の音程から。直し済みを飛ばすときはそのノートを外す）
+    from .pitch import edited_note_centers, pitch_edited_notes
+    skipped = set()
+    if edited_notes == "skip":
+        skipped = pitch_edited_notes(project, [tn[i] for i in sel if i in tn])
+    psel = sel - skipped
     curve, draws = [], []
     if match_pitch_shape:
         curve, draws, pitch = _guide_pitch_shape(project, pairs, gt.pairs if gt else [],
-                                                  sel, threshold_cents)
+                                                  psel, threshold_cents)
     else:
-        from ..view.export_data import current_note_pitches
-        curp = current_note_pitches(project)
+        curp = edited_note_centers(project, [tn[i] for i in psel if i in tn])
         pitch = {}
         for nid, g in pitch_target.items():
-            if nid not in sel or g.pitch_midi is None:
+            if nid not in psel or g.pitch_midi is None:
                 continue
             cur = curp.get(nid)
             if cur is None:
@@ -992,7 +1048,8 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     plan = _finish(project, "guide",
                    {"note_ids": sorted(sel) if note_ids else None,
                     "threshold_cents": threshold_cents, "threshold_ms": threshold_ms,
-                    "match_pitch_shape": bool(match_pitch_shape)},
+                    "match_pitch_shape": bool(match_pitch_shape),
+                    "edited_notes": edited_notes},
                    st, anchors, pitch=pitch, pitch_curve=curve, pitch_draws=draws,
                    pairs=used_pairs)
     reach = 1.0
@@ -1026,6 +1083,7 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
                                         else round(gt.measured_offset_sec * 1000.0, 1)),
                  "basis": None if gt is None else gt.basis,
                  "repaired": repaired, "reach": round(reach, 4),
+                 "skipped_edited_notes": sorted(skipped),
                  "note": "タイミングは発音の頭（音の立ち上がり）を、タイムライン上のガイドの頭へ"
                          "（画面に描いているガイドの位置。置き場所の違う素材 = 全体のずれが 150 ms を"
                          "超えるときは「ガイドの頭 + 全体のずれ」へ）。1 対 1 に決まらない頭は動かさない。"
