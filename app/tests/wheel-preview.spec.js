@@ -34,7 +34,7 @@ const errors = [];
 test.describe.configure({ mode: 'serial' });
 
 test.beforeAll(async () => {
-  const env = { ...process.env, ...M.RMVPE_ENV, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' };
+  const env = { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' };
   delete env.ELECTRON_RUN_AS_NODE;
   for (const d of [PROJECT, USERDATA]) fs.rmSync(d, { recursive: true, force: true });
   app = await electron.launch({

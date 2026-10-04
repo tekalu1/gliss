@@ -18,7 +18,7 @@ import soundfile as sf
 
 from conftest import CLIP_A, CLIP_E, TAKE, needs_clips, needs_model
 
-pytestmark = [needs_clips, needs_model, pytest.mark.usefixtures("rmvpe_f0")]   # ノートの ID・区切りは RMVPE の解析のもの
+pytestmark = [needs_clips, needs_model]
 
 MOVES = {"n003": 0.06, "n006": -0.05, "n011": 0.045, "n014": -0.04}
 

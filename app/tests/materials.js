@@ -61,8 +61,3 @@ export function skipUnlessReady(test, ...symbols) {
   test.skip(!available(...symbols), `テスト素材 ${symbols.join(', ')} が無い（GLISS_TEST_MATERIALS）`);
   test.skip(!modelsReady(), '解析モデルの重みが無い（VOCAL_ENGINE_MODELS_DIR か初回の画面で取得）');
 }
-
-/** F0 を RMVPE で解析させる環境変数（起動の env に足す）。ノートの ID・区切りの位置を RMVPE の解析で書いた、
- * 編集・接続・表示のテスト用（F0 の方式を確かめるテストではない。既定の Gliss の F0 モデルでは区切りが変わる）。
- * RMVPE の重みがあることは skipUnlessReady が確かめる。 */
-export const RMVPE_ENV = { GLISS_F0_ESTIMATOR: 'rmvpe' };
