@@ -155,11 +155,12 @@ def test_export_tool_is_registered():
     assert m.set_f0_estimator in m.TOOLS and m.unmute_notes in m.TOOLS
     names = [f.__name__ for f in m.TOOLS]
     assert {"split_track", "join_track", "mute_track_range"} <= set(names)    # クリップの分割・部分のミュート
-    # DAW（ARA）の ara_*（プラグイン用 9 と、外部の AI が DAW の文書を選ぶ ara_documents / ara_attach / ara_detach）
-    assert all(f in m.TOOLS for f in m._mcp_ara.TOOLS) and len(m._mcp_ara.TOOLS) == 12
+    # DAW（ARA）の ara_*（プラグイン用 9 と、外部の AI が DAW の文書を選ぶ ara_documents / ara_attach / ara_detach）と、
+    # 単体の .gliss の編集を DAW の文書へ移す export_edits / import_edits
+    assert all(f in m.TOOLS for f in m._mcp_ara.TOOLS) and len(m._mcp_ara.TOOLS) == 14
     assert "make_score_guide" in names                  # 譜面ガイド（ガイドとの対応 v3）
     assert {"measure_against_guide", "apply_edits"} <= set(names)           # ノートごとの残差・まとめて当てる
-    assert len(m.TOOLS) == 80
+    assert len(m.TOOLS) == 82
 
 
 @pytest.mark.parametrize("subtype", ["FLOAT", "PCM_16"])
