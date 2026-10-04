@@ -11,6 +11,7 @@ Electron の画面（`app/`）が、Python のエンジン（`engine/`）を MCP
 |---|---|
 | `engine/` | Python エンジン `vocal_engine`（RMVPE の F0、音符分割、HubertFA の音素、MFCC DTW、非破壊の編集リストと undo、Praat（parselmouth）の TD-PSOLA による再合成（自前 TD-PSOLA・WORLD も選べる）、複数トラックのセッション、プロジェクトのファイル（`.gliss`）、ノートのフェード、テンポ（iXML のテンポマップ）、MCP サーバー）。`engine/packaging/` に単体 exe（PyInstaller）の spec と固定した依存 |
 | `app/` | Electron の画面（vanilla JS + SVG。ビルド工程なし）。`main.mjs` がエンジンを MCP のクライアントとして起動する。`electron-builder.yml` が配布版の設定 |
+| `plugin/` | VST3 + ARA 2 プラグイン（C++・CMake。JUCE ＋ ARA SDK ＋ WebView2）。DAW のオーディオイベントに ARA の拡張として載る。作成中（[ara-plugin.md](ara-plugin.md)） |
 | `assets/logo/` | ロゴ・アイコン（SVG・PNG 16〜1024・`gliss.ico`）。文字ロゴ `gliss-wordmark(-light).svg`、横組み `gliss-lockup.svg`、マーク `gliss-mark(-light).svg`、アプリのアイコン `gliss-icon.svg`（小さいサイズ用 `gliss-icon-small.svg`） |
 | `docs/` | 使い方・設計・計画の文書 |
 | `scripts/` | 版の同期・エンジン exe のビルド・リリースノート・ライセンス文・リリースの道具（[release-plan.md](release-plan.md) §3） |

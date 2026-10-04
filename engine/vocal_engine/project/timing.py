@@ -684,6 +684,54 @@ def plan_reset_timing(project, note_ids):
     return plan
 
 
+IDENTITY_TOL_SEC = 1e-5      # 時間の対応が元どおり（編集後の秒 = 編集前の秒）とみなすずれ
+
+
+def reset_timing_window(project, start_sec, end_sec):
+    """範囲の「オリジナルに戻す」のタイミング: (外す編集の id, [A, B])。
+
+    範囲にかかるタイミングの編集（stretch / crop / silence / move / move_boundary）を、
+    時間の対応が元どおりの所（編集後の秒 = 編集前の秒。後ろをずらさない編集の組の切れ目）まで
+    [A, B] を広げて丸ごと外す。外した後の [A, B] は原音の時間、その外は今のまま。
+    ノートの頭・尻を元の位置へ戻す計画（`plan_reset_timing`）は、今のノートの切れ目と合わない編集
+    （解析の方式・版が変わった後の古い編集）を外しきれず、補う伸縮を足してしまう。範囲で戻すときはこちら。"""
+    tm = current_map(project)
+    src = tm.src
+    dur = float(project.duration_sec)
+
+    def delta(t, side):
+        return tm.at(t, side) - t
+
+    def span(e):
+        a, b = project.edit_span(e)
+        return float(a), float(b)
+
+    timing = [e for e in project.edits if e.kind in TIMING_KINDS]
+    A, B = float(start_sec), float(end_sec)
+    for _ in range(1000):
+        lo, hi = A, B
+        for e in timing:
+            a, b = span(e)
+            if (b > A and a < B) or (A - 1e-9 <= a <= B + 1e-9 and b - a <= 1e-9):
+                lo, hi = min(lo, a), max(hi, b)
+        # 左端は「そこより前の編集の積み上げ」が 0、右端は「そこまでの積み上げ」が 0 の所まで広げる
+        if abs(delta(lo, "left")) > IDENTITY_TOL_SEC:
+            ok = [s for s in src if s < lo and abs(delta(s, "left")) <= IDENTITY_TOL_SEC]
+            lo = float(max(ok)) if ok else 0.0
+        if abs(delta(hi, "right")) > IDENTITY_TOL_SEC:
+            ok = [s for s in src if s > hi and abs(delta(s, "right")) <= IDENTITY_TOL_SEC]
+            hi = float(min(ok)) if ok else dur
+        if lo == A and hi == B:
+            break
+        A, B = lo, hi
+    rm = []
+    for e in timing:
+        a, b = span(e)
+        if (b > A and a < B) or (A - 1e-9 <= a <= B + 1e-9 and b - a <= 1e-9):
+            rm.append(e.id)
+    return rm, [A, B]
+
+
 def plan_range_stretch(project, start_sec, end_sec, ratio):
     """範囲 [start, end]（1 つのノートの中）を ratio 倍。同じノートの残りが吸収する。"""
     st, tm = build_structure(project)
@@ -933,7 +981,7 @@ def _guide_pitch_shape(project, pairs, onset_pairs, selected, threshold_cents):
 
 
 def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
-               match_pitch_shape=True, interpolate=True):
+               match_pitch_shape=True, interpolate=True, edited_notes="adjust"):
     """「ガイドに合わせる」の 100% の計画（x = タイミングの強度、ピッチは別の強度で掛ける）。
 
     - 音程: 既定は対応するガイド F0 を発音の頭どうしで写して、フレームごとの線を近づける。
@@ -947,7 +995,11 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
       VocAlign と同じ。issue #53）。基準点が無い区間・基準点の間が 1 秒を超える所は動かさない。
       ノートごとの対応と理由は `plan.notes`（画面の対応線・未対応印、MCP の correspondence）。
     - しきい値（既定 0）はここで掛ける。プレビューも確定もこの計画を使うので、
-      しきい値で両者がずれることは無い。"""
+      しきい値で両者がずれることは無い。
+    - 音程は**今の（編集後の）音程**から寄せる（鉛筆・shift_pitch で直したノートも、直した線から
+      残りの差だけ）。edited_notes="skip" は音程を直し済みのノートの音程を動かさない（タイミングは動かす）。"""
+    if edited_notes not in ("adjust", "skip"):
+        raise TimingError("edited_notes は adjust か skip")
     if project.guide is None or project.alignment is None:
         raise TimingError("ガイドが無い（open_project の guide_path → analyze_take）")
     from ..analysis import guide_timing as GT
@@ -956,23 +1008,29 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     sel = set(note_ids) if note_ids else set(tn)
     st, tm = build_structure(project, attacks=_gap_attacks(project, gt, sel),
                              confirmed_only=True)
-    pairs, pitch_target, _ = note_correspondence(project)
-    # ---- 音程
+    pairs, pitch_target, gspan = note_correspondence(project)
+    many = _one_to_many(project, tn, sel, gspan)
+    # ---- 音程（今の編集後の音程から。直し済みを飛ばすときはそのノートを外す）
+    from .pitch import edited_note_centers, pitch_edited_notes
+    skipped = set()
+    if edited_notes == "skip":
+        skipped = pitch_edited_notes(project, [tn[i] for i in sel if i in tn])
+    psel = sel - skipped
     curve, draws = [], []
     if match_pitch_shape:
         curve, draws, pitch = _guide_pitch_shape(project, pairs, gt.pairs if gt else [],
-                                                  sel, threshold_cents)
+                                                  psel, threshold_cents)
     else:
-        from ..view.export_data import current_note_pitches
-        curp = current_note_pitches(project)
+        curp = edited_note_centers(project, [tn[i] for i in psel if i in tn])
         pitch = {}
         for nid, g in pitch_target.items():
-            if nid not in sel or g.pitch_midi is None:
+            if nid not in psel or g.pitch_midi is None:
                 continue
             cur = curp.get(nid)
             if cur is None:
                 continue
-            c = (float(g.pitch_midi) - cur) * 100.0
+            target = many[nid]["pitch_midi"] if nid in many else float(g.pitch_midi)
+            c = (target - cur) * 100.0
             if abs(c) >= threshold_cents and abs(c) > 1e-6:
                 pitch[nid] = c
     # ---- タイミング: テイクの発音の頭（ノートの頭）をガイドの頭（基準は gt.basis）へ（1 対 1 の組だけ）
@@ -990,7 +1048,8 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     plan = _finish(project, "guide",
                    {"note_ids": sorted(sel) if note_ids else None,
                     "threshold_cents": threshold_cents, "threshold_ms": threshold_ms,
-                    "match_pitch_shape": bool(match_pitch_shape)},
+                    "match_pitch_shape": bool(match_pitch_shape),
+                    "edited_notes": edited_notes},
                    st, anchors, pitch=pitch, pitch_curve=curve, pitch_draws=draws,
                    pairs=used_pairs)
     reach = 1.0
@@ -1018,11 +1077,13 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
                  "timing_interp_notes": sum(1 for r in rows if r["timing"] == "interp"),
                  "timing_reached_notes": sum(1 for r in rows if r["reached"]),
                  "timing_possible": bool(gt is not None and gt.pairs),
+                 "one_to_many": [dict(v, note=k) for k, v in sorted(many.items())],
                  "offset_ms": None if gt is None else round(gt.offset_sec * 1000.0, 1),
                  "measured_offset_ms": (None if gt is None
                                         else round(gt.measured_offset_sec * 1000.0, 1)),
                  "basis": None if gt is None else gt.basis,
                  "repaired": repaired, "reach": round(reach, 4),
+                 "skipped_edited_notes": sorted(skipped),
                  "note": "タイミングは発音の頭（音の立ち上がり）を、タイムライン上のガイドの頭へ"
                          "（画面に描いているガイドの位置。置き場所の違う素材 = 全体のずれが 150 ms を"
                          "超えるときは「ガイドの頭 + 全体のずれ」へ）。1 対 1 に決まらない頭は動かさない。"
@@ -1031,6 +1092,77 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     if not plan.info["timing_possible"]:
         plan.info["timing_message"] = "このガイドとはタイミングを合わせられない（確かな発音の頭の組が無い）"
     return plan
+
+
+MANY_MIN_SEC = 0.04         # 1 対多: テイクのノートとこれ以上重なるガイドのノートが 2 つ以上
+
+
+def _one_to_many(project, tn, sel, gspan):
+    """テイクの 1 ノートに、高さの違うガイドのノートが 2 つ以上重なる所（ガイドが動くのにテイクは 1 つの音）。
+
+    {ノート: {"guide": [id], "pitch_midi": 寄せる先, "source"}}。寄せる先は、ノートの有声フレームでのガイドの F0 と
+    テイクの F0 の差の中央値をノートの高さに足したもの（source = frames。両方有声のフレームが 5 未満なら、重なった時間で
+    重み付けたガイドのノートの高さの中央値 = notes）。ノートの中心を一定量ずらす寄せ方（match_pitch_shape=False）は、
+    組の 1 つのノート（いちばん重なる音）ではなくここへ寄せる（以前は組の最後の低い音へ寄せて −230 セント外した。
+    補正の担当の報告）。"""
+    out = {}
+    gn = [g for g in project.guide_notes if g.kind == "note" and g.pitch_midi is not None and g.id in gspan]
+    g2t_inv = _guide_inverse(project)
+    for nid in sel:
+        n = tn.get(nid)
+        if n is None:
+            continue
+        ov = []
+        for g in gn:
+            a, b = gspan[g.id]
+            o = min(n.end_sec, b) - max(n.start_sec, a)
+            if o >= MANY_MIN_SEC:
+                ov.append((float(g.pitch_midi), o, g.id))
+        if len(ov) < 2 or max(v[0] for v in ov) - min(v[0] for v in ov) < 0.5:
+            continue
+        d = _frame_diff(project, n, g2t_inv) if n.pitch_midi is not None else None
+        if d is not None:
+            target = float(n.pitch_midi) + d                 # フレームごとの差（ガイド − テイク）の中央値
+        else:
+            ov.sort()
+            w = np.cumsum([o for _, o, _ in ov])
+            target = ov[int(np.searchsorted(w, w[-1] / 2.0))][0]   # 重なった時間で重み付けた高さの中央値
+        out[nid] = {"guide": sorted(i for _, _, i in ov), "pitch_midi": round(target, 3),
+                    "source": "frames" if d is not None else "notes"}
+    return out
+
+
+def _guide_inverse(project):
+    """テイクの秒 → ガイドの秒（画面に描くガイドの位置の逆）。"""
+    try:
+        f, _ = project.guide_to_take()
+    except Exception:        # noqa: BLE001
+        al = project.alignment
+        return lambda t: np.asarray(al.to_guide(t))
+    gd = float(project.guide["frames"]) / float(project.guide["sr"])
+    grid = np.arange(0.0, gd + 0.01, 0.01)
+    tk = np.maximum.accumulate(np.asarray(f(grid), dtype="float64"))
+    return lambda t: np.interp(t, tk, grid)
+
+
+def _frame_diff(project, n, g2t_inv, min_frames=5):
+    """テイクのノートの有声フレームで、ガイドの F0 − テイクの F0（半音）の中央値。両方有声のフレームが少なければ None。"""
+    tf, gf = project.take_f0, project.guide_f0
+    if tf is None or gf is None:
+        return None
+    hop = tf.hop_s
+    a, b = int(round(n.start_sec / hop)), int(round(n.end_sec / hop))
+    t = np.arange(a, b) * hop
+    f = np.asarray(tf.f0, dtype="float64")[a:b]
+    v = np.asarray(tf.voiced)[a:b].astype(bool) & (f > 0)
+    gi = np.round(np.asarray(g2t_inv(t)) / gf.hop_s).astype(int)
+    ok = v & (gi >= 0) & (gi < len(gf.f0))
+    gi = np.clip(gi, 0, len(gf.f0) - 1)
+    g = np.asarray(gf.f0, dtype="float64")[gi]
+    ok &= np.asarray(gf.voiced).astype(bool)[gi] & (g > 0)
+    if ok.sum() < min_frames:
+        return None
+    return float(np.median(12.0 * np.log2(g[ok] / f[ok])))
 
 
 def correspondence_summary(plan):

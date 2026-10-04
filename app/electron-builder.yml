@@ -1,7 +1,8 @@
 # Gliss の配布版（Windows の NSIS インストーラ）の設定。
 #   pnpm build:engine   エンジン exe（../engine/packaging/dist/vocal-engine/）を作る
-#   pnpm dist:dir       展開版（dist/win-unpacked/Gliss.exe。インストールせずに動かして確かめる）
-#   pnpm dist           インストーラ（dist/Gliss-<版>-win-x64.exe）・.blockmap・latest.yml。build:engine を先に走らせる
+#   pnpm build:plugin   DAW のプラグイン（../plugin/build/dist/Gliss.vst3）を作る（CMake と Visual Studio の MSVC が要る）
+#   pnpm dist:dir       展開版（dist/win-unpacked/Gliss.exe。インストールせずに動かして確かめる）。build:engine・build:plugin は先に手で
+#   pnpm dist           インストーラ（dist/Gliss-<版>-win-x64.exe）・.blockmap・latest.yml。build:engine・build:plugin を先に走らせる
 # どちらも先に ../scripts/release-notes.mjs が release-info.json（アプリ内の「更新の内容」）を、
 # ../scripts/addon-catalog.mjs が addons-catalog.json（任意のアドオンの目録。pnpm build:addons で作ったもの）を、
 # ../scripts/third-party-notices.mjs が THIRD_PARTY_NOTICES.txt を作る。
@@ -48,6 +49,11 @@ extraResources:
   # エンジン（PyInstaller のフォルダ形式。重みは含まない。初回に %LOCALAPPDATA%\Gliss\models へ取得）
   - from: ../engine/packaging/dist/vocal-engine
     to: engine/vocal-engine
+  # DAW のプラグイン（VST3 + ARA 2。../scripts/build-plugin.mjs が作る。中にライセンスの文書を持つ）。インストーラが
+  # %LOCALAPPDATA%\Programs\Common\VST3\Gliss.vst3 に写し、両方に gliss-install.json（このインストール先）を書く（build/installer.nsh）。
+  # プラグインはそれを読んで resources/engine/vocal-engine/vocal-engine.exe を起動する（docs/ara-plugin.md の「配布」）
+  - from: ../plugin/build/dist/Gliss.vst3
+    to: plugin/Gliss.vst3
   # ウィンドウ・About のアイコン
   - from: ../assets/logo
     to: assets/logo
@@ -105,6 +111,8 @@ nsis:
   # アプリからの更新は、その前に画面がエンジンを止める（main.mjs の installUpdate・engine-processes.mjs）。
   # アンインストールは、同じ build/installer.nsh の customUnInstall で %LOCALAPPDATA%\gliss-updater（更新のキャッシュ）を消す
   # （--updated が付かないとき＝利用者のアンインストールだけ。更新の上書きでは消さない。重み・設定は消さない）。
+  # DAW のプラグイン: customInstall が %LOCALAPPDATA%\Programs\Common\VST3\Gliss.vst3 に写し（DAW が DLL を掴んでいれば
+  # 古い DLL を *.old に改名して隣に置く）、customUnInstall が同じ条件（--updated でない）で消す。
 
 # 自動更新の配信元（公開リポジトリの GitHub Releases。認証なし）。resources/app-update.yml に入り、
 # electron-updater（main.mjs・update-provider.mjs）が各 Release の latest.yml を読む。

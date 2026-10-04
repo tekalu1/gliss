@@ -15,7 +15,10 @@
 //    鳴っている位置のまま差し替える。作り直しは 1 本ずつ・間を置いて間引く。離したら止める。再生中は鳴らさない。
 //    設定（つかんだノートを鳴らす）で切り替え（既定は鳴らす）。
 //  - **テストの起動では音を一切出さない**（--mute。出力の音量 0）。プレビューは「鳴らそうとしたもの」を記録する。
+//  - **プラグイン（ARA。ara.js）では Web Audio で鳴らさない**。再生・停止は DAW（ホストの再生の制御）へ、再生位置は DAW から来る
+//    （S.head・S.playing は ara.js が入れる）。つかんだノートのプレビュー音は C++ の EditorRenderer が DAW の出力で鳴らす。
 import { call, callJob, status } from './engine.js';
+import { ARA, araPreview, araTransport } from './ara.js';
 import { S, audible, timelineRange } from './state.js';
 import { dbToGain, gainOf, panOf } from './mixer.js';
 import { follow, movePlayhead, renderToolbar } from './draw.js';
@@ -164,6 +167,7 @@ function schedule(when, from, to) {
 }
 
 export async function play() {
+  if (ARA) { await araTransport(S.playing ? 'stop' : 'play'); return; }
   if (S.playing) { stop(); return; }
   stopPreview();
   if (!S.vd || loading) return;
@@ -238,6 +242,7 @@ function tick() {
 }
 
 export function stop() {
+  if (ARA) return;          // 再生は DAW のもの（再生位置を動かしても DAW の再生は止めない。止めるのは再生ボタン・Space）
   S.playing = false;
   if (raf) cancelAnimationFrame(raf);
   raf = null;
@@ -257,7 +262,7 @@ const PREVIEW_GAP_MS = 45;    // 作り直しの間隔の下限（間引き）
 const PREVIEW_FADE = 0.006;   // ループのつなぎ目・差し替えのフェード（秒）
 let previewOn = true;
 const PV = { token: 0, note: null, range: null, want: 0, busy: 0, timer: 0, lastAt: 0,
-  src: null, gain: null, t0: 0, dur: 0, cents: null };
+  src: null, gain: null, t0: 0, dur: 0, cents: null, host: false };
 const previewLog = [];        // 鳴らそうとしたもの（テスト用。音は出さずにこれで確かめる）
 
 export function previewEnabled() { return previewOn; }
@@ -319,6 +324,11 @@ async function requestPreview() {
   try {
     const r = await call('render_audition', { note_id: note, cents, start_sec: a, end_sec: b });
     if (tok !== PV.token) return;
+    if (ARA) {                      // 作った WAV は C++ が DAW の出力でループ再生する（差し替えは C++ が鳴っている位置のまま）
+      PV.host = true;
+      await araPreview('start', { path: r.path, loop: true, note, cents });
+      return;
+    }
     const bytes = await window.api.readFile(r.path);
     if (tok !== PV.token) return;
     const buf = await audioCtx().decodeAudioData(bytes);
@@ -388,6 +398,7 @@ export function stopPreview() {
   PV.busy = 0;
   PV.note = null;
   PV.range = null;
+  if (PV.host) { PV.host = false; araPreview('stop'); }
   releaseVoice(PV.src, PV.gain);
   PV.src = null; PV.gain = null; PV.dur = 0; PV.cents = null;
 }

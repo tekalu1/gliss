@@ -135,13 +135,23 @@ def open_legacy(take_path=None, guide_path=None, project_dir=None, author="ai", 
     return "legacy", (s, p, last)
 
 
-def _load_gliss(path, prefer_path=None, prefer=None):
+def _load_gliss(path, prefer_path=None, prefer=None, fresh=False):
     doc, missing, recovered, backup = D.open_file(path)
+    extra = {}
+    if recovered and fresh:
+        _clear()                                 # メモリに開いている同じ作業場所のプロジェクトを手放す
+        D.discard(doc)                           # 作業場所に残っていた保存していない変更を捨てて、ファイルの中身から
+        recovered = False
+        extra["discarded_unsaved"] = True
+    elif recovered:
+        extra["warnings"] = ["作業場所に保存していない変更が残っていたので、その続きから開いた（recovered）。"
+                             "前に当てた編集が乗ったままなので、同じ補正を当て直すと二重になる。"
+                             ".gliss に保存した中身から開き直すなら load_project(path, fresh=true)"]
     s = Session.load(doc.work_dir)
     p, why = _adopt_session(s, doc, prefer=prefer, prefer_path=prefer_path)
     log.get().info("プロジェクトを開いた: %s（作業場所 %s%s）", path, doc.work_dir,
                    "・保存していない変更の続き" if recovered else "")
-    return s, p, why, {"missing": missing, "recovered": recovered, "backup": backup}
+    return s, p, why, dict({"missing": missing, "recovered": recovered, "backup": backup}, **extra)
 
 
 # ---------------------------------------------------------------- ツール
@@ -201,7 +211,7 @@ def _app_project():
 
 
 @_tool
-def load_project(path: str = None, author: str = "ai") -> dict:
+def load_project(path: str = None, author: str = "ai", fresh: bool = False) -> dict:
     """プロジェクトを開く。**引数なしで呼ぶと、Gliss の画面で今開いている曲**（と画面で編集中のトラック）を開く
     （画面と同じ作業場所を使うので、編集は画面に即反映される。返り値の from_app = true）。
     画面で何も開いていなければエラー。path:
@@ -212,23 +222,26 @@ def load_project(path: str = None, author: str = "ai") -> dict:
     - 無題の作業場所（`…\\Gliss\\work\\untitled-…`）
     - 音声ファイル（= new_project(take_path=…)）
     見つからない音声は missing に返す（ファイルと一緒に動かしたなら、.gliss からの相対パス・同じフォルダの同じ名前でも探す）。
+    recovered = true のときは warnings にもその旨を入れる。fresh=True（.gliss のとき）は、作業場所に残っていた
+    保存していない変更を捨てて、ファイルに保存した中身から開く（close_project(discard=true) → load_project と同じ。
+    返り値の discarded_unsaved）。
     """
     track = None
     if not path:
         path, track = _app_project()
-        out = _load(path, author, track)
+        out = _load(path, author, track, fresh=fresh)
         out["from_app"] = True
         return out
-    return _load(path, author, track)
+    return _load(path, author, track, fresh=fresh)
 
 
-def _load(path, author, track=None):
+def _load(path, author, track=None, fresh=False):
     """load_project の中身。track: 開いたときの編集対象にしたいトラックの id（画面で編集中のもの）。"""
     kind, p0 = D.classify(path)
     if kind == "audio":
         return new_project(take_path=p0, author=author)
     if kind == "gliss":
-        s, p, why, extra = _load_gliss(p0, prefer=track)
+        s, p, why, extra = _load_gliss(p0, prefer=track, fresh=fresh)
         return _result(s, p, why, opened="gliss", **extra)
     if kind == "work":
         D.claim_work(p0)                         # 後回しにした削除の予定があれば取り消す（使い始める）
@@ -268,6 +281,8 @@ def save_project(path: str = None) -> dict:
     doc = current()
     if doc is None:
         raise ProjectError("プロジェクトが開かれていない（new_project / load_project）")
+    if doc.kind == "ara":
+        raise ProjectError("DAW（ARA）のドキュメントは DAW が保存する（ARA のアーカイブ。ara_archive）")
     s = _srv._state.get("session")
     if s is not None:
         s.reload_if_changed()
@@ -293,8 +308,9 @@ def save_project(path: str = None) -> dict:
 
 @_tool
 def project_status() -> dict:
-    """開いているプロジェクト: kind（"gliss" = 保存したファイル / "untitled" = 無題 / "legacy" = 旧形式の projects/）・
-    path（.gliss）・name・**dirty（保存していない変更があるか。旧形式は自動で保存しているので常に false）**・
+    """開いているプロジェクト: kind（"gliss" = 保存したファイル / "untitled" = 無題 / "legacy" = 旧形式の projects/ /
+    "ara" = DAW のドキュメント（ara_open））・
+    path（.gliss）・name・**dirty（保存していない変更があるか。旧形式と ara は常に false）**・
     work_dir（作業場所）・tracks（トラックの数）・saved_at。開いていなければ document = null。"""
     return _ok(document=info())
 
@@ -302,7 +318,7 @@ def project_status() -> dict:
 @_tool
 def close_project(discard: bool = False) -> dict:
     """プロジェクトを閉じる。discard=True で保存していない変更を捨てる（.gliss は最後に保存した中身に戻し、
-    無題は作業場所ごと消す。旧形式は自動で保存しているので何もしない）。discard=False なら作業場所に残る
+    無題は作業場所ごと消す。旧形式は自動で保存しているので何もしない。DAW（ARA）の作業場所も消さない）。discard=False なら作業場所に残る
     （同じファイルを開けば続きから）。"""
     doc = current()
     dropped = False

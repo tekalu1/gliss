@@ -119,6 +119,35 @@ def test_close_discard_and_recover(tmp_path, mcp):
     assert _ok(md.project_status())["document"] is None
 
 
+def test_load_warns_about_unsaved_and_fresh_discards(tmp_path, mcp):
+    """同じ作業場所で開き直すと、保存していない編集が乗ったまま（recovered）。warnings で知らせ、fresh で捨てる。"""
+    m, mt, md = mcp
+    take, guide = _media(tmp_path)
+    _ok(md.new_project(take_path=take))
+    path = str(tmp_path / "song" / "f.gliss")
+    _ok(md.save_project(path))
+    nid = _first_note(m)
+    _ok(m.shift_pitch(40.0, note_id=nid, author="human"))
+    r = _ok(md.load_project(path))                       # 閉じずにもう一度開く（AI のスクリプトの流れ）
+    assert r["recovered"] is True and r["edits"] == 1
+    assert any("fresh=true" in w for w in r["warnings"])
+    r = _ok(md.load_project(path, fresh=True))
+    assert r["recovered"] is False and r["discarded_unsaved"] is True and r["edits"] == 0
+    assert r["document"]["dirty"] is False
+
+
+def test_open_project_goes_under_the_work_dir(tmp_path, monkeypatch):
+    """VOCAL_ENGINE_PROJECTS を渡さず作業場所を渡したら、旧形式のプロジェクトも作業場所の下に作る。"""
+    from vocal_engine.project import store
+    monkeypatch.delenv("VOCAL_ENGINE_PROJECTS", raising=False)
+    monkeypatch.setattr(store, "PROJECTS_ROOT", store._DEFAULT_PROJECTS_ROOT)
+    monkeypatch.setenv("VOCAL_ENGINE_WORK_DIR", str(tmp_path / "w"))
+    assert store.projects_root() == os.path.join(str(tmp_path / "w"), "projects")
+    monkeypatch.setenv("VOCAL_ENGINE_PROJECTS", str(tmp_path / "p"))
+    monkeypatch.setattr(store, "PROJECTS_ROOT", str(tmp_path / "p"))
+    assert store.projects_root() == str(tmp_path / "p")
+
+
 def test_history_survives_save_and_moved_media(tmp_path, mcp):
     """取り消しの履歴ごと保存される。.gliss と音声を一緒に移しても開ける（相対パス）。"""
     m, mt, md = mcp

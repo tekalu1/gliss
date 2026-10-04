@@ -1,0 +1,1 @@
+list(APPEND GLISS_UNIT_TESTS ${CMAKE_CURRENT_SOURCE_DIR}/McpClientTests.cpp ${CMAKE_CURRENT_SOURCE_DIR}/EngineConfigTests.cpp)

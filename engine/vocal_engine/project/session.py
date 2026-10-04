@@ -40,12 +40,23 @@
   履歴に入れた changeset の番号の最大）より新しい changeset が履歴に無ければ末尾に足す
   （履歴を知らない版のエンジン・プロジェクトを直接開いた編集も取りこぼさない）
 
+## DAW（ARA）のセッション（`mcp_ara.py`）
+
+`ara` = True のセッションは DAW のドキュメント 1 つ。トラックに `ara_id`（DAW の AudioModification の persistentID）を持ち、
+トラックの有無・位置・名前・素材は DAW が決める（`ara_*` のツール。取り消しの履歴に入れない）。
+
+- 同じファイルの別のトラックを許す（`add_track(ara_id=…)` は同じファイル・同じ範囲の重複の検査を飛ばす）
+- 取り消しの `session` の項目を戻しても、ARA のトラックは今のまま（DAW の操作を Gliss の Ctrl+Z で戻さない）。
+  戻すのはガイドの指定・テンポと、ARA でないトラック
+- 外したトラックの id は `ara_gone` に控え、同じ `ara_id` を足し直したら同じ id にする（`history_marks` を引き継ぐ）
+
 ## テンポ（issue #18。`proposal/v3.html` §4・§8）
 
 `tempo` = {bpm, num, den, start_sec, source, …}（無ければ None = 画面は秒のグリッド）。1 曲に 1 つ。
 
 - `bpm`: 4 分音符の数／分（Studio One と同じ）。`num` / `den`: 拍子。`start_sec`: 1 小節目の頭（タイムラインの秒。負も可）
-- `source`: "ixml"（トラックの WAV の iXML にある PreSonus のテンポマップから自動で読んだ）/ "manual"（手で入れた）。
+- `source`: "ixml"（トラックの WAV の iXML にある PreSonus のテンポマップから自動で読んだ）/ "manual"（手で入れた）/
+  "daw"（DAW（ARA）の MusicalContext。`ara_sync`）。
   iXML からは、まだテンポが無いときにトラックを足した・開いたときに読む（`detect_tempo`。読んだトラックは
   `tempo_checked` に控えて読み直さない）。1 小節目はソングの 0:00 とみなし、bext の TimeReference から求める
 - テンポが途中で変わる曲も、グリッドはファイルの頭のテンポ 1 つ（`varies` / `bpm_range` に範囲を残す）
@@ -60,7 +71,7 @@ import soundfile as sf
 
 from .. import bwf, log
 from .. import media as M
-from ..audio import sha256_file
+from ..audio import file_sig, sha256_file
 from ..phoneme import lyrics as LY
 from .store import (Project, ProjectError, _default_project_dir, _shift_guide_lyrics, cached_project,
                     _tmp_name, dir_lock, remember_open, replace_file, warm_media)
@@ -228,6 +239,7 @@ def _norm_track(t):
     t["pan"] = norm_pan(t.get("pan"))
     t.setdefault("clip", None)
     t.setdefault("source_id", None)
+    t.setdefault("ara_id", None)
     # 切れ目と、消した部分（クリップの分割。トラックの頭＝クリップの頭が 0 の秒。offset_sec で動かしても一緒に動く）
     dur = t.get("duration_sec")
     t["cuts"] = norm_cuts(t.get("cuts"), dur)
@@ -252,6 +264,8 @@ class Session:
         self.history_marks = {}      # トラック id → 履歴に入れた changeset の番号の最大
         self.tempo = None            # テンポ（issue #18。無ければ秒のグリッド）
         self.tempo_checked = []      # iXML のテンポを読みに行ったトラック（読み直さない）
+        self.ara = False             # DAW（ARA）のドキュメントのセッション（mcp_ara.py）
+        self.ara_gone = {}           # 外した ARA のトラック: ara_id → {id, …}（足し直したら同じ id）
 
     # ------------------------------------------------------------ 読み書き
     @property
@@ -288,6 +302,9 @@ class Session:
         self.history_marks = dict(d.get("history_marks") or {})
         self.tempo = norm_tempo(d.get("tempo"))
         self.tempo_checked = [str(x) for x in d.get("tempo_checked") or []]
+        self.ara = bool(d.get("ara"))
+        self.ara_gone = {str(k): dict(v) if isinstance(v, dict) else {"id": str(v)}
+                         for k, v in (d.get("ara_gone") or {}).items()}
         self._sig = self._stat()
         return self
 
@@ -295,6 +312,8 @@ class Session:
         d = {"format": FORMAT, "version": VERSION, "guide": self.guide,
              "current": self.current, "seq": self.seq, "missing_guide": self.missing_guide,
              "tracks": self.tracks, "tempo": self.tempo, "tempo_checked": self.tempo_checked}
+        if self.ara:
+            d.update(ara=True, ara_gone=self.ara_gone)
         if self.history is not None:
             d.update(history=self.history, history_seq=self.history_seq,
                      history_marks=self.history_marks)
@@ -334,7 +353,16 @@ class Session:
 
     def find(self, path, clip=None):
         for t in self.tracks:
+            if t.get("ara_id"):
+                continue                         # DAW のトラックは同じファイルでも別もの（find_ara で引く）
             if _same_path(t["path"], path) and _same_clip_dict(t.get("clip"), clip):
+                return t
+        return None
+
+    def find_ara(self, ara_id):
+        """DAW の AudioModification（persistentID）のトラック。無ければ None。"""
+        for t in self.tracks:
+            if ara_id and t.get("ara_id") == ara_id:
                 return t
         return None
 
@@ -351,12 +379,18 @@ class Session:
         return os.path.normpath(d if os.path.isabs(d) else os.path.join(self.dir, d))
 
     def add_track(self, path, kind=None, name=None, offset_sec=0.0, clip=None, at=None,
-                  project_dir=None, source_id=None):
-        """音声ファイルをトラックにする（同じファイル・同じ範囲がもうあれば SessionError）。"""
+                  project_dir=None, source_id=None, ara_id=None, track_id=None):
+        """音声ファイルをトラックにする（同じファイル・同じ範囲がもうあれば SessionError）。
+
+        ara_id: DAW（ARA）の AudioModification のトラック。同じファイルの別のトラックを許す（同じ ara_id は不可）。
+        track_id: 使う id（外したトラックを足し直すとき。今あるトラックの id なら新しく振る）。"""
         path = os.path.abspath(str(path))
         if not os.path.exists(path):
             raise SessionError("音声が見つからない: %s" % path)
-        if self.find(path, clip) is not None:
+        if ara_id:
+            if self.find_ara(ara_id) is not None:
+                raise SessionError("もうトラックにある（ara_id %s）" % ara_id)
+        elif self.find(path, clip) is not None:
             raise SessionError("もうトラックにある: %s" % os.path.basename(path))
         try:
             info = sf.info(path)
@@ -387,16 +421,19 @@ class Session:
         # 同じプロジェクト（編集）のトラックを外して足し直した: 前の id を使う（issue #32）。新しい id にすると、
         # 取り消しの履歴の「そのトラックに入れた changeset の番号」（history_marks）が引き継がれず、前の編集が
         # 履歴の末尾に足し直されて、次の Ctrl+Z が古い編集を取り消してしまう
-        tid = self._old_id_for(project_dir)
+        tid = track_id if track_id and track_id not in {t["id"] for t in self.tracks} else None
+        if tid is None:
+            tid = self._old_id_for(project_dir)
         if tid is None:
             self.seq += 1
             tid = "t%d" % self.seq
+        self.seq = max(self.seq, _num_id(tid))
         t = _norm_track({
             "id": tid, "name": name or os.path.splitext(os.path.basename(path))[0],
             "kind": kind, "path": path, "sha256": sha, "sr": sr, "channels": int(info.channels),
             "source_frames": frames, "duration_sec": round(dur, 6), "clip": clip,
             "offset_sec": round(float(offset_sec or 0.0), 6), "mute": False, "solo": False,
-            "project_dir": project_dir, "source_id": source_id,
+            "project_dir": project_dir, "source_id": source_id, "ara_id": ara_id or None,
         })
         if at is None:
             self.tracks.append(t)
@@ -501,12 +538,27 @@ class Session:
             return g["path"], None
         return M.Clip(g["path"], offset_frames=off, length_frames=end - off, pad=off < 0), None
 
+    def check_ara_source(self, t):
+        """DAW（ARA）のトラックのソースの WAV が、`ara_set_modification` が見た後で書き換わっていたら SessionError。
+
+        プラグインはソースを書き直してから `ara_set_modification` を呼ぶ。その間にプロジェクトを開くと、
+        `Project.open` がファイルの SHA-256 の違いを「素材が変わった」と見て編集を捨ててしまうため。"""
+        sig = t.get("ara_file_sig")
+        if t.get("ara_id") and sig and list(file_sig(t["path"]) or []) != list(sig):
+            raise SessionError("DAW の音を読み込み中（%s）。少し待ってからやり直す" % t["name"])
+
+    @staticmethod
+    def estimator_of(t):
+        """トラックで明示した F0 の方式（analyze_take(estimator=…)。無ければ None = 選んでいる方式）。"""
+        return t.get("estimator") or None
+
     def open_project_for(self, t, reuse=True, lyrics=None, guide_lyrics=None):
         """トラックのプロジェクトを開く（ガイドはセッションの指定から）。(Project, ガイドが無い理由)。"""
         if t["kind"] != "vocal":
             raise SessionError("伴奏のトラック（%s）は編集できない" % t["name"])
         if not os.path.exists(t["path"]):
             raise SessionError("音声が見つからない: %s" % t["path"])
+        self.check_ara_source(t)
         gclip, why = self.guide_clip_for(t)
         pdir = self.project_dir_of(t)
         tclip = self.take_clip_for(t)
@@ -523,6 +575,7 @@ class Session:
             self._stash_guide_lyrics(pdir)
             p = Project.open(tclip, gclip, project_dir=pdir,
                              reuse=reuse, lyrics=lyrics, guide_lyrics=guide_lyrics)
+            p.estimator_pref = self.estimator_of(t)
             if gclip is not None:
                 p.guide_take_cache_path = self._guide_take_cache_path()
             missing = (why or "").startswith("ガイドの音声が見つからない") or (
@@ -561,6 +614,7 @@ class Session:
             raise SessionError("伴奏のトラック（%s）は編集できない" % t["name"])
         if not os.path.exists(t["path"]):
             raise SessionError("音声が見つからない: %s" % t["path"])
+        self.check_ara_source(t)
         gclip, why = self.guide_clip_for(t)
         pdir = self.project_dir_of(t)
         # テイクの SHA-256 と音声ファイルの情報もここで取っておく（ロックの外。プロセスの中で覚えるので、
@@ -589,6 +643,7 @@ class Session:
                 Project.open(tclip, gclip, project_dir=pdir, set_log=False, memo=False)
                 q = Project(pdir).load()
         q.background = True
+        q.estimator_pref = self.estimator_of(t)      # 表で明示した方式を、準備が既定の方式で上書きしない
         if ginfo is None:
             q.guide = None
             q.lyrics.pop("guide", None)
@@ -710,9 +765,15 @@ class Session:
                 "guide": snap.get("guide"), "tempo": snap.get("tempo")}
 
     def restore(self, snap):
-        """スナップショットに戻す。ミュート／ソロ・音量・パン・ガイドの歌詞の控えは今のまま（取り消しの対象外）。"""
+        """スナップショットに戻す。ミュート／ソロ・音量・パン・ガイドの歌詞の控えは今のまま（取り消しの対象外）。
+
+        DAW（ARA）のセッションでは、ARA のトラック（有無・位置・名前・素材）と DAW のテンポ（source = "daw"）は
+        今のまま（DAW が決めたもの）。戻すのはガイドの指定・画面で変えたテンポと、ARA でないトラック。"""
         cur = {t["id"]: t for t in self.tracks}
         tracks = copy.deepcopy(snap["tracks"])
+        if self.ara:
+            tracks = ([copy.deepcopy(t) for t in self.tracks if t.get("ara_id")]
+                      + [t for t in tracks if not t.get("ara_id")])
         for t in tracks:
             c = cur.get(t["id"])
             if c is None:
@@ -728,7 +789,8 @@ class Session:
         g = snap.get("guide")
         self.guide = g if g in ids else None
         self.missing_guide = copy.deepcopy(snap.get("missing_guide"))
-        if "tempo" in snap:                      # テンポを持たない前の版のスナップショットでは今のまま
+        daw_tempo = self.ara and (self.tempo or {}).get("source") == "daw"
+        if "tempo" in snap and not daw_tempo:    # テンポを持たない前の版のスナップショットでは今のまま
             self.tempo = copy.deepcopy(snap["tempo"])
         self.seq = max([self.seq] + [_num_id(t) for t in ids])
         if self.current not in ids:
@@ -938,6 +1000,8 @@ class Session:
         for t in self.tracks:
             d = {k: t.get(k) for k in ("id", "name", "kind", "path", "offset_sec", "duration_sec",
                                        "sr", "channels", "mute", "solo", "gain_db", "pan", "clip", "cuts", "mutes")}
+            if t.get("ara_id"):                  # DAW（ARA）のトラック: AudioModification と DAW のトラック名
+                d["ara_id"], d["group"] = t["ara_id"], t.get("group")
             d["guide"] = t["id"] == self.guide
             d["current"] = t["id"] == current
             d["audible"] = self.audible(t)
@@ -971,7 +1035,7 @@ def norm_tempo(t):
     if not (lo <= bpm <= hi) or not (1 <= num <= 16) or den not in TEMPO_DENS:
         return None
     out = {"bpm": bpm, "num": num, "den": den, "start_sec": start,
-           "source": "ixml" if t.get("source") == "ixml" else "manual"}
+           "source": t.get("source") if t.get("source") in ("ixml", "daw") else "manual"}
     if out["source"] == "ixml":
         for k in ("track", "file", "varies", "bpm_range"):
             if t.get(k) is not None:

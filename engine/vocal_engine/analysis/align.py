@@ -100,13 +100,35 @@ def _flat_cols(m):
     return ~np.any(np.asarray(m) != 0.0, axis=0)
 
 
-def _dtw_path(m1, m2, metric="cosine"):
+def _dtw_path(m1, m2, metric="cosine", band=None):
     """DTW の経路。**0 ベクトルの列があっても落ちない**（issue #32）。
 
     ほぼ無音（−110 dBFS 程度。MFCC の下限より静か）の窓は、そろえた MFCC が全フレーム 0 ベクトルになり、
     コサイン距離が 0/0 = NaN になって librosa の DTW が例外を出す。0 ベクトルとの距離は「似ていない」= 1 にする
-    （0 ベクトルが無ければ librosa に任せたときと同じ行列・同じ経路）。"""
+    （0 ベクトルが無ければ librosa に任せたときと同じ行列・同じ経路）。
+
+    band = (rate, t0, g0, offset_sec, radius_sec): **帯の制約**。テイクの秒（t0 + i / rate）− ガイドの秒
+    （g0 + j / rate）が offset_sec ± radius_sec を外れる所は通さない（同じ時間軸の素材。`estimate_timeline`）。
+    経路は両端（最初のフレームどうし・最後のフレームどうし）を通るので、端の近く（全体のずれ・長さの差の
+    分 + `BAND_END_SEC` の角の四角）だけは帯の外も通す（ファイルの頭と尻は、ふつう歌っていない）。"""
     import librosa
+    if band is not None:
+        from scipy.spatial.distance import cdist
+        with np.errstate(invalid="ignore", divide="ignore"):
+            C = cdist(np.asarray(m1).T, np.asarray(m2).T, metric=metric)
+        C = np.nan_to_num(C, nan=1.0, posinf=1.0, neginf=1.0)
+        rate, t0, g0, off, rad = band
+        ti = t0 + np.arange(C.shape[0]) / rate
+        gj = g0 + np.arange(C.shape[1]) / rate
+        outside = np.abs(ti[:, None] - gj[None, :] - off) > rad
+        n1, n2 = C.shape[0] / rate, C.shape[1] / rate
+        fs = abs(t0 - g0 - off) + BAND_END_SEC                    # 頭: 0 フレームどうしのずれ
+        fe = abs((t0 + n1) - (g0 + n2) - off) + BAND_END_SEC      # 尻
+        outside &= ~((ti[:, None] < t0 + fs) & (gj[None, :] < g0 + fs))
+        outside &= ~((ti[:, None] > t0 + n1 - fe) & (gj[None, :] > g0 + n2 - fe))
+        C[outside] = BAND_PENALTY
+        _, wp = librosa.sequence.dtw(C=C, subseq=False, backtrack=True)
+        return np.asarray(wp[::-1].T, dtype="float64")
     if metric == "cosine" and (_flat_cols(m1).any() or _flat_cols(m2).any()):
         from scipy.spatial.distance import cdist
         with np.errstate(invalid="ignore", divide="ignore"):
@@ -116,6 +138,84 @@ def _dtw_path(m1, m2, metric="cosine"):
     else:
         _, wp = librosa.sequence.dtw(X=m1, Y=m2, metric=metric, subseq=False, backtrack=True)
     return np.asarray(wp[::-1].T, dtype="float64")
+
+
+# ---------------------------------------------------------------- 同じ時間軸の素材（帯の制約）
+# 同じ DAW の曲から書き出したテイクとガイドは、同じ秒に同じ所を歌っている（ずれは歌い手の走り・もたりの
+# ±0.3 秒ほど）。ところが曲全体の DTW は、テイクが歌っていない所の多いファイルで別のフレーズに写り、
+# 250 ms を超えて外れる（手元の曲で、歌った音程ノートの 2〜4 割。中央値で 2 秒外れた組もある）。
+# そこで先に、発音の強さの包絡の相互相関で**全体のずれ**を測り、声のある窓ごとのずれが全体のずれに
+# そろっていれば同じ時間軸とみなして、DTW の経路を「全体のずれ ± BAND_SEC」の帯の中に限る。
+# 窓が足りない短い素材（8 秒未満）・別の演奏（窓ごとのずれがばらばら）は以前どおり制約しない。
+ALIGN_VERSION = 2               # 対応付けの中身を変えたら上げる（キャッシュの鍵。1 = 帯の制約なし）
+ENV_HOP = MFCC_HOP              # 包絡の間隔（10 ms）
+TL_MAX_LAG_SEC = 6.0            # 全体のずれを探す範囲
+TL_WIN_SEC = 8.0                # 所ごとのずれを確かめる窓の長さ（半分ずつずらす）
+TL_LOCAL_LAG_SEC = 1.5          # 窓の中で探す範囲（全体のずれの前後）
+TL_AGREE_SEC = 0.15             # 窓のずれが全体のずれとこれ以内なら「そろっている」
+TL_MIN_WINDOWS = 3              # 同じ時間軸とみなすのに要る窓の数
+TL_MIN_AGREE = 0.6              # そろっている窓の割合の下限
+BAND_SEC = 0.3                  # 帯の半径（全体のずれからこれを超えて外れる対応は取らない。146 BPM の 1 拍 0.41 秒より狭く）
+BAND_PENALTY = 1e3              # 帯の外のコスト（コサイン距離は 0〜2）
+BAND_LOOSE_SEC = 1.0            # 「たぶん同じ時間軸」（下）の帯の半径
+TL_LOOSE_MAX_SEC = 0.15         # たぶん同じ時間軸: 全体のずれがこれ以内で、
+TL_LOOSE_AGREE = 0.25           # そろっている窓がこの割合以上（窓は 1 つ以上）
+BAND_END_SEC = 0.5              # 経路の両端へつなぐために帯の外も通す幅（端からのずれの分に足す）
+
+
+def _envelopes(x, sr):
+    """発音の強さ（onset strength）と RMS の包絡（10 ms）。"""
+    import librosa
+    y = _mono(x, sr, MFCC_SR)
+    on = librosa.onset.onset_strength(y=y, sr=MFCC_SR, hop_length=ENV_HOP)
+    rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=ENV_HOP)[0]
+    n = min(len(on), len(rms))
+    return on[:n].astype("float64"), rms[:n].astype("float64")
+
+
+def _znorm(v):
+    v = np.asarray(v, dtype="float64")
+    return (v - v.mean()) / (v.std() + 1e-9)
+
+
+def estimate_timeline(take_x, take_sr, guide_x, guide_sr):
+    """テイクとガイドが**同じ時間軸**か。全体のずれ（テイク − ガイド、秒）と、声のある窓ごとのずれの一致。
+
+    返り値: {"offset_sec", "same", "windows", "agree", "peak"}。same は窓が `TL_MIN_WINDOWS` 以上あり、
+    その `TL_MIN_AGREE` 以上で窓のずれが全体のずれから `TL_AGREE_SEC` 以内のとき。"""
+    from scipy.signal import correlate
+    ta, trms = _envelopes(take_x, take_sr)
+    ga, grms = _envelopes(guide_x, guide_sr)
+    rate = MFCC_SR / float(ENV_HOP)
+    if not len(ta) or not len(ga):
+        return {"offset_sec": 0.0, "same": False, "windows": 0, "agree": 0.0, "peak": 0.0}
+    c = correlate(_znorm(ta), _znorm(ga), mode="full", method="fft") / max(1, min(len(ta), len(ga)))
+    lags = np.arange(-len(ga) + 1, len(ta))
+    m = np.abs(lags) <= int(TL_MAX_LAG_SEC * rate)
+    k = int(np.argmax(c[m]))
+    lag = int(lags[m][k])
+    off = lag / rate
+    t_floor = max(1e-4, float(np.percentile(trms, 95)) * 0.05)
+    g_floor = max(1e-4, float(np.percentile(grms, 95)) * 0.05)
+    w = int(TL_WIN_SEC * rate)
+    L = int(TL_LOCAL_LAG_SEC * rate)
+    loc = []
+    for a in range(0, len(ta) - w + 1, max(1, w // 2)):
+        g0, g1 = a - lag - L, a + w - lag + L
+        if g0 < 0 or g1 > len(ga):
+            continue
+        if (trms[a:a + w] > t_floor).mean() < 0.25 or (grms[g0:g1] > g_floor).mean() < 0.15:
+            continue                 # 片方が歌っていない窓は手がかりにならない
+        cc = correlate(_znorm(ga[g0:g1]), _znorm(ta[a:a + w]), mode="valid")
+        loc.append((a - (g0 + int(np.argmax(cc)))) / rate)
+    agree = float(np.mean([abs(v - off) <= TL_AGREE_SEC for v in loc])) if loc else 0.0
+    same = bool(len(loc) >= TL_MIN_WINDOWS and agree >= TL_MIN_AGREE)
+    # たぶん同じ時間軸: 声の少ないテイク（掛け声だけ）・ガイドと歌い回しの違う所の多いテイクは窓がそろわないが、
+    # Gliss のガイドはタイムライン上の位置で重ねるので、全体のずれが小さく窓が少しでもそろえば、DTW が何秒も
+    # 離れた所へ写らないように広い帯（`BAND_LOOSE_SEC`）を掛ける（素材で −22 秒の全体のずれが出た）
+    loose = bool(not same and loc and abs(off) <= TL_LOOSE_MAX_SEC and agree >= TL_LOOSE_AGREE)
+    return {"offset_sec": round(off, 3), "windows": len(loc), "agree": round(agree, 3),
+            "peak": round(float(c[m][k]), 3), "same": same, "loose": loose}
 
 
 def align_mfcc(take_x, take_sr, guide_x, guide_sr, metric="cosine"):
@@ -144,8 +244,12 @@ def _coarse_hop(dur1, dur2, max_cells):
 
 
 def align_seconds(take_x, take_sr, guide_x, guide_sr, method=DEFAULT_METHOD,
-                  refine_ranges=None, max_cells=MAX_DTW_CELLS):
-    """(take_sec, guide_sec, feature_rate, info) を返す。長い素材は粗 → 精の 2 段。"""
+                  refine_ranges=None, max_cells=MAX_DTW_CELLS, timeline=True):
+    """(take_sec, guide_sec, feature_rate, info) を返す。長い素材は粗 → 精の 2 段。
+
+    timeline=True: 同じ時間軸の素材（`estimate_timeline`）なら、経路を全体のずれ ± `BAND_SEC` の帯に限る
+    （info["timeline"] に測った値、info["band_sec"] に帯の半径）。数（秒）を渡すと、測らずにそのずれの
+    同じ時間軸とみなす（譜面ガイド）。False は帯を使わない（以前の対応付け）。"""
     if method != "mfcc":
         wp = align(take_x, take_sr, guide_x, guide_sr, method=method)
         fr = feature_rate_of(method)
@@ -153,22 +257,35 @@ def align_seconds(take_x, take_sr, guide_x, guide_sr, method=DEFAULT_METHOD,
 
     d1 = len(np.atleast_1d(take_x)) / float(take_sr)
     d2 = len(np.atleast_1d(guide_x)) / float(guide_sr)
+    if timeline is True:
+        tl = estimate_timeline(take_x, take_sr, guide_x, guide_sr)
+    elif timeline is False or timeline is None:
+        tl = None
+    else:
+        tl = {"offset_sec": float(timeline), "same": True, "given": True}
+    off = tl["offset_sec"] if tl is not None and (tl["same"] or tl.get("loose")) else None
     hop, k = _coarse_hop(d1, d2, max_cells)
     m1, m2 = _mfcc(take_x, take_sr, hop), _mfcc(guide_x, guide_sr, hop)
-    wp = _dtw_path(m1, m2)
     rate = MFCC_SR / float(hop)
+    rad = None if off is None else (BAND_SEC if tl["same"] else BAND_LOOSE_SEC)
+    wp = _dtw_path(m1, m2, band=None if off is None else (rate, 0.0, 0.0, off, rad))
     ta, ga = wp[0] / rate, wp[1] / rate
     info = {"stage": "single" if k == 1 else "coarse", "hop_ms": round(1000.0 / rate, 1),
             "cells": int(m1.shape[1]) * int(m2.shape[1]), "refined": 0}
+    if tl is not None:
+        info["timeline"] = tl
+        info["band_sec"] = None if rad is None else round(rad, 3)
     if k > 1 and refine_ranges:
         ta, ga, n = _refine(ta, ga, take_x, take_sr, guide_x, guide_sr, refine_ranges,
-                            d1, d2)
+                            d1, d2, offset=off, radius=rad)
         info.update(stage="coarse+refine", refined=n, refine_hop_ms=10.0)
     return ta, ga, feature_rate_of("mfcc"), info
 
 
-def _refine(ta, ga, take_x, take_sr, guide_x, guide_sr, ranges, d1, d2):
-    """編集する区間だけ 10 ms ホップで取り直して、粗い対応に差し込む。"""
+def _refine(ta, ga, take_x, take_sr, guide_x, guide_sr, ranges, d1, d2, offset=None, radius=BAND_SEC):
+    """編集する区間だけ 10 ms ホップで取り直して、粗い対応に差し込む。
+
+    offset（同じ時間軸の素材の全体のずれ）があれば、ガイドの窓をその位置に取り、帯の制約を掛ける。"""
     pieces = []
     done = 0
     for s, t in sorted(ranges):
@@ -176,8 +293,12 @@ def _refine(ta, ga, take_x, take_sr, guide_x, guide_sr, ranges, d1, d2):
         b = min(d1, t + REFINE_PAD_SEC)
         if b - a < 0.2:
             continue
-        g0 = float(np.interp(a, ta, ga)) - REFINE_GUIDE_PAD_SEC
-        g1 = float(np.interp(b, ta, ga)) + REFINE_GUIDE_PAD_SEC
+        if offset is None:
+            g0 = float(np.interp(a, ta, ga)) - REFINE_GUIDE_PAD_SEC
+            g1 = float(np.interp(b, ta, ga)) + REFINE_GUIDE_PAD_SEC
+        else:
+            g0 = a - offset - REFINE_GUIDE_PAD_SEC
+            g1 = b - offset + REFINE_GUIDE_PAD_SEC
         g0, g1 = max(0.0, g0), min(d2, g1)
         if g1 - g0 < 0.2:
             continue
@@ -188,8 +309,8 @@ def _refine(ta, ga, take_x, take_sr, guide_x, guide_sr, ranges, d1, d2):
             # 片側がほぼ無音（部分的に録り直したテイク・ガイドの歌っていない所）: 取り直しても手がかりが無いので
             # 粗い対応のままにする（issue #32）
             continue
-        wp = _dtw_path(m1, m2)
         r = MFCC_SR / float(MFCC_HOP)
+        wp = _dtw_path(m1, m2, band=None if offset is None else (r, a, g0, offset, radius))
         pieces.append((a, b, wp[0] / r + a, wp[1] / r + g0))
         done += 1
     if not pieces:

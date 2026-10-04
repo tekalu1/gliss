@@ -10,6 +10,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 | テストと素材 | `docs/testing.md` |
 | 配布・自動更新・アドオン・リリース | `docs/release-plan.md` |
 | エンジンの MCP のツール | `engine/docs/MCP.md` |
+| VST3 + ARA 2 プラグイン（`plugin/`） | `docs/ara-plugin.md` |
 | 次にやること | `gh issue list --repo tekalu1/gliss` |
 
 ## 作業開始
@@ -27,11 +28,12 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
     - pytest: `<wt>\engine` を cwd にして `<main>\.venv\Scripts\python.exe -m pytest`。`.venv` には main の `engine` が editable で入っている。
       `python -m` は cwd を `sys.path` の先頭に入れるので、cwd が `<wt>\engine` のときだけ worktree の `vocal_engine` が読まれる。
       迷ったら `python -c "import vocal_engine; print(vocal_engine.__file__)"` で確かめる。
+      確かめ用のスクリプトを `python <file>.py` で走らせると cwd は `sys.path` に入らず、main の `vocal_engine` を読む（worktree の変更が効かないまま結果が出る）。スクリプトの頭で `sys.path.insert(0, "<wt>/engine")` する。
   - 解析モデルの重みは `%LOCALAPPDATA%\Gliss\models` を共有する（読むだけ）。
 
 ## 構成
 
-`app/`（Electron の画面。ビルド工程なし）・`engine/`（Python のエンジン `vocal_engine`。MCP サーバー）・`scripts/`（版・ビルド・スモーク・リリースの道具）・
+`app/`（Electron の画面。ビルド工程なし）・`engine/`（Python のエンジン `vocal_engine`。MCP サーバー）・`plugin/`（VST3 + ARA 2 プラグイン。C++・CMake）・`scripts/`（版・ビルド・スモーク・リリースの道具）・
 `releases/`（リリースノートの正本）・`docs/`・`assets/logo/`・`.github/workflows/`（`test.yml` と `release.yml`）。中身は `docs/development.md` の「構成」。
 内部の名前は旧称のまま（`vocal_engine`・`VOCAL_ENGINE_*`・`VOCAL_EDITOR_*`・`_ve.wav`。理由は `docs/development.md` の「内部の名前」）。環境変数は旧称と `GLISS_*` が混ざっている。
 文書とコードの issue 番号（「issue #33」など）は、公開前の非公開の旧リポジトリのもの。このリポジトリの issue とは番号が合わない。
@@ -46,7 +48,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 | `GLISS_ADDONS_DIR` | アドオンの置き場。配布版の既定 `%LOCALAPPDATA%\Gliss\addons`。開発版は指定したときだけ扱う |
 | `GLISS_ADDON_BASE_URL`・`GLISS_ADDON_CATALOG` | アドオンの取得先・目録の差し替え（試験用。`app/addons.mjs`） |
 | `VOCAL_ENGINE_CWD` | 開発版の画面が起動するエンジンの作業ディレクトリ（worktree 用） |
-| `VOCAL_ENGINE_WORK_DIR` | 作業場所。既定 `%LOCALAPPDATA%\Gliss\work`。エンジンのテストで new/save するときは一時フォルダに向ける |
+| `VOCAL_ENGINE_WORK_DIR` | 作業場所。既定 `%LOCALAPPDATA%\Gliss\work`。エンジンのテストで new/save するときは一時フォルダに向ける。`VOCAL_ENGINE_PROJECTS` を渡さなければ、`open_project` の旧形式のプロジェクトもこの下の `projects` に作る |
 | `VOCAL_ENGINE_LOG_DIR` | 曲を開く前の `engine.log` の置き場。既定 `~/.vocal-editor`（曲を開いた後は作業場所の `engine.log`） |
 | `GLISS_TEST_PYTHON` | 画面のテスト（`first-run`・`addons-view`）がフィクスチャを作る python。既定はエンジンと同じ |
 | `VOCAL_EDITOR_MUTE`・`VOCAL_EDITOR_HIDDEN`・`VOCAL_EDITOR_IGNORE_MOUSE` | テスト用。音を出さない・透明で前面を奪わない・人のマウスを素通しする。`app/playwright.config.js` が入れる（見るときは `pnpm test:headed`） |
@@ -61,7 +63,8 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 |---|---|
 | `engine/` | `<wt>\engine` で pytest（上の「作業開始」）。絞るなら `-k`。MCP のツールを変えたら `engine/docs/MCP.md` も直す |
 | `app/` の画面 | `pnpm test:unit` と、関係する `pnpm exec playwright test tests/<名前>.spec.js` |
-| 配布・更新・アドオン（`electron-builder.yml`・`build/installer.nsh`・`updates*.mjs`・`addons.mjs`・`scripts/build-*.mjs`） | `pnpm test:unit`（`release.spec.js` が NSIS のテンプレートの形を見る）。`pnpm build:engine` → `pnpm dist:dir` → `node scripts/smoke-packaged.mjs`。更新は `node scripts/smoke-update.mjs --old <古い展開版> --new <新しい出力>`、アドオンは `node scripts/build-addon.mjs --all` → `pnpm dist:dir` → `node scripts/smoke-addon.mjs --models <重み>` |
+| 配布・更新・アドオン（`electron-builder.yml`・`build/installer.nsh`・`updates*.mjs`・`addons.mjs`・`scripts/build-*.mjs`） | `pnpm test:unit`（`release.spec.js` が NSIS のテンプレートの形を見る）。`pnpm build:engine` → `pnpm build:plugin`（`dist:dir` の前に要る。VS の MSVC と CMake）→ `pnpm dist:dir` → `node scripts/smoke-packaged.mjs`。更新は `node scripts/smoke-update.mjs --old <古い展開版> --new <新しい出力>`、アドオンは `node scripts/build-addon.mjs --all` → `pnpm dist:dir` → `node scripts/smoke-addon.mjs --models <重み>` |
+| `plugin/` | `powershell -NoProfile -File plugin\scripts\test-plugin.ps1`（ビルドと、ARA の TestHost・GlissHostCheck・単体テスト・エンジンにつないだ通し試験 GlissARATest。エンジンは main の `.venv` の python で worktree の `engine` を読む。`-SkipBuild` で流すだけ。詳しくは `docs/ara-plugin.md`）。ビルドの出力と依存は `plugin/build/`（git 管理外）。プラグインを `Common Files\VST3` などシステムの場所に置かない（実物の DAW での確認は人の許可を取って行う） |
 | 版・リリースノート・`scripts/release-*.mjs` | `node scripts/sync-version.mjs --check`・`node scripts/release-check.mjs`・`pnpm test:unit` |
 | `.github/workflows/` | actionlint |
 | 文書だけ | 書いたコマンド・パス・名前が実在するか、`git diff --check` |
@@ -84,6 +87,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 
 PR の前に gitleaks（公式 Release のバイナリ）で `gitleaks git <wt>` をかける。CI の `test.yml` の `secrets` ジョブも全履歴を見る。
 `gitleaks dir` は git 管理外のテストの出力（`projects/` に残る Chromium の設定など）も拾うので、使うなら先にそれを消す。
+テストに `workKey = "<UUID>"` のような「key を含む名前に乱数らしい文字列」を書くと generic-api-key で止まる（2026-10-03）。全履歴を見るので後のコミットで消しても通らない。値は実行時に作るか、push 前にそのコミットを作り直す。
 
 ## コミットと PR
 
@@ -105,6 +109,7 @@ PR の前に gitleaks（公式 Release のバイナリ）で `gitleaks git <wt>`
 - 試験で `%APPDATA%\Gliss`・`%LOCALAPPDATA%\Gliss` を汚さない（開発版と配布版が同じ場所を使う）。スモークは `LOCALAPPDATA` と userData を一時フォルダに差し替えている。
 - 配布版は前回開いていた曲を起動時に開き直す（利用者の実データを開いてしまう）。配布版を試すときはユーザーデータを差し替える。
 - 配布版の自動更新は `--dir` の展開版では動かない（`app-update.yml` は NSIS の出力にだけ入る）。
+- 本物のインストーラは開発機で走らせない。NSIS の `$LOCALAPPDATA` は環境変数ではなく既知フォルダから取るので差し替えられず、HKCU・スタートメニュー・入っている Gliss に書く。`installer.nsh` のマクロだけを試す方法は `docs/ara-plugin.md` の「配布の確かめ方」。
 - Windows PowerShell 5.1 の `.Count` は、該当が 1 件のとき `$null` になる。NSIS の既定の `CHECK_APP_RUNNING` がこれでエンジンを見逃していた（`app/build/installer.nsh`）。
 - GitHub の Release の配信は、複数範囲の Range に 501 を返す。差分更新は electron-updater の GitHub provider が 1 範囲ずつ取るので効いている。provider を変えると全体の取得に落ちる。
 - 展開版の main プロセスはイベントループが遅くなることがある。大きな zip の展開は worker スレッドで行う（`app/unzip.mjs`）。

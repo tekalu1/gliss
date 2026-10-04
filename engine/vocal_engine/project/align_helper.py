@@ -43,8 +43,11 @@ def fallback_alignment(project, err, method=DEFAULT_METHOD):
 def compute_alignment(project, method=DEFAULT_METHOD):
     tx, tsr = project.audio("take")
     gx, gsr = project.audio("guide")
+    # 譜面ガイド（タイムラインに置いた合成音）は同じ時間軸と分かっている: ずれ 0 の帯に限る
+    # （声と合成音では発音の強さの包絡が似ず、全体のずれの推定が当てにならない）
+    timeline = 0.0 if project.score_guide() is not None else True
     ta, ga, fr, info = align_seconds(tx, tsr, gx, gsr, method=method,
-                                     refine_ranges=refine_ranges(project))
+                                     refine_ranges=refine_ranges(project), timeline=timeline)
     al = Alignment.from_seconds(ta, ga, method=method, feature_rate=fr)
     al.info = dict(info)
     return al

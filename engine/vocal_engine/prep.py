@@ -181,7 +181,7 @@ def track_sig(s, t):
               bool(c.pad)]
     d = [PREP_VERSION, _norm(t["path"]), t.get("sha256"), t.get("clip"), t.get("source_id"), gd,
          ALIGN_METHOD]
-    est = F0.resolve_estimator()
+    est = F0.resolve_estimator(s.estimator_of(t))     # トラックで明示した方式があればそれ
     if est != "rmvpe":
         d.append([est, F0.estimator_version(est)])   # ピッチ検出の方式（RMVPE は前と同じ署名のまま）
     return hashlib.sha1(json.dumps(d, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]

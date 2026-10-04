@@ -22,7 +22,7 @@ import numpy as np
 
 from .. import log
 from ..analysis.align import DEFAULT_METHOD as ALIGN_METHOD
-from ..analysis.align import Alignment, boundary_deviations, deviations
+from ..analysis.align import ALIGN_VERSION, Alignment, boundary_deviations, deviations
 from ..analysis.f0 import ENERGY_FLOOR_DB, RMVPE_THRESHOLD, F0Result, estimate_f0
 from ..analysis import f0 as f0mod
 from ..analysis.notes import Note, segment_notes
@@ -41,7 +41,17 @@ def _default_projects_root():
         os.path.abspath(__file__)))), "..", "projects"))
 
 
-PROJECTS_ROOT = os.environ.get("VOCAL_ENGINE_PROJECTS") or _default_projects_root()
+_DEFAULT_PROJECTS_ROOT = _default_projects_root()
+PROJECTS_ROOT = os.environ.get("VOCAL_ENGINE_PROJECTS") or _DEFAULT_PROJECTS_ROOT
+
+
+def projects_root():
+    """旧形式のプロジェクトの置き場。`VOCAL_ENGINE_PROJECTS` を渡していなくて作業場所（`VOCAL_ENGINE_WORK_DIR`）を
+    渡していれば、その下の `projects`（作業場所を分けて動かす AI・テストが `<リポジトリ>/projects` を汚さない）。"""
+    if PROJECTS_ROOT != _DEFAULT_PROJECTS_ROOT or os.environ.get("VOCAL_ENGINE_PROJECTS"):
+        return PROJECTS_ROOT
+    work = os.environ.get("VOCAL_ENGINE_WORK_DIR")
+    return os.path.join(os.path.abspath(work), "projects") if work else PROJECTS_ROOT
 SCHEMA_VERSION = 2              # 2: take / guide にソース ID とソース内オフセット（media.py）
 ARCHIVE_FORMAT = "vocal-editor-archive"
 ARCHIVE_VERSION = 1
@@ -423,6 +433,7 @@ class Project:
         self._onsets = {}           # role -> (鍵, 発音の頭の秒)
         self._audio_cache = {}
         self._audio_sigs = {}
+        self._note_index = None
         self._media_changed = False
         self._onset_sigs = {}
         self.guide_take_cache_path = None  # セッション中のガイドトラック自身の解析結果
@@ -431,6 +442,7 @@ class Project:
         # （cache/guide-analysis.json など）は書かず、鍵付きの保存だけに書く。project.json へは
         # analyze の commit で、読み直した最新の内容に合わせて書く
         self.background = False
+        self.estimator_pref = None       # このトラックで明示した F0 の方式（None なら選んでいる方式。session.py のトラックの estimator）
         self._auto_proposed = []    # 最後の歌詞の自動推定で足した区間
         self._disk_sig = None      # project.json の (mtime_ns, size, file ID)
         self._base_edit_state = None
@@ -973,6 +985,8 @@ class Project:
                self._take_f0.meta.get("threshold"), bool(self._take_f0.meta.get("sweep"))]
         if self._take_f0.meta.get("version") is not None:
             key.append(self._take_f0.meta["version"])
+        if ALIGN_VERSION != 1:
+            key.append(["align", ALIGN_VERSION])        # 対応付けの中身を変えたら作り直す（帯の制約）
         return self._guide_cache_dir("alignment", key)
 
     def _prune_guide_cache(self, kind):
@@ -1051,6 +1065,10 @@ class Project:
         info = self.take if role == "take" else self.guide
         if info is None:
             raise ProjectError("%s の音声が無い" % role)
+        if role == "guide":
+            sg = self.score_guide_notes()
+            if sg is not None:                     # 譜面ガイド: 発音の頭 = 譜面のノートの頭
+                return np.array([round(n.start_sec, 4) for n in sg], dtype="float64")
         key = [info["path"], int(info.get("offset_frames", 0) or 0), int(info["frames"]),
                info.get("content_sha256") or info.get("sha256"), ON.VERSION]
         alias = self._cache_path("onsets-%s.json" % role)
@@ -1090,7 +1108,8 @@ class Project:
                 cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None):
         """F0 → 音符 → （ガイドがあれば）DTW。結果は cache/ に保存する。
 
-        estimator: F0 の方式。省くと選んでいる方式（`f0.resolve_estimator`。画面の「ピッチ検出の方式」）。
+        estimator: F0 の方式。省くとこのトラックで明示した方式（`estimator_pref`）、無ければ選んでいる方式
+        （`f0.resolve_estimator`。画面の「ピッチ検出の方式」）。
         保存した解析が別の方式のものなら、テイクの F0 から解析し直す（ガイドの解析は方式ごとの鍵付きの保存）。
 
         stage: 段の名前（"take_f0" / "lyrics" / "guide_f0" / "alignment" / "onsets" / "phonemes"）を
@@ -1120,7 +1139,7 @@ class Project:
             else:
                 self._save_analysis()
 
-        estimator = f0mod.resolve_estimator(estimator)
+        estimator = f0mod.resolve_estimator(estimator if estimator is not None else self.estimator_pref)
         publish = not self.background   # 今の組み合わせを指す写しを書くか（裏の準備では書かない）
         advance(0.0)
         t0 = now_iso()
@@ -1345,7 +1364,7 @@ class Project:
         analyze_take はこのときジョブにせず、裏の準備にも合流せずにすぐ返す（issue #63）。見るもの:
         テイクの解析・歌詞の推定（済みか、推定できない）・ガイドの解析と対応付け（鍵付きの保存）・
         発音の頭・音素（今の歌詞の鍵付きの保存か、同じ入力で失敗したことを覚えているか）。"""
-        estimator = f0mod.resolve_estimator(estimator)
+        estimator = f0mod.resolve_estimator(estimator if estimator is not None else self.estimator_pref)
         take_cache = self._cache_path("take-analysis.json")
         if not os.path.exists(take_cache):
             return False
@@ -1552,6 +1571,9 @@ class Project:
     def take_notes(self):
         """テイクのノート（解析の結果に、編集リストの分割 `split` / 結合 `merge` を当てたもの）。"""
         self.ensure_analyzed()
+        return self._notes_with_edits()
+
+    def _notes_with_edits(self):
         base = self._take_notes or []
         ops = [e for e in self.edits if e.kind in ("split", "merge")]
         if not ops:
@@ -1574,12 +1596,55 @@ class Project:
     @property
     def guide_notes(self):
         self.ensure_analyzed()
+        sg = self.score_guide_notes()
+        if sg is not None:
+            return sg
         return self._guide_notes or []
+
+    def score_guide(self):
+        """ガイドが譜面から作った合成音（`score_guide.write` の印がある）なら、その印。無ければ None。"""
+        g = self.guide
+        if not g or not g.get("path"):
+            return None
+        from .. import score_guide as SG
+        return SG.read(g["path"])
+
+    def score_guide_notes(self):
+        """譜面ガイドのノート（ガイドの秒）。音から分割したノートの代わりに使う（同じ高さが続くノート・
+        1 半音の短い音も譜面どおりに分かれる）。譜面ガイドでなければ None。"""
+        d = self.score_guide()
+        if d is None:
+            return None
+        g = self.guide
+        key = (id(d), int(g.get("offset_frames") or 0), int(g["frames"]))
+        if getattr(self, "_sg_notes", None) is not None and self._sg_notes[0] == key:
+            return self._sg_notes[1]
+        from .. import score_guide as SG
+        ns = SG.guide_notes(d, offset_frames=int(g.get("offset_frames") or 0), sr=int(g["sr"]),
+                            duration_sec=float(g["frames"]) / float(g["sr"]))
+        self._sg_notes = (key, ns)
+        return ns
 
     @property
     def alignment(self):
         self.ensure_analyzed()
         return self._alignment
+
+    def _note_quick(self, note_id):
+        """編集の範囲を引く用の `note()`。解析を読み込み済みなら、ファイルの版を確かめ直さずに引く
+        （編集リストの範囲を求めるたびに音声ファイルの版を確かめていて、編集の多いトラックで 1 回の
+        再合成の前に stat が 1000 回を超えていた。クラウドの仮想ドライブで 1 秒以上）。版の確かめは
+        呼び出し元のツールの頭（`ensure_analyzed`）で済んでいる。"""
+        if self._take_f0 is None:
+            return self.note(note_id)
+        ns = self._notes_with_edits()
+        idx = getattr(self, "_note_index", None)
+        if idx is None or idx[0] is not ns:
+            idx = self._note_index = (ns, {n.id: n for n in ns})
+        n = idx[1].get(note_id)
+        if n is None:
+            return self.note(note_id)
+        return n
 
     def note(self, note_id):
         for n in self.take_notes:
@@ -1902,7 +1967,7 @@ class Project:
 
     def edit_span(self, edit):
         if edit.target.type == "note":
-            n = self.note(edit.target.note_id)
+            n = self._note_quick(edit.target.note_id)
             return n.start_sec, n.end_sec
         return float(edit.target.start_sec), float(edit.target.end_sec)
 
@@ -2275,4 +2340,4 @@ def _default_project_dir(clip, sha=None):
         info = sf.info(path)
         sr, total = int(info.samplerate), int(info.frames)
     off, n = M.resolve_range(clip, sr, total)
-    return os.path.join(PROJECTS_ROOT, "%s-%s%s" % (stem, key, M.range_suffix(off, n, total)))
+    return os.path.join(projects_root(), "%s-%s%s" % (stem, key, M.range_suffix(off, n, total)))

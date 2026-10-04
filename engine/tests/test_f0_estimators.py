@@ -95,10 +95,12 @@ def test_resolve_estimator(monkeypatch):
     F.set_preferred_estimator(None)
     monkeypatch.setenv(F.ESTIMATOR_ENV, "praat")
     assert F.resolve_estimator() == "praat"
-    assert F.same_estimator("gliss", "proto1", "gliss")
-    assert not F.same_estimator("gliss", None, "gliss")          # 版が違う（前の試作）: 作り直す
+    v = F.estimator_version("gliss")
+    assert F.same_estimator("gliss", v, "gliss")
+    assert not F.same_estimator("gliss", "proto1", "gliss")      # 前のモデル（試作）の解析: 作り直す
+    assert not F.same_estimator("gliss", None, "gliss")          # 版が違う: 作り直す
     assert not F.same_estimator("rmvpe", None, "praat")
-    assert F.same_estimator("gliss", "proto1", "auto") and F.same_estimator("rmvpe", None, "auto")
+    assert F.same_estimator("gliss", v, "auto") and F.same_estimator("rmvpe", None, "auto")
 
 
 def test_bundled_model_exists():
@@ -175,10 +177,31 @@ def test_mcp_set_f0_estimator_and_analyze_take(tmp_path, monkeypatch):
         assert _cents(r["f0"]["median_hz"], 220.0) < 300      # 2 つの音の中央値（220 Hz と 293.7 Hz の間）
         r = m.analyze_take(estimator="gliss", background=False)
         assert r["ok"] and r["f0"]["estimator"] == "gliss", r
-        r = m.analyze_take(background=False)                   # 選んでいる方式（praat）に戻る
+        r = m.analyze_take(background=False)                   # 明示した方式はそのトラックの方式として残る
+        assert r["f0"]["estimator"] == "gliss"
+        assert m.set_f0_estimator("praat")["ok"]               # 選び直すと全体の方式（praat）に戻る
+        r = m.analyze_take(background=False)
         assert r["f0"]["estimator"] == "praat"
         assert m.analyze_take(estimator="nope", background=False)["ok"] is False
         assert m.set_f0_estimator("nope")["ok"] is False
     finally:
         m.set_f0_estimator("rmvpe")
         m._state.update(project=None, session=None, track=None)
+
+
+def test_gliss_version_follows_model_file(tmp_path, monkeypatch):
+    """Gliss の方式の版は、モデルファイルの SHA-256 から決まる（モデルを替えたら前の解析を使い回さない）。"""
+    import hashlib
+    v = F.estimator_version("gliss")
+    with open(F.GLISS_F0_PATH, "rb") as f:
+        sha = hashlib.sha256(f.read()).hexdigest()
+    assert v == "m-" + sha[:12]
+    other = tmp_path / "other.onnx"
+    other.write_bytes(b"another model")
+    monkeypatch.setattr(F, "GLISS_F0_PATH", str(other))
+    v2 = F.estimator_version("gliss")
+    assert v2 != v and v2.startswith("m-")
+    assert not F.same_estimator("gliss", v, "gliss") and F.same_estimator("gliss", v2, "gliss")
+    other.write_bytes(b"third model!!")                           # 同じ場所で中身が変わっても取り直す
+    assert F.estimator_version("gliss") not in (v, v2)
+    assert F.estimator_version("praat") == "1" and F.estimator_version("rmvpe") is None

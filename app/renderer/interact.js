@@ -32,6 +32,7 @@ import {
 } from './edits.js';
 import { G, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
 import { startPreview, stop, stopPreview, updatePreview } from './audio.js';
+import { ARA, araLoop, araLoopHold, araSeek } from './ara.js';
 import { status } from './engine.js';
 import { closeMenu, editorMenu, menuOpen } from './menus.js';
 import { runCommand, wheelAction } from './commands.js';
@@ -349,6 +350,7 @@ function onMove(e) {
     const t1 = clamp(T(px(e)), 0, totalSec());
     if (Math.abs(e.clientX - dr.x0) > 3) {
       S.loop = [Math.min(dr.t0, t1) + S.off, Math.max(dr.t0, t1) + S.off];   // ループはタイムラインの秒
+      if (ARA) araLoopHold();
       render();
     }
   }
@@ -411,9 +413,12 @@ function endDrag(e) {
   }
   if ((dr.type === 'box' || dr.type === 'lane') && !dr.moved && !dr.shift) S.sel = [];
   if (dr.type === 'scale' && !(S.loop && Math.abs(e.clientX - dr.x0) > 3)) {
-    S.loop = null;
+    if (!ARA) S.loop = null;               // プラグインのループは DAW のもの（クリックでは解除しない）
     S.head = dr.t0 + S.off;                // 再生位置はタイムラインの秒（上下で共通）
+    if (ARA) araSeek({ track_id: S.session?.current, sec: dr.t0 });   // DAW の再生位置も動かす（編集の秒）
     if (S.playing) stop();
+  } else if (ARA && dr.type === 'scale') {
+    araLoop({ track_id: S.session?.current, a: S.loop[0] - S.off, b: S.loop[1] - S.off });   // DAW のループ（編集の秒）
   }
   render();
 }

@@ -203,11 +203,13 @@ def build(take_sec, guide_sec, alignment, take_ids=None, guide_ids=None):
             out.skipped[tid[i]] = "ガイドの頭には別のテイクの頭の方が近い（1 対多）"
             continue
         cand.append((tid[i], float(S[i]), gid[j], float(G[j])))
-    cand = _same_timeline_pairs(out, cand, dtw_miss, S, G, tid, gid)
+    tl = (getattr(al, "info", None) or {}).get("timeline") or {}
+    known = float(tl["offset_sec"]) if tl.get("same") else None
+    cand = _same_timeline_pairs(out, cand, dtw_miss, S, G, tid, gid, known=known)
     return _model(out, cand, positions=(S, G))
 
 
-def _same_timeline_pairs(out, cand, idx, S, G, tid, gid):
+def _same_timeline_pairs(out, cand, idx, S, G, tid, gid, known=None):
     """DTW で組めなかった頭を、**同じ時間軸の素材**なら位置で組む。
 
     DTW の組の差（テイク − ガイド）がそろっている（中央絶対偏差 ≤ `SAME_MAD_SEC`、
@@ -218,14 +220,22 @@ def _same_timeline_pairs(out, cand, idx, S, G, tid, gid):
 
     同じ時間軸なら、差が全体のずれから `LOCAL_SWITCH_SEC` を超えて離れた DTW の組は
     DTW が外れた所（テイクが歌っていない所の多いファイルで、別のフレーズに写った所）なので、
-    その頭も位置で組み直す。返り値は組の候補の全体。"""
-    if len(cand) < SAME_MIN:
-        return cand
+    その頭も位置で組み直す。返り値は組の候補の全体。
+
+    known: 対応付け（`align.estimate_timeline`・譜面ガイド）が同じ時間軸と判定した全体のずれ。あれば DTW の組の
+    そろい方を確かめずに同じ時間軸とみなす（DTW の組が少ない・ばらつく素材でも位置で組む）。"""
     r = np.array([c[1] - c[3] for c in cand])
-    og = _mode_offset(r)
-    inl = np.abs(r - og) <= LOCAL_SWITCH_SEC
-    if inl.sum() < SAME_MIN or inl.mean() < SAME_FRAC or _mad(r[inl]) > SAME_MAD_SEC:
-        return cand
+    if known is not None:
+        near = r[np.abs(r - known) <= LOCAL_SWITCH_SEC] if len(r) else r
+        og = _mode_offset(near) if len(near) >= LOCAL_MIN else float(known)
+        inl = np.abs(r - og) <= LOCAL_SWITCH_SEC
+    else:
+        if len(cand) < SAME_MIN:
+            return cand
+        og = _mode_offset(r)
+        inl = np.abs(r - og) <= LOCAL_SWITCH_SEC
+        if inl.sum() < SAME_MIN or inl.mean() < SAME_FRAC or _mad(r[inl]) > SAME_MAD_SEC:
+            return cand
     out.same_timeline = True
     pos = {v: k for k, v in enumerate(tid)}
     for c, ok in zip(cand, inl):
@@ -311,6 +321,24 @@ def _model(out, cand, positions=None):
     cs = np.array([c[1] for c in cand])
     cr = np.array([c[1] - c[3] for c in cand])
     og = _mode_offset(cr)
+    if abs(og) > LOCAL_MAX_SEC:
+        # タイムラインから `LOCAL_MAX_SEC` を超えて離れた全体のずれは、十分な組がそろって支えるときだけ使う。
+        # 組が少ない・ばらつくときは DTW が外れている（声の少ないテイクで −22 秒と出た）ので、タイムライン上の
+        # 位置（ずれ 0）の近くの組だけで決める
+        near_og = np.abs(cr - og) <= LOCAL_SWITCH_SEC
+        if near_og.sum() < SAME_MIN or near_og.mean() < SAME_FRAC:
+            keep = np.abs(cr) <= LOCAL_SWITCH_SEC
+            for c, ok in zip(cand, keep):
+                if not ok:
+                    out.skipped[c[0]] = ("DTW の組がタイムラインから %.0f ms 離れ、全体のずれを支える組が足りない"
+                                         % ((c[1] - c[3]) * 1000))
+            cand = [c for c, ok in zip(cand, keep) if ok]
+            out.n_candidates = len(cand)
+            if not cand:
+                return out
+            cs = np.array([c[1] for c in cand])
+            cr = np.array([c[1] - c[3] for c in cand])
+            og = _mode_offset(cr)
     # 合わせる基準（issue #61）: 全体のずれが小さい（`TIMELINE_MAX_SEC` 以内）なら、それは歌い手の走り・もたり
     # （とトラックの位置ずらし）なので、**タイムライン上に置いたガイドの位置そのもの**（ずれ 0）へ合わせる。
     # 以前は全体のずれを足した位置へ合わせていたので、テイクが全体に 30 ms 遅れていれば、ガイドに合っていた

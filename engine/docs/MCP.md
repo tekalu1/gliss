@@ -2,8 +2,9 @@
 
 Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジンを MCP（stdio）で公開する。サーバーの名前は `gliss`（Python のパッケージは内部名の `vocal_engine` のまま）。
 Claude Code などの MCP クライアントから
-「測る／直す／確かめる」ができる。ツールは 65 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
-プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、区間の聞き取り（音声認識）の 3 個は §1-1）。
+「測る／直す／確かめる」ができる。ツールは 80 個（うちトラック（複数トラックのセッション）・テンポの 12 個は §3-2、
+プロジェクトのファイル（新規・開く・保存）の 5 個は §3-3、DAW（ARA プラグイン）専用の 9 個は §3-4、DAW の中の Gliss の文書を
+外部の AI から操作する 3 個は §3-5、区間の聞き取り（音声認識）の 3 個は §1-1）。
 
 起動:
 
@@ -34,9 +35,11 @@ open_project(take_path, guide_path?, lyrics?, guide_lyrics?)   ← テイクの 
      ├ set_fade                                             ← ノートのフェードイン／アウト（音量だけ）
      ├ move_boundary / stretch / move_note                  ← 直す（タイミング。後ろはずらさない）
      ├ list_connections / set_connection                    ← 隣との接続 / 切り離し（となだらかさ）
-     ├ correct_to_guide(pitch_strength, timing_strength, match_pitch_shape) ← ガイドへ寄せる
+     ├ correct_to_guide(pitch_strength, timing_strength, pitch_mode) ← ガイドへ寄せる（pitch_mode="contour" = 区間カーブ）
+     ├ apply_edits(edits=[...])                             ← 音程の編集をまとめて当てる（取り消し 1 回）
      ├ plan_edit → apply_plan                               ← 計画を作って確定（画面が使う）
      └ render_preview / render_region / render_audition / render_view / remeasure / list_changes   ← 確かめる
+          ├ measure_against_guide(range)  ← ノートごと・ガイドの区間ごとの残差（before / edited / after）
           └ undo() / redo()               ← 曲で 1 本の履歴を戻す（画面の Ctrl+Z と同じ。§2-9）
 ```
 
@@ -90,7 +93,7 @@ undo()                        # 修正を戻す
 |---|---|---|---|
 | `take_path` | string | 必須 | 編集したい音声（WAV）の絶対パス |
 | `guide_path` | string | null | ガイドボーカル。あると `list_deviations` / `correct_to_guide` が使える |
-| `project_dir` | string | null | 省略時は `<repo>/projects/<名前>-<sha8>/`（配布版のエンジン exe は `%LOCALAPPDATA%\Gliss\projects`） |
+| `project_dir` | string | null | 省略時は `<repo>/projects/<名前>-<sha8>/`（配布版のエンジン exe は `%LOCALAPPDATA%\Gliss\projects`。`VOCAL_ENGINE_PROJECTS` で変えられる。それを渡さず `VOCAL_ENGINE_WORK_DIR` を渡したエンジンは `<作業場所>/projects`） |
 | `reuse` | bool | true | 同じ素材なら既存プロジェクト（編集リスト）を開き直す |
 | `lyrics` | string | null | テイクの歌詞。**かな・カナ・漢字混じりのどれでもよい**（段階2） |
 | `guide_lyrics` | string | null | ガイドの歌詞。**あるとタイミング補正の精度が上がる**（§1 の `set_lyrics`） |
@@ -238,6 +241,7 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 2 回目以降は読み直すだけ。
 
 `estimator`（F0 の方式）を省くと、選んでいる方式（画面の 編集 > ピッチ検出の方式・`set_f0_estimator`）で解析する。
+**`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator` で選び直すと、全体の方式に戻る。
 
 | `estimator` | 中身 |
 |---|---|
@@ -269,6 +273,18 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 あっても落ちない（issue #32。前は `DTW cost matrix C has NaN values` で解析全体が失敗し、ガイドが重ならなかった）。
 それでも対応付けが失敗したときは、解析全体は落とさず**タイムライン上の位置のままの対応**で続け、返り値に
 `guide_warning`（理由）、`alignment.dtw.stage = "fallback"` を入れる（キャッシュには書かず、次の解析で取り直す）。
+
+**同じ時間軸の素材は DTW を帯に限る**（`analysis/align.py: estimate_timeline`。`docs/guide-coverage.md` の
+「同じ時間軸の素材」）: 先にテイクとガイドの発音の強さの包絡を相互相関して**全体のずれ**を測り、声のある 8 秒の窓ごとの
+ずれが全体のずれに 150 ms 以内でそろっていれば（窓 3 つ以上・6 割以上）、DTW の経路を「全体のずれ ± 0.3 秒」の帯の中に
+限る（同じ DAW の曲から書き出したテイクとガイド。曲の一部だけ歌ったテイクで、DTW が別のフレーズや 1 拍隣に写るのを防ぐ）。
+返り値の `alignment.dtw.timeline`（`offset_sec`・`same`・`loose`・`windows`・`agree`）と `band_sec`。窓のそろいが足りなくても、
+全体のずれが 150 ms 以内でそろう窓が 25% 以上あれば「たぶん同じ時間軸」（`loose`）として ±1 秒の帯を掛ける（掛け声だけの
+テイク・歌い回しの違う所の多いテイクで、DTW が何十秒も離れた所へ写るのを防ぐ）。短い素材（窓が足りない）・別の演奏は
+以前どおり帯を掛けない。「ガイドに合わせる」の全体のずれが 3 秒を超えるときは、そのずれの近くの組が 8 組以上・6 割以上
+あるときだけ使い、足りなければタイムライン（ずれ 0）の近くの組だけで決める（声の少ないテイクで −22 秒と出て、何も動かなかった）。対応付けの中身が変わったのでキャッシュの鍵を上げた（前のプロジェクトは `analyze_take` で
+対応付けだけ取り直す）。譜面ガイド（§3-2 の `make_score_guide`）は測らずにずれ 0 の帯にする（`timeline.given: true`）。
+帯を掛けたとき「ガイドに合わせる」の発音の頭の組は、DTW の組の数・そろい方を問わず位置でも組む（同じ時間軸とみなす）。
 
 **裏の準備に合流する**（issue #63。§3-2 の「裏の準備」）: セッションのトラックで、そのトラックの準備がまだ済んで
 いなければ、準備を最優先にして終わりを待ち、キャッシュを読むだけの解析をして返す（最初からやり直さない。計算は 1 回）。
@@ -334,6 +350,20 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 **歌詞があると `timing`（音素境界ごとのずれ）が付く**（段階2）。
 `correct_to_guide` のタイミングが見ているのは発音の頭どうしの組（`plan_edit(op="guide")` の JSON の `timing`。
 `docs/guide-timing.md`）。ここの timing_ms はノートの頭と、ガイドのノートの頭を画面に描く位置に置いたものとの差。
+`deviations` は**元の音（編集前）**のずれ（補正しても変わらない）。
+
+**`onset_timing`** が `correct_to_guide` のタイミングと同じ物差し（発音の頭の組）。`before_ms` は元の音、`edited_ms` は
+今の編集で移した位置（時間の写像。再合成しない）のガイドの頭とのずれ（+ がテイクの方が遅い）。タイミングを
+合わせたら `edited_ms` が下がる。`onsets` は `edited_ms` がしきい値を超える組（多い順に `limit` まで）。
+ノートごとの残差・再合成して測り直した値は `measure_against_guide`（§3）。
+
+```json
+{"onset_timing": {"pairs": 41, "before_ms": {"n": 41, "abs_median": 21.0, "abs_p90": 48.5, "abs_max": 92.0},
+                  "edited_ms": {"n": 41, "abs_median": 0.0, "abs_p90": 4.0, "abs_max": 35.0},
+                  "over_threshold_before": 12, "over_threshold_edited": 1,
+                  "onsets": [{"take_sec": 2.196, "edited_sec": 2.25, "target_sec": 2.215,
+                              "before_ms": -19.0, "edited_ms": 35.0}]}}
+```
 
 ```json
 {"timing": {"unit": "音素境界", "source": "guide_phonemes", "matched": 35, "total": 35,
@@ -466,6 +496,10 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 結合（`merge_notes`）は、境目にあった無音の挿入（切り離して縮めた隙間の `silence`）も外す。外したぶんは結合した
 ノート全体を伸ばして埋め、頭と尻の編集後の位置は変えない（後ろはずらさない）。返り値の `removed_silence`。
 
+`set_pitch_curve(mode="offset")`・`shift_pitch` を範囲で別々に当てた**境目の段差**にも、自動のなだらかさ（最大 250 ms、
+ノートの長さの半分まで。`set_transition`）が掛かる。隣り合う範囲に大きく違う量を入れると、短い方の量が長い方へにじむ。
+1 本の曲線の中で値をなだらかにつないで渡せば段差にならない（`correct_to_guide(pitch_mode="contour")` はそうしている）。
+
 #### `set_pitch_curve(points, mode="draw", ramp_ms?)` — 鉛筆
 
 `points = [[素材の秒（編集前）, MIDI ノート番号], ...]`。その時間範囲のピッチを**描いた音程に置き換え**、
@@ -519,7 +553,7 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
            "min_phoneme_ms": 20.0}}
 ```
 
-### `correct_to_guide(start_sec?, end_sec?, pitch_strength?, timing_strength?, threshold_cents?, threshold_ms?, note_ids?, match_pitch_shape?)`
+### `correct_to_guide(start_sec?, end_sec?, pitch_strength?, timing_strength?, threshold_cents?, threshold_ms?, note_ids?, match_pitch_shape?, pitch_mode?, edited_notes?, max_shift_cents?)`
 
 画面の「ガイドに合わせる」と**同じ計画**（`plan_edit(op="guide")`）を作り、強度を掛けて確定する。
 1 つの changeset。強度 0〜1（1 = ガイドどおり）。既定は `pitch_strength=0.7` / `timing_strength=0.0`
@@ -530,7 +564,9 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
   対応の無いノートは音程を動かさない。
 - **ピッチ 100%**: 既定の `match_pitch_shape=true` は、対応する発音の頭を基準にノート内の時刻を比例で写し、
   有声フレームの F0 をガイドの F0 へ近づける。強度は Hz で線形に掛ける。ガイドが無声・対応が不確かな区間は動かさず、境目はなだらかにつなぐ。
-  `false` では従来どおり、ノートの中心を一定量ずらして揺れの形を保つ。
+  `false` では従来どおり、ノートの中心を一定量ずらして揺れの形を保つ。テイクの 1 ノートに高さの違うガイドのノートが
+  2 つ以上重なる所（**1 対多**。返り値の `one_to_many`）は、組の 1 つの音ではなく、そのノートの有声フレームでの
+  ガイドの F0 − テイクの F0 の中央値だけずらす（以前は最も重なる音へ寄せ、動くガイドに対して平らなテイクを −230 セント外した）。
 - **タイミング 100%**（issue #12 で変更。`docs/guide-timing.md`）: テイクの**発音の頭**（音の立ち上がり。
   両方に歌詞があれば音節の頭）を、1 対 1 に対応する**タイムライン上のガイドの発音の頭**へ（トラックの位置
   ずらしも含む。issue #61）。全体のずれ（頭どうしの差の最頻値）が 150 ms を超える、置き場所の違う素材だけ
@@ -544,6 +580,23 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
   無いフレーズは動かさない。テイク・ガイドとも**確定の**歌詞がある所は、休みの手前の音節の終わりも
   基準点にする（推定の読みは使わない）。
 - **しきい値**（既定 0 = 全部）は計画を作るときに掛ける。プレビューと確定で同じに効く。
+- **今の（編集後の）音程から寄せる**: 鉛筆（`set_pitch_curve(mode="draw")`）・`shift_pitch` で直したノートは、直した線から
+  残りの差だけ動く（以前は `match_pitch_shape=false` が鉛筆を含まない中心から差を求め、鉛筆の線に二重に足していた）。
+  `edited_notes="skip"` は音程を直し済みのノート（音程の編集が掛かっているノート）の音程を動かさない（タイミングは動かす。
+  結果の `skipped_edited_notes`）。既定は `"adjust"`。
+- **`pitch_mode`**: `"shape"`（= `match_pitch_shape=true`。既定）/ `"note"`（= `false`）/ **`"contour"`（区間カーブ）**。
+  contour はノートの対応を使わず、**ガイドの平らな区間**（ガイドの音程ノート。タイムライン上のガイドの位置）ごとに、区間の
+  中央部（両端 2 割を除く）のガイドの音程の中央値と、同じ時刻に鳴るテイクの今の音程（鉛筆・なだらかさ込み）の中央値の差を
+  測り、区間ごとに一定・隣の区間とは 50 ms 以上かけて直線でつないだ**ずらし量カーブ**を、フレーズ（区間の間が 0.25 秒以下で
+  続く所）ごとに 1 本の `pitch_curve` にして当てる（両端は 0 から 20 ms で入るので範囲の端に段差を作らない）。確かな発音の頭の組の
+  無い所・音のつながったハモリ・細かく切れたノート・1 つのノートに高さの違うガイドのノートが重なる所でも効く。区間の中の揺れ
+  （ビブラート・しゃくり）は残る。テイクが区間の半分も歌っていない区間と、差が `max_shift_cents`（contour の既定 600）を超える
+  区間は動かさない（`contour.skipped_segments`）。同じ範囲に前からある `pitch_curve` は後勝ちで消えるので、その値をカーブに
+  足し込む。タイミングも一緒に当てるときは、当てた後の時間で区間を測り、**1 つの changeset** にする。
+  例（ハモリ 1 本、133 秒・ガイドの区間 318）: 区間の残差の中央値 21.9 → 1.1 セント（再合成して測り直した値。±10 セント以内
+  26% → 95%）。同じ素材で `"note"` は 13.8 セント（±10 以内 42%）。
+- `max_shift_cents`: これを超える寄せは飛ばす（別の音・オクターブ違いのテイクを間違って寄せない）。`"note"` は結果の
+  `skipped_large_notes`、`"contour"` は `contour.skipped_segments`。
 
 ```json
 {"ok": true, "changeset": "c001", "x": 0.7, "pairs": 10, "matched_notes": 14,
@@ -558,8 +611,22 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
  "window_sec": [0.0, 3.48], "next": "remeasure で残ったずれを見る。戻すなら undo('c001')"}
 ```
 
+contour の結果の `contour` = `{guide_segments, moved_segments, phrases, skipped_segments: [{guide, cents?, reason}],
+abs_cents_median_before}`。
+
 `repaired` は 100% で守れない制約（追い越し・短すぎ）を直した回数、`reach` は直しきれずに
 全体を縮めたときの到達率（1.0 = ガイドどおりに届く）。
+
+**`fit`（当てる前と後の当てはまりの予測。`project/guide_fit.py`）**: 計画の物差し（発音の頭の組・音程の対応）とは別の
+物差しで、補正が悪化させた所を見つける（組を取り違えた所も、計画の物差しでは「合った」と出るため）。音は作らない予測で、
+確かめるのは `remeasure`。
+
+- `fit.timing` = `{phrases, corr_before, corr_after, worse:[{start_sec, end_sec, notes, before, after}]}`: フレーズごとの、
+  テイクの発音の強さの包絡（30 ms でならす）とガイドの包絡の相関（長さで重み付けた平均）。after は計画を
+  `timing_strength` で当てた後の時間写像で移して測る。`worse` は相関が 0.05 以上下がったフレーズ（密なラップで隣の音節と組んだ所など）
+- `fit.pitch` = `{notes, abs_cents_median_before, abs_cents_median_after, worse:[{note, start_sec, before_cents, after_cents}]}`:
+  ノートごとのテイクの F0 とガイドの F0（画面に描くガイドの位置のフレーム）の差の絶対値の中央値。`worse` は 30 セント以上増えたノート
+- どちらかに `worse` があれば返り値の `warning` にも出す（その所は undo して手で直す）
 
 `correspondence` は対象の音程ノートごとの対応（画面の対応線・破線の丸・ホバーの説明と同じ中身）:
 
@@ -575,7 +642,11 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 `timing_possible=false`（確かな頭の組が 1 つも無いガイド。別の演奏など）のときは `timing_message`
 （「このガイドとはタイミングを合わせられない…」）が付き、タイミングは 1 つも動かない。
 
-### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?)` / `apply_plan(plan_id, x?, pitch?, replaces?)`
+### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?, fit?)` / `apply_plan(plan_id, x?, pitch?, replaces?)`
+
+`op="guide"` で `fit=true` なら、タイミング・ピッチとも 100% で当てたときの `fit`（上の `correct_to_guide` と同じ）も返す
+（包絡を測るので初回は 1〜2 秒かかる。画面は使わない）。計画の `info.one_to_many` は 1 対多のノート
+（`{note, guide:[id], pitch_midi, source}`）。
 
 **計画を作る／確定する**。画面はドラッグの開始（端・ノートの移動）と「ガイドに合わせる」を
 開いた時点で `plan_edit` を呼び、離したら `apply_plan` を呼ぶ。
@@ -637,7 +708,7 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 - `list_notes` / `export_view_data` の `fade_in_sec` / `fade_out_sec` に今の値（ノートに収めたもの）が出る。
   `reset_to_original` でそのノートのフェードも外れる。
 
-### `reset_to_original(note_ids?, start_sec?, end_sec?, boundary_ids?)`
+### `reset_to_original(note_ids?, start_sec?, end_sec?, boundary_ids?, whole_track?)`
 
 `reset_to_original` はピッチの編集を外し（範囲のピッチ編集と鉛筆は、そのノートにかかる部分だけ外す）、タイミングは頭・尻を元の位置へ戻す計画で組み直す
 （接続された隣は伸び縮みで合わせる。後ろはずれない）。戻したノートは原音のサンプルそのもの。
@@ -645,6 +716,28 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 `boundary_ids`（`get_phonemes` の `boundaries[].id`）を渡すと、その音素の境目を動かした編集（`move_boundary`）を外す
 （画面の音素の右クリック「子音｜母音の境目を元に戻す」。`export_view_data` の `phonemes.boundaries[].moved`）。
 これも取り消せる（`undo`）。
+
+**範囲（`start_sec` / `end_sec`）で渡したとき**は、範囲（とそこにかかる音程のノート）の音程・タイミング・無音・フェード・接続・
+なだらかさの編集を**全部外す**。範囲の中は書き出しで元のファイルとサンプル一致になる。タイミングの編集（stretch / crop / silence /
+move_boundary）は、範囲の端をまたぐ組があれば、時間の対応が元どおり（編集後の秒 = 編集前の秒）の所まで範囲を広げて丸ごと
+外す（返り値の `timing_span_sec`・`widened`）。補う伸縮は足さない。以前はノートの頭・尻を元の位置へ戻す計画で組み直していたので、
+解析し直してノートの切れ目が変わった後の古い編集（音素単位の伸縮など）を外しきれず、補う伸縮を足して編集が増え、
++45 ms のずれが残った。分割・結合（ノートの切れ目）は残す。`whole_track=true` はトラック全体（0〜素材の長さ）を同じ規則で戻す
+（取り消し 1 回）。ノート（`note_ids`）だけで渡したときは今までどおり（接続された隣は伸び縮みで合わせる）。
+
+### `apply_edits(edits, label?, group?)` — 音程の編集をまとめて当てる
+
+複数の `shift_pitch` / `set_pitch_curve` を **1 つの changeset**（取り消し 1 回）で当てる。中身と順番は 1 件ずつ呼んだのと同じ
+（鉛筆の後のずらしは鉛筆の線にも足される）。1 件でも不正なら何も当てずに `ok: false`（`error` に `edits[i]`）。2000 件まで。
+`measure_against_guide(suggest_cents=…)` の `suggested_edits` をそのまま渡せる。
+
+```json
+// apply_edits(edits=[{"op": "shift_pitch", "cents": -12.5, "note_id": "n012"},
+//                    {"op": "shift_pitch", "cents": 8, "start_sec": 41.20, "end_sec": 41.38},
+//                    {"op": "set_pitch_curve", "mode": "offset", "points": [[0, 0], [0.2, -20]], "note_id": "n013"},
+//                    {"op": "set_pitch_curve", "mode": "draw", "points": [[42.10, 70.0], [42.30, 70.2]], "ramp_ms": 40}])
+{"ok": true, "changeset": "c014", "applied": 4, "replaced": 0, "total_edits": 37}
+```
 
 ### 2-9. 取り消し `undo(changeset_id?)` / `redo()` — 曲で 1 本の履歴（issue #16）
 
@@ -729,18 +822,19 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | ツール | 返すもの |
 |---|---|
 | `render_preview(start_sec?, end_sec?, backend?, name?)` | WAV のパス。**編集していない区間は原音のサンプルそのまま**、編集区間だけ 20 ms クロスフェードでつなぐ |
-| **`export_wav(path?, start_sec?, end_sec?, backend?, full_source?)`** | **DAW に戻す WAV。元と同じ sr / ビット深度 / ch / 長さ / 開始位置** |
+| **`export_wav(path?, start_sec?, end_sec?, backend?, full_source?, subtype?)`** | **DAW に戻す WAV。元と同じ sr / ビット深度 / ch / 長さ / 開始位置**（`subtype` でビット深度だけ変えられる） |
 | `render_region(start_sec?, end_sec?, backend?, channels?, path?)` | **区間 → PCM**（32 bit float の WAV のパス。`channels` の既定は `"all"`＝素材のチャンネルそのまま。Python の `render/region.py` の既定は `"mono"`）。長さが変わらず、中身は `export_wav` が同じ範囲に書くものと同じ。`source_start_sec`・`rendered_windows_sec`・`timing_sec` を返す（DAW 連携 段階 0） |
 | `render_audition(note_id, cents?, start_sec?, end_sec?, backend?)` | **画面向け**: つかんだノートのプレビュー音（issue #27）。ノートを `cents` 動かした**つもり**で範囲（既定はノートの範囲）を再合成したモノラルの WAV（`renders/audition.wav`。毎回上書き）のパス。**プロジェクトは書き換えない**。中身は `shift_pitch` を当ててから `render_region` したものと同じ |
 | `render_view(start_sec?, end_sec?, show_guide?, title?)` | ピアノロール PNG のパス（波形・テイク F0・ガイド F0・ノートの帯・編集区間） |
 | `export_view_data(start_sec?, end_sec?, peak_ms?, path?)` | **画面（UI）向け**の描画データ JSON のパス。**LLM 向けではない** |
-| `remeasure(start_sec?, end_sec?, backend?, keep_wav?)` | 編集後の音を測り直した結果。ガイドがあれば `deviation_summary.before/after` |
+| **`measure_against_guide(start_sec?, end_sec?, note_ids?, render?, threshold_cents?, threshold_ms?, suggest_cents?, limit?)`** | **補正の前後の残差**。ノートごと（`rows`）とガイドの平らな区間ごと（`summary.guide_segments`）に、元の音・今の編集・再合成して測り直した音の 3 つ。下の「補正の前後の残差」 |
+| `remeasure(start_sec?, end_sec?, backend?, keep_wav?)` | 編集後の音を測り直した結果。ガイドがあれば `deviation_summary.before/after`（タイミングはノートの頭で測る）と **`onset_timing`**（「ガイドに合わせる」が合わせる**発音の頭の組**ごとのガイドの頭とのずれ。`pairs`・`before`/`after` = `{n, abs_ms_median, abs_ms_p90, ms_median}`、+ はテイクが遅い。after は編集後の音から拾い直した頭。タイミングの補正が効いたかはこちらで見る） |
 | `list_changes(include_undone?)` | changeset と編集リストの一覧 |
 | `get_job(job_id)` | 長い処理の結果。`status`・`progress`・`cancellable`。裏の準備に合流した `analyze_take` は `joined`・`stage`・`stage_label` も（§1 `analyze_take`） |
 | `prep_status()` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない |
 | `pause_prep(paused?)` | 裏の準備を一時停止／再開（走っている段は最後まで進み、次の段の前で止まる。合流して待っているトラックは止めない） |
 | `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝選んでいる方式、`f0_estimator_effective`＝実際に使う方式、`f0_estimators`、`gliss_f0_model_found`） |
-| `set_f0_estimator(estimator?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。そのエンジンの既定で、曲は変えない）。この後の `analyze_take`・裏の準備がその方式で解析する。返り値の `effective` が実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
+| `set_f0_estimator(estimator?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。そのエンジンの既定で、曲は変えない）。この後の `analyze_take`・裏の準備がその方式で解析する（`analyze_take(estimator=…)` でトラックごとに明示した方式は、ここで選び直すと外れる）。返り値の `effective` が実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
 
 `backend` は `praat`（既定。Praat（praat-parselmouth）の TD-PSOLA）、`psola`（自前の TD-PSOLA）、`world` のどれか。
 praat-parselmouth が import できない環境では `praat` を頼んでも `psola` で再合成し、engine.log に警告を書く
@@ -765,6 +859,11 @@ praat-parselmouth が import できない環境では `praat` を頼んでも `p
   （返り値の `start_sec` = ソース上の開始秒）。`full_source=true` で**ソースと同じ長さ**
   （クリップの範囲だけ差し替え、他はソースのサンプルそのまま）。
 - 素材が 60 秒を超えると自動でジョブになる（`get_job` で取りに行く）。
+- **`subtype`** でビット深度を変えられる: `PCM_16` / `PCM_24` / `PCM_32` / `FLOAT`（32 bit float）/ `DOUBLE`。省略時は元と同じ。
+  変えても長さ・開始位置・BWF は元と同じで、編集していない所は元の値を変換しただけ（整数 → `FLOAT` は値が同じ。ビット数を
+  減らすと量子化される）。float → 整数で ±1.0 を超えるサンプルは切り詰めて `warnings` に数を書く。形式が受けない組
+  （FLAC に `FLOAT` など）はエラー。返り値の `subtype` は書いたもの、`source_subtype` は元。`same_as_source` から `subtype` は外れる。
+- 再合成でピークが 1.0 を超えた（元のピークより大きい。float の素材）ときは `warnings` に値と秒を書く（整数に直す DAW では切れる）。
 
 - **BWF（`bext` / `iXML`）を元から書き写す**（DAW 連携 段階 1。`vocal_engine/bwf.py`）。DAW は
   `bext` の TimeReference（録音・バウンスした位置。サンプル数）で「元の位置」を知るので、書き出した
@@ -837,6 +936,46 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
                        "after":  {"abs_pitch_cents_median": 148.7, "over_50_cents": 11}}}
 ```
 
+### `measure_against_guide` — 補正の前後の残差
+
+`remeasure` の `deviation_summary` は、編集後の音をノートに切り直してガイドと突き合わせるので、補正で音名がガイドとそろうと
+輪郭が外れていても良く見える。タイミングもノートの頭で測る。`measure_against_guide` は `correct_to_guide` と同じ物差しで測る:
+
+- **音程（ノートごと）**: 音程で対応するガイドのノートの中心との差（セント。+ がテイクの方が高い）。中心は有声のフレームの
+  MIDI の中央値。対応の無いノートは `guide: null` と `reason`。
+- **タイミング（ノートごと）**: ノートの頭の近く（頭の 60 ms 前〜尻）にある**発音の頭の組**（「ガイドに合わせる」が合わせる
+  1 対 1 の組）の、合わせる先（タイムライン上のガイドの頭）との差（ms。+ がテイクの方が遅い）。組の無いノートは
+  `onset_paired: false` と `timing_reason`（タイミングは測らない）。
+- **音程（ガイドの区間ごと）**: `summary.guide_segments` = ガイドの平らな区間の中央部で、ガイドの音程と同じ時刻に鳴るテイクの
+  音程の差（`pitch_mode="contour"` と同じ物差し）。ノートの切れ方に左右されない。`within_10` / `within_25` は ±10 / ±25 セント
+  以内の区間の割合（%）。
+
+それぞれ `before`（元の音）・`edited`（編集の中身から。再合成しない。音程は shift_pitch・曲線・鉛筆を足した中心、頭は時間の写像で
+移した位置）・`after`（`render=true`（既定）のとき、範囲を `render_region` と同じ中身で再合成し、解析と同じ F0 の方式・
+`onsets.detect` で測り直した値。頭は移した位置から 50 ms 以内のもの）。`rows[]` には `shape_abs_cents_median`（編集後の音と
+その時刻のガイドの音程の差のフレームごとの中央値）・`edited_start_sec` / `edited_end_sec`（編集後の秒）・`confidence`（解析の
+ノートの確信度）も入る。`summary` は全部のノートの |値| の中央値・90% 点・最大。
+
+- `threshold_cents` / `threshold_ms`: どちらかを超えるノートだけ `rows` に入れる（after → edited → before の順にある値を見る）。
+- `suggest_cents`: |残差| がこれ以上のノートに、打ち消す `shift_pitch` を `suggested_edits` に入れる（`apply_edits` にそのまま
+  渡せる。`render=true` なら after、false なら edited の値）。
+- 全部の行は `renders/measure-<id>.json`（`path`）にも書く。`rows` は `limit`（既定 300）まで。範囲が 10 秒を超えて再合成する
+  ときはジョブ（`get_job`）。
+
+```json
+{"ok": true, "range_sec": [40.0, 55.0], "total": 42, "returned": 42, "path": "...\\renders\\measure-1a2b3c4d.json",
+ "summary": {"notes": 42, "matched_notes": 39, "onset_paired_notes": 30,
+             "pitch_cents": {"before": {"n": 39, "abs_median": 55.8, "abs_p90": 120.4, "abs_max": 310.2},
+                             "edited": {"n": 39, "abs_median": 3.1, ...}, "after": {"n": 38, "abs_median": 6.4, ...}},
+             "timing_ms": {"before": {"n": 30, "abs_median": 20.0, ...}, "edited": {...}, "after": {...}},
+             "guide_segments": {"n": 35, "before": {"abs_median": 48.2, "within_10": 14.3, ...}, "after": {...}}},
+ "rows": [{"note_id": "n068", "start_sec": 41.0, "end_sec": 41.46, "edited_start_sec": 40.99, "edited_end_sec": 41.46,
+           "guide": "g031", "guide_note": "A#4", "pitch_cents": {"before": -48.1, "edited": -2.0, "after": -5.2},
+           "timing_ms": {"before": 15.0, "edited": 0.0, "after": 5.0}, "onset_paired": true,
+           "shape_abs_cents_median": 9.8, "confidence": 0.71}],
+ "suggested_edits": [{"op": "shift_pitch", "note_id": "n068", "cents": 5.2}]}
+```
+
 ## 3-2. トラック（複数トラックのセッション。issue #7・`docs/track-view.md`）
 
 1 曲ぶんの**複数トラック**（ボーカルのテイク複数・ガイド 1 本・伴奏）。`open_project(take_path)` で
@@ -860,11 +999,29 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
 | `remove_track(track_id, author?)` | セッションから外す（ファイルと、そのトラックの編集＝プロジェクトは消さない）。編集対象を外したら残りの最初のボーカルへ。ボーカルが 0 本になる外し方はできない。**同じファイルを `add_track` で足し直すと、前の id・前の編集のまま戻る**（最初のテイクも。issue #32） |
 | `set_track(track_id, name?, kind?, mute?, solo?, offset_sec?, index?, gain_db?, pan?, author?)` | 渡したものだけ変える。`gain_db` = 音量（dB。既定 0、−60〜+6 に丸め、−60 以下は無音 = −∞）、`pan` = 左右（−1〜+1、既定 0）。どちらも**再生（画面）だけ**に効き、書き出し（`export_wav`）・`render_tracks` の音のファイルには入らない。取り消しの対象外で、session（`.gliss`）には保存する。`offset_sec` で位置をずらす（負も可）。編集対象かガイドの位置が変わると開き直す（`reopened: true` → `analyze_take`）。`index` でトラックの並びの何番目に置くか（0 が一番上。範囲の外は端に丸める。issue #38。並びは見た目だけで、音・編集・ガイドとの対応は変わらない。取り消しの名前は「トラックの順番」） |
 | `set_guide_track(track_id?, author?)` | ガイドを指定（null で外す）。変わったら `analyze_take` |
+| `make_score_guide(path, track?, bpm?, start_sec?, use?, name?, author?)` | **譜面（MIDI / SVP）からガイドを作る**（下の「譜面ガイド」）。合成音の WAV のトラックを足し、`use=true`（既定）ならガイドに指定。変わったら `analyze_take` |
 | `split_track(track_id, sec, author?)` | クリップを 1 か所で分ける（切れ目を足す。`cuts`）。`sec` は**トラックの頭が 0 の秒**（タイムラインの秒 − `offset_sec`）。両端から 20 ms より内側だけ・もう切れている所は不可。音は変わらない。取り消しの名前は「クリップを分ける」 |
 | `join_track(track_id, sec, tolerance_sec?, author?)` | `sec` の近く（既定 50 ms 以内）の切れ目をつなぐ。両側が消えていれば消したまま、片側だけなら戻す。「クリップをつなぐ」 |
 | `mute_track_range(track_id, start_sec, end_sec, mute?, group?, author?)` | 区間を消す（`mute=true`。`mutes` に入る）／戻す（`false`）。同じ秒。範囲の外は丸め、重なる・接する区間は 1 つにまとまる。「部分のミュート」「部分を戻す」。続けて呼ぶとき（画面のなぞって消す）は `group` に同じ値を渡すと取り消し 1 回 |
 
 | `set_tempo(bpm?, numerator?, denominator?, start_sec?, clear?, group?, author?)` | 曲のテンポと拍子（画面の時間グリッド・スナップ・ルーラーの小節と拍。issue #18）。渡したものだけ変える。音は変わらない。下の「テンポ」 |
+
+**譜面ガイド**（`make_score_guide`。`engine/vocal_engine/score_guide.py`）: ガイドの WAV が無い・息や囁きで音程が
+取れない区間があるときに、譜面のノート列をガイドにする。編集対象のトラックを `analyze_take` してから呼ぶ。
+
+- **時間の頭**（譜面の 0 拍がタイムラインの何秒か）: テイクの F0 と譜面の高さが合う時間が最も長い位置（全域を 50 ms →
+  10 ms で探す）。そのあと譜面のノートの頭の近く（±80 ms）にあるテイクの発音の頭との差の中央値だけ寄せる（最大 60 ms。
+  発音の頭の検出は音の頭より後ろに出るので、合わせる先をそろえる）。返り値 `start_sec`（寄せた後）・`fit.pitch_start_sec`
+  （高さだけで合わせた値）・`fit.fit`（重なった時間のうち高さの合う割合）・`fit.onset_shift_ms`。`start_sec` を渡すと推定しない。
+- **トラック**: 省略するとテイクの高さに最も合うトラック（主旋律・ハモリ・オクターブ違い）。`candidates` に各トラックの点。
+- **テンポ**: 譜面のテンポ。テンポの無い MIDI は `bpm`、無ければセッションのテンポ（`set_tempo`）、それも無ければ 120 BPM
+  とみなして `warnings` に出す（`tempo_source` = `score` / `bpm` / `session` / `default_120`）。テンポの変わる譜面は `bpm` で読み直せない。
+- 出力: セッションのフォルダの `score-guides/<譜面の名前>-t<トラック>-<鍵>.wav`（48 kHz・float・タイムラインの 0 秒から
+  曲の長さ）と、鳴らしたノートの印 `….wav.score.json`。同じ高さが続くノートは尻を 30 ms 切って頭を立てる。
+- 印のある WAV がガイドのとき: **ガイドのノートは譜面のノートそのもの**（音から分割しない。同じ高さの連続・1 半音の短い音も
+  分かれる）、**ガイドの発音の頭は譜面のノートの頭**、対応付けは同じ時間軸（ずれ 0）の帯。ガイドの F0 は合成音から測る。
+  WAV を別のファイルで上書きした（長さが違う）ときは印を使わない。
+- 譜面に無い所（ラップ・せりふ）は対応が付かない（直らない）。`fit` が 0.3 未満なら `warnings`（トラック・テンポ・頭を確かめる）。
 
 トラックの追加・外す・位置・名前・種類・並び順・ガイドの指定・テンポ・クリップの分割・部分のミュートは**取り消せる**（§2-9。ミュート／ソロ・音量・パンは取り消しの対象外）。
 
@@ -975,14 +1132,134 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
 | ツール | 何をするか |
 |---|---|
 | `new_project(name?, take_path?, guide_path?, author?)` | 新しいプロジェクト（`kind: "untitled"`）。`take_path` を渡すと最初のトラック（ボーカル・編集対象）にする。**そのテイクの旧形式のプロジェクトがあれば、新しく作らずにそちらを開く**（`opened: "legacy"` か、保存済みなら `"gliss"`）。無題は保存するまで作業場所にだけある |
-| `load_project(path?, author?)` | 開く。**`path` を省くと Gliss の画面で今開いている曲**（と画面で編集中のトラック。§4-1 の bridge.json）を開き、返り値に `from_app: true`（画面で何も開いていなければ ok=false）。`path` は `.gliss`・旧形式のディレクトリかその `session.json` / `project.json`・無題の作業場所・音声ファイル（= `new_project(take_path)`）。返り値は `open_project` と同じ形に `document`・`opened`・`missing`・`recovered`・`backup` |
+| `load_project(path?, author?, fresh?)` | 開く。**`path` を省くと Gliss の画面で今開いている曲**（と画面で編集中のトラック。§4-1 の bridge.json）を開き、返り値に `from_app: true`（画面で何も開いていなければ ok=false）。`path` は `.gliss`・旧形式のディレクトリかその `session.json` / `project.json`・無題の作業場所・音声ファイル（= `new_project(take_path)`）。返り値は `open_project` と同じ形に `document`・`opened`・`missing`・`recovered`・`backup`。**`recovered: true`（作業場所に保存していない編集が残っていて、その続きから開いた）のときは `warnings` にも書く**（前に当てた補正が乗ったままなので、当て直すと二重になる）。`fresh=true`（`.gliss`）はその変更を捨てて保存した中身から開く（`discarded_unsaved: true`） |
 | `save_project(path?)` | 保存。`path` を渡すと名前を付けて保存（`.gliss` を付ける）。無題・旧形式は `path` が要る。作業場所が変わったら（`moved: true`）編集対象を開き直すので `analyze_take` |
-| `project_status()` | `document = {kind: "gliss" / "untitled" / "legacy", path, name, dirty, work_dir, tracks, saved_at}`（開いていなければ null）。編集・トラックのツールの返り値にも `document` が付く |
+| `project_status()` | `document = {kind: "gliss" / "untitled" / "legacy" / "ara"（§3-4）, path, name, dirty, work_dir, tracks, saved_at}`（開いていなければ null）。編集・トラックのツールの返り値にも `document` が付く |
 | `close_project(discard?)` | 閉じる。`discard=true` で保存していない変更を捨てる（`.gliss` は最後に保存した中身に戻し、無題は作業場所ごと消す）。無題の削除結果は `removal: "removed" / "deferred"`。延期分は次回起動時にも片付ける。延期の間に同じ作業場所を `load_project` で開き直したら、削除の予定は取り消す |
 
 Claude Code から: `load_project("D:/…/曲.gliss")` → `list_tracks` → `select_track` → 編集 → `save_project()`。
 **画面で開いている曲を触るときは `load_project()` を引数なしで呼ぶ**（画面と同じ作業場所・同じトラック。編集は画面に即反映される）。
 同じ `.gliss` を `load_project(path)` しても同じ作業場所を使う。保存は画面の「AI に許可: 保存・書き出し」がオンのときだけ AI からもできる（§4-1）。
+
+## 3-4. DAW（VST3 + ARA 2 のプラグイン。`engine/vocal_engine/mcp_ara.py`）
+
+DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動し（`GLISS_CLIENT=ara`。§4-1 の許可に従わない）、次の対応で使う。
+**AI のプロセスからは呼べない**（許可に関係なく `permission: "ara"` で断る）。AI から DAW の文書を編集するときは §3-5 の中継を通す。
+
+| DAW（ARA） | エンジン |
+|---|---|
+| Document | セッション 1 つ（作業場所 `%LOCALAPPDATA%\Gliss\work\ara\<work_key>\`。文書の種類 `ara`） |
+| AudioSource | プラグインが書いたソースの WAV（ソースの周波数・チャンネルのまま） |
+| AudioModification | **ボーカルのトラック 1 本**（`ara_id`。範囲はソース全体、編集の秒はソースの秒）。プロジェクトは `tracks/ara-<ara_id のハッシュ 12 桁>/` |
+| PlaybackRegion | エンジンは知らない（トラックの `offset_sec` = 代表のリージョンでソースの 0 秒が置かれるソングの秒） |
+| MusicalContext | `session.tempo`（`source: "daw"`。`ara_sync` の `tempo`。プラグインはまだ渡していない） |
+
+- `ara_*` は **`author` を取らず、取り消しの履歴に入れない**（DAW が決めたことを Gliss の Ctrl+Z で戻させない）。
+  画面の操作（ガイドの指定・テンポなど）の `session` の項目を Ctrl+Z しても、ARA のトラック（有無・位置・名前・素材）と
+  DAW のテンポは今のまま（戻すのはガイドの指定・画面で変えたテンポ）。DAW が外したトラックの編集の項目は履歴から外す。
+- 同じソースの 2 つの修飾は、同じ WAV を指す**別のトラック・別の編集**（同じファイルの重複の検査をしない）。
+- 編集・取り消し・トラックの選択・解析は今までのツール（`select_track`・`analyze_take`・`shift_pitch`・`undo` …）。
+  `list_tracks` などの `session.tracks[]` には、ARA のトラックだけ `ara_id`・`group` が付く。
+- `new_project`・`load_project`・`open_project`・`save_project`・`close_project`・`add_track`・`remove_track`・`export_wav`・
+  `render_tracks`・`split_track`・`join_track`・`mute_track_range` はプラグインからは呼ばない（プラグインが断る。
+  クリップの分割・部分のミュートは DAW のリージョンの仕事で、プラグインの音にも効かない）。`ara` の文書の `save_project` はエンジンも断る。
+- `project_status().document.kind = "ara"`、`dirty` は常に false。`close_project` は作業場所を消さない（開き直したとき解析の
+  キャッシュを使う）。`bridge.json` には載らない（AI の `load_project()` はプラグインの曲を開かない）。
+- プラグインがソースの WAV を書き直す（同じ音でもファイルのバイトは変わりうる）ので、編集を捨てないように、
+  `ara_set_modification`・`ara_open` がテイクの参照を直してからプロジェクトを開く。その前に開こうとすると
+  （WAV が書き換わった後、`ara_set_modification` の前）「DAW の音を読み込み中」で断る。
+
+| ツール | 引数 | 返り値・中身 |
+|---|---|---|
+| `ara_open` | `work_key`（英数字・`-`・`_` の 1〜64 字。DAW のドキュメントごと）, `name?` | `{dir, opened, created, document, session, project_dir, analyzed, guide_note}`。作業場所を開く／作る。同じ鍵で開いていれば何もしない（`opened: false`）。前に選んでいたトラックがあれば編集対象にする |
+| `ara_set_modification` | `ara_id`, `source_path`, `source_id?`, `name?`, `offset_sec?`（新しいトラックの既定 0。既存で省けば今のまま）, `group?`（DAW のトラック名）, `clone_of?`（複製元の `ara_id`） | `{track: {id, ara_id, name, group, offset_sec, duration_sec, sr, channels, source_frames, source_id, path, project_dir, current, guide}, created, source_changed, cloned, selected, analyzed, session}`。トラックを作る／直す。編集対象が無ければ編集対象にする（`selected`）。素材のファイルが変わっても音が同じなら編集はそのまま、音が変わったら `source_changed: true`（編集は残し、解析は捨てる）。外した `ara_id` を足し直すと前の id・前の編集。`clone_of` は新しく作るときだけ、素材の中身が同じならその編集を写す |
+| `ara_remove_modification` | `ara_id` | `{removed, track, switched_to, reopened, session}`。外す（ボーカルが 0 本でもよい。プロジェクトのディレクトリは残す）。無ければ `removed: false` |
+| `ara_sync` | `tracks: [{ara_id, offset_sec?, name?, group?}]`, `tempo?: {bpm, numerator, denominator, start_sec}`, `guide?`（ガイドにする修飾の `ara_id`。`""` で外す。アーカイブのガイドを戻すとき用） | `{changed: [track_id], unknown: [ara_id], tempo, tempo_changed, guide, guide_changed, reopened, session}`。位置は 1 サンプル未満の差なら変えない。ガイドの指定も履歴に入れない（画面の `set_guide_track` は入る）。編集対象のガイドの重ね方が変われば開き直す（`reopened: true` → 画面は `analyze_take` から描き直す） |
+| `ara_render_dirty` | `ara_id`, `since?`（前に受け取った `rev`）, `backend?`（`praat`）, `channels?`（`all` / `mono`）, `max_sec?`（1 回で再合成する窓の長さの上限。既定 10） | `{track, rev, reset, more, analysis_pending, sr, channels, source_frames, restore: [[start_frame, frames]], windows: [{start_frame, frames, byte_offset}], path, rendered_sec, backend, timing_sec}`。下の「差分の再合成」 |
+| `ara_revs` | なし | `{revs: {ara_id: rev}, track_ids: {ara_id: track_id}, errors, external}`。**ロックを取らない**（ディスクの project.json から）。プロジェクトがまだ無い修飾は `"empty"`。`external`: §3-5 の中継が開いていれば `{seq, session_seq, track_id}`（外部の AI が曲を変えるたびに `seq`、セッションを変えうるもの（`set_track`・`set_guide_track`・`set_tempo`・`undo`・`redo`）は `session_seq` も進む。`track_id` は最後に変えたトラック）、無ければ `null` |
+| `ara_archive` | `ara_ids?`（省けば全部） | `{archives: {ara_id: {name, track, archive}}, guide: <ガイドの ara_id> \| null, tempo, errors, missing}`。`archive` は `Project.to_archive()` の形（素材の参照・歌詞・changeset の列。ガイドは入れない）。**ロックを取らない**（解析のジョブの最中も保存を止めない）。素材の照合のハッシュはトラックを作ったときに覚えた値を使う。プロジェクトがまだ無い修飾は `archive: null` |
+| `ara_restore` | `ara_id`, `archive` | `{track, mismatch, reason?, edits, changesets, reopened, session}`。編集を戻す（履歴に入れず、戻した changeset も Ctrl+Z の列に入れない）。素材の長さ・音の中身が違えば**戻さずに** `mismatch: true`（`ok` は true。プラグインはアーカイブを持ち続ける）。編集対象なら開き直す |
+| `ara_notes` | `ara_ids?`（省けば全部） | `{notes: {ara_id: {track, rev, state, edited, notes, source_notes}}, errors, missing}`。DAW に返すノート（ARA の content reader の `kARAContentTypeNotes`）。`state`: `ready`（解析が済んだ）/ `pending`（解析がまだ）/ `empty`（プロジェクトがまだ無い）。`ready` のときだけ `notes`（編集を当てた後。無音にしたノートは除く）と `source_notes`（解析だけ）が入る。どちらもソースの秒・頭の順・音程のあるノートだけで `[{id, start_sec, end_sec, hz, midi, volume}]`（位置・音程は `export_view_data` の `edited_start_sec`・`edited_end_sec`・`edited_pitch_midi` と同じ定義、`hz` はその Hz、`volume` はノートの音量の山を -60 dB → 0・0 dB → 1）。`edited` = 編集リストが空でない（プラグインは DAW に adjusted と出す）。`rev` は `ara_revs` と同じ。解析は待たない・始めない（裏の準備が済むと版が変わる）。編集対象は変えない |
+
+**差分の再合成**（`ara_render_dirty`。`render/region.py` の `EditCache` をファイルで渡すもの）:
+
+- エンジンは修飾ごとに「最後に渡した `rev` と、その時の Segment 列・窓」を覚える（このプロセスの中だけ）。
+  `since` がそれと同じなら、変わった範囲（`dirty_windows`）だけ。違う・初回・エンジンを起動し直した・解析か素材が変わった・
+  `backend` / `channels` が違うなら `reset: true` で全部の窓。
+- 当て方（プラグイン）: `reset` なら手元の窓を全部捨てて原音から → `restore` の範囲を原音に戻す → `windows` を置く
+  （`path` の `.f32` = float32 リトルエンディアンのインターリーブを窓の順に並べたもの。`byte_offset` が各窓の頭、
+  長さは `frames × channels × 4` バイト）。結果は `render_region` の全体（＝書き出し）と**サンプル単位で同じ**。
+  `.f32` は作業場所の `ara-out/` に修飾ごとに最近の 4 つだけ残る（読んだら手元に写す）。
+- `max_sec` を超える分は次に回す（`more: true`。`rev` は途中の印 `<版>~<n>`。`since=rev` で続けて呼ぶ。少なくとも窓 1 つは返す）。
+  途中で編集が入っても、続きの呼び出しで正しく当たる。
+- `rev` = `<解析の署名>:<編集の署名>`（素材・テイクの解析・編集リスト・歌詞から決まる）。`ara_revs` と同じ値なので、
+  プラグインは手元の `rev` と違う修飾だけを呼べばよい（取り消しで別のトラックが変わったときも拾える）。
+- 編集はあるがテイクの解析がまだ（別の PC でアーカイブから戻した直後など）なら、解析を待たずに窓を空で返す
+  （`analysis_pending: true`。原音のまま）。裏の準備・`analyze_take` で解析が済むと `rev` が変わる。
+- 編集対象でないトラックも、編集対象を変えずにディスクのプロジェクトから作る（下ごしらえは修飾ごとに 4 本まで持つ）。
+  再合成の間は裏の準備は次の段へ進まない。
+
+呼ぶ順（プラグイン）: 起動 → `engine_info` →（あれば）`set_f0_estimator` → `ara_open(work_key)` →
+ソースの WAV を書いたら各修飾に `ara_set_modification`（アーカイブから戻すなら続けて `ara_restore`）→ `ara_render_dirty(since=null)`。
+DAW の操作は `ara_sync` / `ara_set_modification` / `ara_remove_modification`。画面の編集の後は `ara_revs` → 違う修飾に
+`ara_render_dirty(since=<手元の rev>)`（`more` の間は続ける）→ `ara_archive(変わった ara_id)` で保存用の写しを取り直す。
+ノート（DAW に返す）は、`ara_revs` の版がノートを取った版と違う修飾に `ara_notes(ara_ids)`。
+
+## 3-5. 外部の AI から DAW の中の Gliss を操作する（`engine/vocal_engine/ara_relay.py`）
+
+DAW（Fender Studio Pro など）で Gliss（ARA プラグイン）を挿したイベントを開いている間、Claude Code などが起動したエンジン（§4。
+`GLISS_CLIENT` なし）から、その文書の修飾を普段のツールで編集できる。DAW の文書を持つのはプラグインのエンジン 1 本だけなので、
+AI のエンジンは**呼び出しをプラグインのエンジンへ転送する**。編集はプラグインのエンジンの中で実行され、DAW の再生・
+プラグインの画面・DAW に返すノートに反映され、DAW のソングを保存すると一緒に保存される。
+
+手順（AI 側）:
+
+1. `ara_documents()` — 開いている文書の一覧。文書ごとに `document`（DAW の文書名）・`work_key`・`daw`（DAW の実行ファイル名）・`daw_pid`・
+   `engine_pid`・`allow`（DAW の Gliss が許すこと）・`tracks`。`tracks[]` は修飾ごとに `track_id`・`ara_id`（persistentID）・`name`（修飾の名前）・
+   `daw_track`（DAW のトラック名）・`duration_sec`（ソースの長さ）・`offset_sec`・`analyzed`（解析済みか）・`prep`（裏の準備の状態）・`guide`・
+   `editing_in_plugin`（プラグインの画面で開いているか）。つながらない文書は `error` 付き。
+2. `ara_attach(ara_id?, track_id?, document?)` — 修飾を選ぶ。省くと、修飾が 1 つならそれ、ほかはプラグインの画面で開いているもの。
+   文書が複数あるときは `document`（`work_key`・文書名・`engine_pid`）。
+3. 以後のツールは**単体のときと同じ名前・引数**で、選んだ修飾に効く: `analyze_take`（解析済みならすぐ返る）→ `list_notes`・`get_pitch`・
+   `list_deviations`・`get_phonemes` → `shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・
+   `plan_edit`/`apply_plan`・`set_guide_track`・`undo`/`redo` など。返り値の dict には `ara: {document, work_key, ara_id}` が付く。
+   別の修飾へは `select_track(track_id)`（外部の選択だけを変える。プラグインの画面の編集対象は変えない）か `ara_attach` をもう一度。
+4. `ara_detach()` — やめる（以後のツールはこのエンジン＝単体の Gliss の曲に戻る）。
+
+- 使えないもの（許可に関係なく `permission: "ara"`）: DAW の文書の作り・トラックの増減・保存・書き出し（`new_project`・`load_project`・
+  `open_project`・`save_project`・`close_project`・`add_track`・`remove_track`・`export_wav`・`render_tracks`・`split_track`・`join_track`・
+  `mute_track_range`）と `ara_*`。プラグインの画面が断るものと同じ（`plugin/src/ara/EngineCalls.cpp` の `isForbidden`）。
+- 取り消しは曲で 1 本（§2-9）。外部の `undo` は、プラグインの画面の編集を含む曲の履歴の最後を戻す。外部の編集は `author: "ai"`。
+- 長い処理はいつもどおりジョブ（`get_job` も転送される。ジョブはプラグインのエンジンで走る）。
+- DAW の文書を閉じた・プラグインのエンジンが止まったら、転送は `{"ok": false, "error": "DAW の文書（…）が見つからない…"}`。
+  エンジンが起動し直した（プラグインの［つなぎ直す］）ときは、同じ `work_key` の新しい記録へそのまま転送する。
+
+**許可**（プラグインのエンジンの環境変数 `GLISS_ARA_AI`。DAW を起動するときの環境から引き継ぐ。§4-1 の `bridge.json` は使わない）:
+
+| 値 | 外部の AI に許すこと |
+|---|---|
+| `off` | 何も（中継の口を開かない。`ara_documents` に出ない） |
+| `read` | 読む・測るだけ（編集は `permission: "edit"` で断る） |
+| `edit`（既定） | 編集まで（保存・書き出し＝ユーザーのファイルに書く `render_region(path=…)` などは `permission: "save"` で断る） |
+| `save` | 編集と保存・書き出し |
+
+「編集」「保存・書き出し」の分け方は §4-1 の表と同じ（`bridge.category`）。
+
+**しくみ**:
+
+- プラグインのエンジンは `ara_open` の後に `127.0.0.1` の口（ポートは OS が選ぶ）を開き、記録
+  `%APPDATA%\Gliss\ara-sessions\<エンジンの pid>.json`（`{format: "gliss-ara-relay", version: 1, pid, engine, host, port, token, daw_pid, daw,
+  work_key, document, dir, allow, started_at}`）を書く。置き場は `GLISS_ARA_SESSIONS_DIR` で差し替える。`daw_pid` はプラグインが渡す
+  `GLISS_ARA_HOST_PID`。エンジンが終わる（DAW が文書を閉じる）と口を閉じて記録を消す。落ちて残った記録は、AI 側が pid の生存と
+  実行ファイルの一致で見分けて無視し、消す。
+- 1 回の呼び出しごとに 1 本つなぎ、UTF-8 の JSON を 1 行送って 1 行受ける（`{token, op: "list" | "select" | "call", ara_id?, tool?, args?}`）。
+  トークン（32 バイトの乱数）が合わない要求は断る。`127.0.0.1` にしか bind しないので、ほかの PC からはつながらない。
+- 実行はプラグインのエンジンのロック（`_lock`）の中で、選んだ修飾のトラックに一時的に切り替えて行い、終わったらプラグインの画面の
+  編集対象に戻す（画面の呼び出しと外部の呼び出しが同時に来ても、順に、それぞれのトラックに当たる）。ロックを取らないツール
+  （`get_job`・`engine_info` など）はそのまま呼ぶ。
+- プラグインは 1 秒ごとの `ara_revs` で版の変わった修飾を取り直し（`ara_render_dirty` → 再生のキャッシュ → `notifyContentChanged`、
+  `ara_notes`、`ara_archive`）、`external.seq` が変わったら画面に `project-changed`（`session_seq` も変われば `session-changed`）を知らせる。
+  反映までは最大で約 1 秒。
 
 ## 4. Claude Code から使う
 
@@ -1040,7 +1317,7 @@ Claude Code から: `load_project("D:/…/曲.gliss")` → `list_tracks` → `se
 ### 4-1. AI に許可と、画面で開いている曲（bridge.json）
 
 画面が起動するエンジンと、AI（Claude Code など）が起動するエンジンは**別のプロセス**。画面は自分のエンジンに
-`GLISS_CLIENT=app` を渡し、**それ以外のプロセス（= AI）だけ**が画面の設定に従う（`vocal_engine/bridge.py`）。
+`GLISS_CLIENT=app` を渡し（DAW の ARA プラグインは `GLISS_CLIENT=ara`。§3-4）、**それ以外のプロセス（= AI）だけ**が画面の設定に従う（`vocal_engine/bridge.py`）。
 画面は userData（`%APPDATA%\Gliss`）の `bridge.json` に書き、AI 側のエンジンは**ツールを呼ぶたびに**読む。置き場は
 環境変数 `GLISS_BRIDGE` で差し替える（画面から登録した設定には入っている）。
 
@@ -1067,9 +1344,11 @@ Claude Code から: `load_project("D:/…/曲.gliss")` → `list_tracks` → `se
 
 | 許可 | ツール |
 |---|---|
-| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`split_track`・`join_track`・`mute_track_range`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
+| **編集** | `set_lyrics`・`import_lyrics`・`set_note_syllable`・`shift_pitch`・`set_pitch_curve`・`move_note`・`stretch`・`move_boundary`・`correct_to_guide`・`set_transition`・`split_note`・`merge_notes`・`apply_plan`・`set_connection`・`mute_notes`・`unmute_notes`・`set_fade`・`reset_to_original`・`apply_edits`・`undo`・`redo`・`add_track`・`remove_track`・`set_track`・`set_guide_track`・`make_score_guide`・`split_track`・`join_track`・`mute_track_range`・`set_tempo`、`close_project(discard=true)`（保存していない変更を捨てる） |
 | **保存・書き出し** | `save_project`・`export_wav`・`prepare_asr_model`（聞き取り用の数 GB のモデルをダウンロードして書く）、`render_region(path=…)`・`export_view_data(path=…)`・`render_preview(name=<フォルダーを含むパス>)`（ユーザーが指定した場所に書くとき） |
-| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info` |
+| AI からは呼べない | DAW のプラグイン専用の `ara_*`（§3-4。`bridge.py` の `ARA_TOOLS`。`permission: "ara"` で断る） |
+| 許可なしで呼べる（DAW の文書） | `ara_documents`・`ara_attach`・`ara_detach`（§3-5。選んだ後のツールは DAW の Gliss の `GLISS_ARA_AI` に従い、`bridge.json` の許可は見ない） |
+| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`measure_against_guide`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info` |
 
 `select_track` は編集対象を切り替えるだけ（履歴に入らない）なので許可なし。`plan_edit` は計画を作るだけで、当てるのは `apply_plan`（編集）。
 `transcribe` は候補を返すだけで確定の歌詞を変えない（取り込む `set_lyrics` / `set_note_syllable` が編集）。`prepare_asr_model` は大きなダウンロードを AI が勝手に始めないよう「保存・書き出し」に入れている。

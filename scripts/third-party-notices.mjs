@@ -9,6 +9,8 @@
 //   - 画面（app.asar）に入る Node のパッケージ: app/package.json の dependencies から辿れるもの（devDependencies は入らない）
 //   - エンジン exe に入る Gliss の F0 モデル（試作）の学習コード・学習データの出典（engine/vocal_engine/analysis/models/gliss-f0.NOTICE.txt）
 //   - 任意のアドオン（scripts/build-addon.mjs が作った engine/packaging/dist-addons/<id>.LICENSES.txt。作っていれば）
+//   - DAW のプラグイン（Gliss.vst3）に入れた依存: JUCE（AGPLv3）・ARA SDK・WebView2 のローダ・Signalsmith と、JUCE が同梱した第三者のコード
+//     （JUCE の SBOM の JUCE.spdx.json を、リンクするモジュールから辿る）。scripts/build-plugin.mjs を先に走らせる（依存の置き場を書く）
 // Electron・Chromium のライセンス文（LICENSE.electron.txt・LICENSES.chromium.html）は electron-builder がインストール先の直下に置く。
 // electron-builder.yml の extraResources が resources/THIRD_PARTY_NOTICES.txt に入れる。
 // copyleft のパッケージ（GPL・LGPL・MPL）のソースは scripts/gpl-sources.mjs が Release に添付する。
@@ -131,8 +133,8 @@ export function nodePackages(appDir = path.join(ROOT, 'app')) {
   return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function section(title, list) {
-  const lines = [`${'='.repeat(78)}`, title, `${'='.repeat(78)}`, ''];
+export function section(title, list, intro = []) {
+  const lines = [`${'='.repeat(78)}`, title, `${'='.repeat(78)}`, '', ...(intro.length ? [...intro, ''] : [])];
   for (const p of list) {
     lines.push(`--- ${p.name} ${p.version || ''} (${p.license}) ${'-'.repeat(Math.max(3, 60 - p.name.length - String(p.version).length - p.license.length))}`);
     if (!p.texts.length) lines.push('（ライセンスのファイルが同梱されていない。上のライセンス名を参照）');
@@ -152,12 +154,117 @@ export function addonLicenses(dir = path.join(ROOT, 'engine', 'packaging', 'dist
     .map((n) => ({ id: n.slice(0, -'.LICENSES.txt'.length), text: fs.readFileSync(path.join(dir, n), 'utf8') }));
 }
 
+/** scripts/build-plugin.mjs が Gliss.vst3 と、ビルドの情報（gliss-plugin.json）を写す場所。 */
+export const PLUGIN_DIST = path.join(ROOT, 'plugin', 'build', 'dist');
+
+/** ビルドの情報（plugin/CMakeLists.txt の末尾が書き、build-plugin.mjs が PLUGIN_DIST に写す）。依存の置き場と版。 */
+export function readPluginBuild(file = path.join(PLUGIN_DIST, 'gliss-plugin.json')) {
+  if (!fs.existsSync(file)) throw new Error(`${path.relative(ROOT, file)} が無い（node scripts/build-plugin.mjs でプラグインを作る）`);
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
+}
+
+// JUCE の SBOM（JUCE.spdx.json）で、リンクするモジュールが抱える第三者のコードのうち、Gliss.vst3 に入らないもの。
+// ここにも「入れる」にも無いものが SBOM に現れたら止める（JUCE を上げたときに見直す）。
+const JUCE_NOT_LINKED = {
+  'ASIO SDK': 'JUCE_ASIO が 0（JUCE の既定）なので入らない',
+  Oboe: 'Android 用',
+  AudioUnitSDK: 'macOS の AU 用',
+  'AAX SDK': 'AAX 形式は作らない',
+  LV2: 'LV2 の形式・ホストは使わない（FORMATS は VST3 だけ・JUCE_PLUGINHOST_LV2 は 0）',
+  lilv: '同上（LV2）', serd: '同上（LV2）', sord: '同上（LV2）', sratom: '同上（LV2）',
+};
+const JUCE_LICENSE_FILE = /^(licen[cs]e|copying|flac licence)/i;
+
+/** plugin/CMakeLists.txt の GlissARA にリンクする JUCE のモジュール（juce::juce_recommended_* を除く）。 */
+export function pluginJuceModules(cmake = fs.readFileSync(path.join(ROOT, 'plugin', 'CMakeLists.txt'), 'utf8')) {
+  const block = /target_link_libraries\(GlissARA\b([\s\S]*?)\)/.exec(cmake)?.[1] || '';
+  return [...block.matchAll(/juce::(juce_\w+)/g)].map((m) => m[1]).filter((m) => !m.startsWith('juce_recommended_'));
+}
+
+/** SBOM から、リンクするモジュールが（依存を辿って）含む第三者のコード。[{ name, version, license, dir }] */
+export function juceVendored(spdx, modules) {
+  const byName = new Map(spdx.packages.map((p) => [p.name, p]));
+  const byId = new Map(spdx.packages.map((p) => [p.SPDXID, p]));
+  const seen = new Set();
+  const stack = modules.map((m) => {
+    if (!byName.has(m)) throw new Error(`JUCE.spdx.json に ${m} が無い`);
+    return byName.get(m).SPDXID;
+  });
+  while (stack.length) {
+    const id = stack.pop();
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const r of spdx.relationships) {
+      if (r.spdxElementId === id && (r.relationshipType === 'DEPENDS_ON' || r.relationshipType === 'CONTAINS')) stack.push(r.relatedSpdxElement);
+    }
+  }
+  const out = [];
+  for (const p of [...seen].map((id) => byId.get(id))) {
+    if (/^AGPL-3\.0-only OR LicenseRef-JUCE-Commercial$/.test(p.licenseDeclared)) continue;   // JUCE 自身（モジュール・webview の JS）
+    if (JUCE_NOT_LINKED[p.name]) continue;
+    const dir = /^Vendored at (\S+) in the JUCE source tree/.exec(p.sourceInfo || '');
+    if (!dir) throw new Error(`JUCE.spdx.json の ${p.name} の置き場が読めない（${p.sourceInfo}）。scripts/third-party-notices.mjs を見直す`);
+    out.push({ name: p.name, version: p.versionInfo, license: p.licenseDeclared, dir: dir[1] });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** JUCE が同梱した第三者のコードのライセンス文（置き場の LICENSE・COPYING。jpeglib は README の LEGAL ISSUES）。 */
+function vendoredTexts(juceDir, v) {
+  const dir = path.join(juceDir, v.dir);
+  const texts = fs.readdirSync(dir).filter((f) => JUCE_LICENSE_FILE.test(f) && fs.statSync(path.join(dir, f)).isFile()).sort()
+    .map((f) => ({ file: f, text: fs.readFileSync(path.join(dir, f), 'utf8') }));
+  if (!texts.length && fs.existsSync(path.join(dir, 'README'))) {
+    const legal = /\nLEGAL ISSUES\n=+\n([\s\S]*?)\n\n[A-Z][A-Z ]+\n=+\n/.exec(fs.readFileSync(path.join(dir, 'README'), 'utf8').replace(/\r\n/g, '\n'));
+    if (legal) texts.push({ file: 'README（LEGAL ISSUES）', text: legal[1].trim() });
+  }
+  return texts;
+}
+
+/** DAW のプラグイン（Gliss.vst3）に入れた依存。JUCE・ARA SDK・WebView2 のローダ・Signalsmith と、JUCE が同梱した第三者のコード。 */
+export function pluginPackages(info = readPluginBuild()) {
+  const juce = info.juce.dir;
+  const read = (...p) => fs.readFileSync(path.join(...p), 'utf8');
+  const agpl = path.join(juce, 'modules', 'juce_gui_extra', 'native', 'typescript', 'webview-interop', 'LICENSE-AGPL.md');
+  const spdx = JSON.parse(read(juce, 'JUCE.spdx.json'));
+  const out = [
+    { name: 'JUCE', version: info.juce.version, license: 'AGPL-3.0-only（JUCE は AGPL-3.0-only か商用。Gliss は AGPLv3 の側で使う）', copyleft: true,
+      texts: [{ file: 'LICENSE.md', text: read(juce, 'LICENSE.md') }, { file: 'AGPL-3.0（JUCE の LICENSE-AGPL.md）', text: read(agpl) }] },
+    { name: 'ARA SDK（ARA_Library・ARA_API）', version: info.araSdk.version.replace(/^releases\//, ''), license: 'Apache-2.0', copyleft: false,
+      texts: [{ file: 'ARA_Library/LICENSE.txt', text: read(info.araSdk.dir, 'ARA_Library', 'LICENSE.txt') },
+        { file: 'NOTICE.txt', text: read(info.araSdk.dir, 'NOTICE.txt') }] },
+    { name: 'WebView2 のローダ（Microsoft.Web.WebView2 の WebView2LoaderStatic.lib）', version: info.webview2.version, license: 'BSD-3-Clause', copyleft: false,
+      texts: [{ file: 'LICENSE.txt', text: read(info.webview2.dir, 'LICENSE.txt') }] },
+    { name: 'Signalsmith Stretch', version: info.signalsmithStretch.version, license: 'MIT', copyleft: false,
+      texts: [{ file: 'LICENSE.txt', text: read(info.signalsmithStretch.dir, 'LICENSE.txt') }] },
+    { name: 'Signalsmith Linear', version: info.signalsmithLinear.version, license: 'MIT', copyleft: false,
+      texts: [{ file: 'LICENSE.txt', text: read(info.signalsmithLinear.dir, 'LICENSE.txt') }] },
+  ];
+  for (const v of juceVendored(spdx, pluginJuceModules())) {
+    out.push({ name: `${v.name}（JUCE に同梱。${v.dir}）`, version: v.version, license: v.license, copyleft: isCopyleft(v.name, v.license), texts: vendoredTexts(juce, v) });
+  }
+  return out;
+}
+
 /** Gliss の F0 モデル（試作）の出典の文書（モデルの隣に置いてある。CC BY・ODbL・CMU Arctic の表示を含む）。 */
 export function f0ModelNotice(file = path.join(ROOT, 'engine', 'vocal_engine', 'analysis', 'models', 'gliss-f0.NOTICE.txt')) {
   return fs.readFileSync(file, 'utf8');
 }
 
-export function notices({ version, python, node, addons = [], f0Model = '' }) {
+/** DAW のプラグイン（Gliss.vst3）のライセンスの説明。THIRD_PARTY_NOTICES.txt の節の頭と、Gliss.vst3 の中の THIRD_PARTY_NOTICES.txt に使う。 */
+export function pluginLicenseLines(info) {
+  return [
+    `Gliss.vst3 は Gliss のソース（GPL-3.0-or-later）を JUCE ${info.juce.version}（AGPL-3.0-only）と結合したもの。GPLv3 と AGPLv3 の第 13 条により、`,
+    '結合した全体（Gliss.vst3）は GNU Affero General Public License version 3 の条件で配布する（Gliss.vst3 の Contents/Resources/LICENSE-AGPL-3.0.txt）。',
+    'Gliss 自身のソースのライセンスは GPL-3.0-or-later のまま。',
+    `対応するソース: Gliss のリポジトリ（https://github.com/tekalu1/gliss）の同じ版のタグの plugin/ と、plugin/CMakeLists.txt および Signalsmith Stretch の CMakeLists.txt が版を固定して取る依存`,
+    `（JUCE ${info.juce.version}: https://github.com/juce-framework/JUCE ・ARA SDK ${info.araSdk.version.replace(/^releases\//, '')}: https://github.com/Celemony/ARA_SDK ・`,
+    `Microsoft.Web.WebView2 ${info.webview2.version}: https://www.nuget.org/packages/Microsoft.Web.WebView2 ・`,
+    `Signalsmith Stretch ${info.signalsmithStretch.version}: https://github.com/Signalsmith-Audio/signalsmith-stretch ・Signalsmith Linear ${info.signalsmithLinear.version}: https://github.com/Signalsmith-Audio/linear ）。`,
+  ];
+}
+
+export function notices({ version, python, node, addons = [], f0Model = '', plugin = [], pluginInfo = null }) {
   const copyleft = [...python, ...node].filter((p) => p.copyleft).map((p) => `${p.name} ${p.version}（${p.license}）`);
   return [
     `Gliss ${version} に含まれるサードパーティのソフトウェアのライセンス`,
@@ -168,6 +275,8 @@ export function notices({ version, python, node, addons = [], f0Model = '' }) {
     '',
     section('エンジン（resources/engine/vocal-engine。Python と、PyInstaller で同梱したパッケージ）', python),
     section('画面（resources/app.asar。Node.js のパッケージ）', node),
+    plugin.length ? section('DAW のプラグイン（resources/plugin/Gliss.vst3。インストーラが %LOCALAPPDATA%\\Programs\\Common\\VST3 にも写す）',
+      plugin, pluginLicenseLines(pluginInfo)) : '',
     f0Model ? [`${'='.repeat(78)}`, 'エンジンに同梱した Gliss の F0 モデル（学習コードと学習データの出典）', `${'='.repeat(78)}`, '',
       `${f0Model.replace(/\r\n/g, '\n').trimEnd()}\n`].join('\n') : '',
     addons.length ? [`${'='.repeat(78)}`,
@@ -184,9 +293,11 @@ function main() {
   const python = [pythonRuntime(), ...pythonPackages()];
   const node = nodePackages();
   const addons = addonLicenses();
-  fs.writeFileSync(out, notices({ version, python, node, addons, f0Model: f0ModelNotice() }), 'utf8');
-  const missing = [...python, ...node].filter((p) => !p.texts.length).map((p) => p.name);
-  console.log(`書いた: ${path.relative(ROOT, out)}（Python ${python.length}・Node ${node.length} パッケージ・アドオン ${addons.map((a) => a.id).join(', ') || 'なし'}）`);
+  const pluginInfo = readPluginBuild();
+  const plugin = pluginPackages(pluginInfo);
+  fs.writeFileSync(out, notices({ version, python, node, addons, f0Model: f0ModelNotice(), plugin, pluginInfo }), 'utf8');
+  const missing = [...python, ...node, ...plugin].filter((p) => !p.texts.length).map((p) => p.name);
+  console.log(`書いた: ${path.relative(ROOT, out)}（Python ${python.length}・Node ${node.length}・プラグイン ${plugin.length} パッケージ・アドオン ${addons.map((a) => a.id).join(', ') || 'なし'}）`);
   if (missing.length) console.log(`  ライセンスのファイルが無いもの（名前だけ載せた）: ${missing.join(', ')}`);
   const copyleft = [...python, ...node].filter((p) => p.copyleft);
   console.log(`  copyleft: ${copyleft.map((p) => `${p.name} ${p.version} (${p.license})`).join(', ') || 'なし'}`);

@@ -41,8 +41,9 @@ RMVPE_PATH = os.path.join(DEFAULT_MODELS_DIR, "rmvpe.onnx")
 GLISS_F0_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "gliss-f0.onnx")
 
 # 画面・MCP で選べる方式（並びは画面の並び）と、版（方式の中身を変えたら上げる。解析のキャッシュを分ける）。
+# Gliss の F0 モデルの版は、同梱のモデルファイルの SHA-256（`estimator_version`。モデルを替えたら自動で変わる）
 ESTIMATORS = ("rmvpe", "gliss", "praat")
-ESTIMATOR_VERSIONS = {"gliss": "proto1", "praat": "1"}
+ESTIMATOR_VERSIONS = {"praat": "1"}
 _CHAINS = {"rmvpe": ["rmvpe"], "gliss": ["gliss"], "praat": ["praat"], "fcpe": ["fcpe"],
            "auto": ["rmvpe", "gliss"]}
 ESTIMATOR_ENV = "GLISS_F0_ESTIMATOR"     # 起動時の既定（画面は set_f0_estimator で選ぶ）
@@ -95,8 +96,28 @@ def resolve_estimator(name=None):
     return check_estimator(name)
 
 
+_GLISS_VERSION = {}
+
+
+def _gliss_model_version():
+    """同梱の Gliss の F0 モデルの版 = ファイルの SHA-256 の先頭 12 桁（ファイルが変わったときだけ取り直す）。"""
+    try:
+        st = os.stat(GLISS_F0_PATH)
+        key = (GLISS_F0_PATH, st.st_size, st.st_mtime_ns)
+    except OSError:
+        return "missing"
+    if _GLISS_VERSION.get("key") != key:
+        import hashlib
+        with open(GLISS_F0_PATH, "rb") as f:
+            _GLISS_VERSION.update(key=key, version="m-" + hashlib.sha256(f.read()).hexdigest()[:12])
+    return _GLISS_VERSION["version"]
+
+
 def estimator_version(name):
-    """方式の版（RMVPE・FCPE は None）。キャッシュの鍵と、保存した解析が今の方式のものかの判定に使う。"""
+    """方式の版（RMVPE・FCPE は None）。キャッシュの鍵と、保存した解析が今の方式のものかの判定に使う。
+    Gliss はモデルファイルの SHA-256 から（モデルを替えたのに前の解析を使い回さない）。"""
+    if name == "gliss":
+        return _gliss_model_version()
     return ESTIMATOR_VERSIONS.get(name)
 
 

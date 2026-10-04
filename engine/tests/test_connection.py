@@ -287,8 +287,11 @@ def test_guide_plan_100_hits_guide(mode, request):
     cs, _ = TM.apply_plan(p, plan, 1.0, pitch=1.0)
     _check_plan_result(p, plan, 1.0)
     cur = current_note_pitches(p)
+    many = {r["note"]: r["pitch_midi"] for r in plan.info["one_to_many"]}
     for nid, g in pitch_target.items():
-        assert abs(cur[nid] - g.pitch_midi) < 0.005, "%s の中心がガイドに合わない" % nid
+        # 1 対多（高さの違うガイドのノートが 2 つ以上重なる）は、フレームごとの差の中央値へ（ガイドの最も重なる音ではない）
+        want = many.get(nid, g.pitch_midi)
+        assert abs(cur[nid] - want) < 0.005, "%s の中心がガイドに合わない" % nid
     tm = TM.current_map(p)
     reached = [e for e in plan.timing if e["reached"]]
     assert len(reached) >= 3 and len(reached) >= 0.7 * len(plan.timing)
