@@ -15,7 +15,7 @@
 | 識別子 | appId `io.github.tekalu1.gliss`・productName `Gliss`・実行ファイル名 `Gliss.exe` | **最初に決めて以後変えない**。変えると自動更新が別のアプリ扱いになり、ピン留め・通知・userData（`%APPDATA%\Gliss`）が切れる（Pleiad が ADR 0019 で同じ理由で識別子を据え置いている） |
 | 成果物の名前 | `Gliss-${version}-${os}-${arch}.${ext}`（例 `Gliss-0.1.0-beta.1-win-x64.exe`） | |
 | エンジン | PyInstaller のフォルダ形式（`engine/packaging/vocal-engine.spec`・torch 無し）を `resources/engine/vocal-engine/` に同梱 | 起動 0.7 秒。1 ファイル形式は毎回 150 MB を展開して 3 秒超（`docs/daw-stage0.md` §4） |
-| 重み | **同梱しない**（Gliss の F0 モデル（試作。135 KB）だけ例外でエンジンに入る。出典は `gliss-f0.NOTICE.txt`）。初回の「モデルの準備」画面が `%LOCALAPPDATA%\Gliss\models` へ取得 | `app/renderer/first-run.js`・`app/model-download.mjs`（実装済み） |
+| 重み | **同梱しない**（既定の F0 の方式の Gliss の F0 モデル（135 KB）だけ例外でエンジンに入る。出典は `gliss-f0.NOTICE.txt`）。初回の「モデルの準備」画面が `%LOCALAPPDATA%\Gliss\models` へ取得（HubertFA は必須、RMVPE は任意） | `app/renderer/first-run.js`・`app/model-download.mjs`（実装済み） |
 | 任意の依存（漢字の歌詞の読み） | **インストーラに入れない**。「アドオン」として同じ画面（とヘルプ > モデルと追加の機能…）から `%LOCALAPPDATA%\Gliss\addons` へ取得。配布元は同じ版の Release の添付 | §11（実装済み）。聞き取り（faster-whisper）はライセンスの問題でまだ配らない（§11-6） |
 | テスト素材 | 同梱しない・公開リポジトリにも入れない | §1 |
 | 版の正本 | `app/package.json` の `version` **1 か所** | エンジン側（`engine/pyproject.toml`・`vocal_engine.__version__`）は `scripts/sync-version.mjs` で写し、`engine/tests/test_config.py` が一致を確かめる |
