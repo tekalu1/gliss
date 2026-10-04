@@ -241,6 +241,7 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 2 回目以降は読み直すだけ。
 
 `estimator`（F0 の方式）を省くと、選んでいる方式（画面の 編集 > ピッチ検出の方式・`set_f0_estimator`）で解析する。
+**`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator` で選び直すと、全体の方式に戻る。
 
 | `estimator` | 中身 |
 |---|---|
@@ -833,7 +834,7 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `prep_status()` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない |
 | `pause_prep(paused?)` | 裏の準備を一時停止／再開（走っている段は最後まで進み、次の段の前で止まる。合流して待っているトラックは止めない） |
 | `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝選んでいる方式、`f0_estimator_effective`＝実際に使う方式、`f0_estimators`、`gliss_f0_model_found`） |
-| `set_f0_estimator(estimator?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。そのエンジンの既定で、曲は変えない）。この後の `analyze_take`・裏の準備がその方式で解析する。返り値の `effective` が実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
+| `set_f0_estimator(estimator?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。そのエンジンの既定で、曲は変えない）。この後の `analyze_take`・裏の準備がその方式で解析する（`analyze_take(estimator=…)` でトラックごとに明示した方式は、ここで選び直すと外れる）。返り値の `effective` が実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
 
 `backend` は `praat`（既定。Praat（praat-parselmouth）の TD-PSOLA）、`psola`（自前の TD-PSOLA）、`world` のどれか。
 praat-parselmouth が import できない環境では `praat` を頼んでも `psola` で再合成し、engine.log に警告を書く

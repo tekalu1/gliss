@@ -61,6 +61,43 @@ def reschedule_prep():
         _schedule(s)
 
 
+def remember_estimator(p, est):
+    """analyze_take で明示した F0 の方式を、そのトラックの方式として覚える（選んでいる方式と同じなら外す）。
+    session.json のトラックに `estimator` として保存し、裏の準備の署名・解析もそれを使う（準備が既定の方式で
+    解析し直して差し替えない）。セッションのトラックでなければ（単独のプロジェクト）メモリの上だけ。"""
+    from .analysis import f0 as f0mod
+    pref = None if est == f0mod.resolve_estimator() else est
+    p.estimator_pref = pref
+    s, tid = _session_of(p)
+    if s is None:
+        return
+    t = s.track(tid)
+    if s.estimator_of(t) != pref:
+        if pref is None:
+            t.pop("estimator", None)
+        else:
+            t["estimator"] = pref
+        s.save()
+        reschedule_prep()
+
+
+def forget_track_estimators():
+    """`set_f0_estimator` で選び直した: トラックごとに明示した方式をすべて外す。外したものがあれば True。"""
+    p = _srv._state.get("project")
+    if p is not None:
+        p.estimator_pref = None
+    s = _srv._state.get("session")
+    if s is None:
+        return False
+    s.reload_if_changed()
+    had = [t for t in s.tracks if s.estimator_of(t)]
+    for t in had:
+        t.pop("estimator", None)
+    if had:
+        s.save()
+    return bool(had)
+
+
 def prep_target(p):
     """analyze_take の合流先: p が編集対象のトラックのもので、ガイドが今の指定どおりなら (セッション, トラック)。"""
     s, tid = _session_of(p)

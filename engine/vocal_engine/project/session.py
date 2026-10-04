@@ -547,6 +547,11 @@ class Session:
         if t.get("ara_id") and sig and list(file_sig(t["path"]) or []) != list(sig):
             raise SessionError("DAW の音を読み込み中（%s）。少し待ってからやり直す" % t["name"])
 
+    @staticmethod
+    def estimator_of(t):
+        """トラックで明示した F0 の方式（analyze_take(estimator=…)。無ければ None = 選んでいる方式）。"""
+        return t.get("estimator") or None
+
     def open_project_for(self, t, reuse=True, lyrics=None, guide_lyrics=None):
         """トラックのプロジェクトを開く（ガイドはセッションの指定から）。(Project, ガイドが無い理由)。"""
         if t["kind"] != "vocal":
@@ -570,6 +575,7 @@ class Session:
             self._stash_guide_lyrics(pdir)
             p = Project.open(tclip, gclip, project_dir=pdir,
                              reuse=reuse, lyrics=lyrics, guide_lyrics=guide_lyrics)
+            p.estimator_pref = self.estimator_of(t)
             if gclip is not None:
                 p.guide_take_cache_path = self._guide_take_cache_path()
             missing = (why or "").startswith("ガイドの音声が見つからない") or (
@@ -637,6 +643,7 @@ class Session:
                 Project.open(tclip, gclip, project_dir=pdir, set_log=False, memo=False)
                 q = Project(pdir).load()
         q.background = True
+        q.estimator_pref = self.estimator_of(t)      # 表で明示した方式を、準備が既定の方式で上書きしない
         if ginfo is None:
             q.guide = None
             q.lyrics.pop("guide", None)

@@ -41,7 +41,7 @@ class Fake:
     """偽の解析。gate[(段, 周波数)] に Event を入れると、その段がそこで止まる（set で進む）。"""
 
     def __init__(self):
-        self.calls = {"f0": [], "dtw": [], "onsets": 0}
+        self.calls = {"f0": [], "dtw": [], "onsets": 0, "est": []}
         self.gate = {}
         self.entered = {}
         self.fail = set()
@@ -57,6 +57,7 @@ class Fake:
         f = _freq_of(x, sr)
         with self.lock:
             self.calls["f0"].append(f)
+            self.calls["est"].append((f, estimator))
         self._wait(("f0", f))
         if ("f0", f) in self.fail:
             raise RuntimeError("偽の F0 の失敗（%d Hz）" % f)
@@ -482,6 +483,40 @@ def test_force_analyze_does_not_race_with_prep(env):
     st = _state(prep, t1)
     assert st["state"] in ("ready", "queued")
     _until(_ready(prep, t1))
+
+
+def test_explicit_estimator_is_kept_by_prep(env):
+    """analyze_take(estimator=X) で解析した方式を、裏の準備が既定の方式で解析し直して差し替えない。
+    （準備が走っている最中に別の方式を明示 → 準備が譲った後に再開して、既定の方式で上書きしていた）"""
+    m, mt, prep, fake, paths, sdir = env
+    gate = fake.gate[("f0", FREQ["take"])] = threading.Event()
+    r = _open(m, paths, sdir, guide="g1")
+    t1 = r["session"]["current"]
+    _until(lambda: fake.entered.get(("f0", FREQ["take"])))
+    threading.Timer(0.3, gate.set).start()
+    _ok(m.analyze_take(estimator="praat", force=True))
+    _until(lambda: prep.PREPARER._running is None)
+    _until(_ready(prep, t1))
+    p = m._project()
+    p.reload_if_changed()
+    assert p.take_f0.estimator == "praat"
+    take_est = [e for f, e in fake.calls["est"] if f == FREQ["take"]]
+    assert take_est[-1] == "praat" and take_est.count("praat") == 1, take_est   # 後から rmvpe で上書きしていない
+    # 方式を省いた analyze_take もそのトラックの方式（praat）のまま。解析し直さない
+    n = len(fake.calls["f0"])
+    a = _ok(m.analyze_take())
+    assert a["f0"]["estimator"] == "praat" and len(fake.calls["f0"]) == n
+    # 画面で方式を選び直した（set_f0_estimator）ら、全体の方式に従う
+    try:
+        _ok(m.set_f0_estimator("gliss"))
+        _ok(m.analyze_take())
+        _until(_ready(prep, t1))
+        p = m._project()
+        p.reload_if_changed()
+        assert p.take_f0.estimator == "gliss"
+    finally:
+        from vocal_engine.analysis import f0 as F
+        F.set_preferred_estimator(None)
 
 
 def test_pause_and_foreground_yield(env):

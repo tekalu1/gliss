@@ -442,6 +442,7 @@ class Project:
         # （cache/guide-analysis.json など）は書かず、鍵付きの保存だけに書く。project.json へは
         # analyze の commit で、読み直した最新の内容に合わせて書く
         self.background = False
+        self.estimator_pref = None       # このトラックで明示した F0 の方式（None なら選んでいる方式。session.py のトラックの estimator）
         self._auto_proposed = []    # 最後の歌詞の自動推定で足した区間
         self._disk_sig = None      # project.json の (mtime_ns, size, file ID)
         self._base_edit_state = None
@@ -1107,7 +1108,8 @@ class Project:
                 cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None):
         """F0 → 音符 → （ガイドがあれば）DTW。結果は cache/ に保存する。
 
-        estimator: F0 の方式。省くと選んでいる方式（`f0.resolve_estimator`。画面の「ピッチ検出の方式」）。
+        estimator: F0 の方式。省くとこのトラックで明示した方式（`estimator_pref`）、無ければ選んでいる方式
+        （`f0.resolve_estimator`。画面の「ピッチ検出の方式」）。
         保存した解析が別の方式のものなら、テイクの F0 から解析し直す（ガイドの解析は方式ごとの鍵付きの保存）。
 
         stage: 段の名前（"take_f0" / "lyrics" / "guide_f0" / "alignment" / "onsets" / "phonemes"）を
@@ -1137,7 +1139,7 @@ class Project:
             else:
                 self._save_analysis()
 
-        estimator = f0mod.resolve_estimator(estimator)
+        estimator = f0mod.resolve_estimator(estimator if estimator is not None else self.estimator_pref)
         publish = not self.background   # 今の組み合わせを指す写しを書くか（裏の準備では書かない）
         advance(0.0)
         t0 = now_iso()
@@ -1362,7 +1364,7 @@ class Project:
         analyze_take はこのときジョブにせず、裏の準備にも合流せずにすぐ返す（issue #63）。見るもの:
         テイクの解析・歌詞の推定（済みか、推定できない）・ガイドの解析と対応付け（鍵付きの保存）・
         発音の頭・音素（今の歌詞の鍵付きの保存か、同じ入力で失敗したことを覚えているか）。"""
-        estimator = f0mod.resolve_estimator(estimator)
+        estimator = f0mod.resolve_estimator(estimator if estimator is not None else self.estimator_pref)
         take_cache = self._cache_path("take-analysis.json")
         if not os.path.exists(take_cache):
             return False

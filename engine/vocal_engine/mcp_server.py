@@ -659,8 +659,10 @@ def analyze_take(force: bool = False, estimator: str = None,
                  confidence_sweep: bool = False, background: bool = None) -> dict:
     """F0 → 音符のかたまり →（ガイドがあれば）DTW。結果はキャッシュする。
 
-    estimator: F0 の方式。省くと選んでいる方式（画面の「ピッチ検出の方式」・set_f0_estimator。既定 "rmvpe"。
-    RMVPE の重みが無ければ "gliss"）。"rmvpe"（既定・正）/ "gliss"（Gliss の F0 モデル。試作。同梱）/
+    estimator: F0 の方式。省くと、そのトラックで前に明示した方式、無ければ選んでいる方式（画面の「ピッチ検出の方式」・
+    set_f0_estimator。既定 "rmvpe"。RMVPE の重みが無ければ "gliss"）。**明示した方式はそのトラックの方式として覚え**
+    （session に保存。裏の準備もその方式で解析し、既定の方式で解析し直して差し替えない）、set_f0_estimator で選び直すと
+    全体の方式に戻る。"rmvpe"（既定・正）/ "gliss"（Gliss の F0 モデル。試作。同梱）/
     "praat"（Praat を歌声向けに調整したもの。重み不要）/ "fcpe"（代替。開発版だけ）/ "auto"（rmvpe → gliss）。
     保存した解析が別の方式のものなら、解析し直す
     confidence_sweep: 確信度を threshold 掃引で細かく出す（13 倍遅い）
@@ -679,9 +681,9 @@ def analyze_take(force: bool = False, estimator: str = None,
     from . import prep
     from . import mcp_tracks
     from .project.store import CacheBroken
-    est = f0mod.resolve_estimator(estimator)      # 知らない名前はここで ValueError
     p = _project()
     p.reload_if_changed()
+    est = f0mod.resolve_estimator(estimator if estimator is not None else p.estimator_pref)   # 知らない名前はここで ValueError
     est_sec = p.duration_sec * (0.45 * (13 if confidence_sweep else 1))
     if p.guide:
         est_sec += p.duration_sec * 1.2      # DTW の分
@@ -689,7 +691,7 @@ def analyze_take(force: bool = False, estimator: str = None,
     if background is None:
         background = est_sec > JOB_THRESHOLD_SEC and not (
             os.path.exists(os.path.join(p.dir, "cache", "take-analysis.json")) and not force)
-    default = not force and est == f0mod.resolve_estimator() and not confidence_sweep
+    default = not force and est == f0mod.resolve_estimator(p.estimator_pref) and not confidence_sweep
     # キャッシュを読むだけで済むなら、background を頼まれてもジョブにせず、裏の準備にも合流せずにすぐ返す
     # （issue #63。画面は常に background で呼ぶので、準備済みのトラックでも 200 ms の確認を待っていた）
     cached = default and p.analysis_cached()
@@ -728,6 +730,8 @@ def analyze_take(force: bool = False, estimator: str = None,
                     with ctx:
                         q.analyze(force=force, estimator=est, sweep=confidence_sweep,
                                   cancel=cancel, progress=report, commit=commit)
+                        # 明示した方式をそのトラックの方式にする（準備が譲っている間に。ここを出たら準備が再開する）
+                        mcp_tracks.remember_estimator(q, est)
                 break
             except CacheBroken:
                 # 壊れたファイルは外し、印も取り消した（`Project._cache_broken`）。1 回ごとに 1 つ外れる
@@ -2307,7 +2311,8 @@ def set_f0_estimator(estimator: str = "rmvpe") -> dict:
     """
     before = f0mod.resolve_estimator()
     effective = f0mod.set_preferred_estimator(estimator)
-    if effective != before:
+    cleared = _mcp_tracks.forget_track_estimators()      # analyze_take(estimator=…) で明示した方式は、選び直しで全体の方式に戻る
+    if effective != before or cleared:
         _mcp_tracks.reschedule_prep()            # 裏の準備の組み合わせ（方式を含む）を入れ直す
     return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
                estimators=list(f0mod.ESTIMATORS),
