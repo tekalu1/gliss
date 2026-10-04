@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
 """F0 推定。10 ms ホップ。方式は 4 つ:
 
-- "gliss": Gliss の F0 モデル。既定。条件のはっきりした学習データだけで学習した小さなモデル
-  （SwiftF0 と同じ構造。`models/gliss-f0.onnx`、同梱）
-- "rmvpe": RMVPE（ONNX）。重みは同梱せず、利用者が取得する（任意）。重みが無ければ Gliss のモデルで解析する
+- "rmvpe": RMVPE（ONNX）。既定。重みは同梱せず、利用者が取得する（初回の画面で任意）。重みが無ければ Gliss のモデルで解析する
+- "gliss": Gliss の F0 モデル。条件のはっきりした学習データだけで学習した小さなモデル
+  （SwiftF0 と同じ構造。`models/gliss-f0.onnx`、同梱）。RMVPE の重みが無いときに代わりに使う。
+  叫び・高い声への跳躍で 1 オクターブ上に誤ることがある（学習データに少ない種類の声）
 - "praat": Praat（parselmouth）の自己相関法。引数と有声の判定を歌声向けに調整したもの。重みは要らない
 - "fcpe": FCPE（torch。開発版だけ）
 
 どの方式で解析するか（`resolve_estimator`）: トラックで明示した方式（`analyze_take(estimator=…)`。呼び出し側が name で渡す）→
 利用者が選んだ方式（画面の「ピッチ検出の方式」・環境変数）→
-曲を前に解析した方式（`recorded`。既定を替えても、解析・編集済みの曲の音符の区切りを変えない）→ 既定（Gliss）。
+曲を前に解析した方式（`recorded`。RMVPE の重みを後から取った・消したときや、既定を替えたときに、
+解析・編集済みの曲の音符の区切りを変えない）→ 既定（RMVPE）。RMVPE になったのに重みが無ければ Gliss のモデル。
 
 V/UV は段階0（方式の評価）の判定を踏襲する:
     有声 = 方式が F0 を出している かつ フレーム RMS > -55 dBFS
@@ -46,8 +48,8 @@ GLISS_F0_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models
 
 # 画面・MCP で選べる方式（並びは画面の並び）と、版（方式の中身を変えたら上げる。解析のキャッシュを分ける）。
 # Gliss の F0 モデルの版は、同梱のモデルファイルの SHA-256（`estimator_version`。モデルを替えたら自動で変わる）
-ESTIMATORS = ("gliss", "rmvpe", "praat")
-DEFAULT_ESTIMATOR = "gliss"
+ESTIMATORS = ("rmvpe", "gliss", "praat")
+DEFAULT_ESTIMATOR = "rmvpe"
 ESTIMATOR_VERSIONS = {"praat": "1"}
 _CHAINS = {"rmvpe": ["rmvpe"], "gliss": ["gliss"], "praat": ["praat"], "fcpe": ["fcpe"],
            "auto": ["rmvpe", "gliss"]}
@@ -78,7 +80,7 @@ def chosen_estimator():
 
 
 def preferred_estimator():
-    """これから解析する曲の方式（選んだ方式。選んでいなければ既定の "gliss"）。"""
+    """これから解析する曲の方式（選んだ方式。選んでいなければ既定の "rmvpe"）。重みの有無は見ない（`resolve_estimator`）。"""
     return chosen_estimator() or DEFAULT_ESTIMATOR
 
 
@@ -263,10 +265,9 @@ def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
                 energy_floor_db=ENERGY_FLOOR_DB):
     """10 ms ホップの F0 と V/UV。
 
-    estimator: "rmvpe" / "gliss"（Gliss の F0 モデル） / "praat" / "fcpe"（代替） /
-               "auto"（rmvpe → 落ちたら gliss）。None なら `resolve_estimator()`（選んでいる方式・既定）。
-               引数の既定が "rmvpe" なのは、測る道具・テストの呼び出しが前と同じ結果になるため
-               （画面・MCP の解析は Project.analyze が方式を決めて渡す）
+    estimator: "rmvpe"（既定） / "gliss"（Gliss の F0 モデル） / "praat" / "fcpe"（代替） /
+               "auto"（rmvpe → 落ちたら gliss）。None なら `resolve_estimator()`（選んでいる方式・既定）
+               （画面・MCP の解析は Project.analyze が曲ごとの方式を決めて渡す）
     sweep:     RMVPE の confidence を threshold 掃引で作る（13 倍遅い。ほかの方式では使わない）
     """
     if x is None:
@@ -324,7 +325,7 @@ def _estimate_rmvpe(x, sr, n_frames, sweep, model_path, threshold):
     return f0g, confg
 
 
-# ---------------------------------------------------------------- Gliss の F0 モデル（既定）
+# ---------------------------------------------------------------- Gliss の F0 モデル
 # 入出力と前処理・後処理は SwiftF0（MIT。https://github.com/lars76/swift-f0 ）の推論コードに従う:
 # 16 kHz モノを入れると、256 サンプル（16 ms）ごとに F0（Hz）と較正済みの確信度（0..1）を返す。
 # STFT・ログ周波数への変換・復号はすべてグラフの中。長い音は 1875 フレームずつ、前に 11・後ろに 10 フレームの

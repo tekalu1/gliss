@@ -20,13 +20,12 @@ def test_engine_info_reports_missing_and_ready_models(tmp_path):
     assert missing["models_dir"] == str(tmp_path)
     assert not missing["rmvpe_model_found"]
     assert not missing["phonemes"]["model_found"]
-    # 既定は同梱の Gliss の F0 モデル（RMVPE の重みは任意）
+    # 既定は RMVPE。重み（初回の画面で任意）が無ければ、同梱の Gliss の F0 モデルで解析する
     assert missing["gliss_f0_model_found"]
-    assert missing["f0_estimator"] == "gliss" and missing["f0_estimator_effective"] == "gliss"
-    assert missing["f0_estimator_default"] == "gliss" and missing["f0_estimator_chosen"] is None
-    # RMVPE を選んでいても、重みが無ければ Gliss の F0 モデルで解析する
-    chosen = _info(tmp_path, GLISS_F0_ESTIMATOR="rmvpe")
-    assert chosen["f0_estimator"] == "rmvpe" and chosen["f0_estimator_effective"] == "gliss"
+    assert missing["f0_estimator"] == "rmvpe" and missing["f0_estimator_effective"] == "gliss"
+    assert missing["f0_estimator_default"] == "rmvpe" and missing["f0_estimator_chosen"] is None
+    chosen = _info(tmp_path, GLISS_F0_ESTIMATOR="gliss")
+    assert chosen["f0_estimator"] == "gliss" and chosen["f0_estimator_effective"] == "gliss"
 
     (tmp_path / "rmvpe.onnx").write_bytes(b"fake")
     hubert = tmp_path / "hubertfa" / "1218_hfa_model_new_dict"
@@ -36,5 +35,5 @@ def test_engine_info_reports_missing_and_ready_models(tmp_path):
     ready = _info(tmp_path)
     assert ready["rmvpe_model_found"]
     assert ready["phonemes"]["model_found"]
-    assert ready["f0_estimator_effective"] == "gliss"         # 重みがあっても既定は Gliss
-    assert _info(tmp_path, GLISS_F0_ESTIMATOR="rmvpe")["f0_estimator_effective"] == "rmvpe"
+    assert ready["f0_estimator_effective"] == "rmvpe"
+    assert _info(tmp_path, GLISS_F0_ESTIMATOR="gliss")["f0_estimator_effective"] == "gliss"

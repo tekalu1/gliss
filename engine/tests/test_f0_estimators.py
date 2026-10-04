@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""ピッチ（F0）検出の方式（Gliss の F0 モデル・RMVPE・Praat）。合成音だけで確かめる（素材は要らない）。
+"""ピッチ（F0）検出の方式（RMVPE・Gliss の F0 モデル・Praat）。合成音だけで確かめる（素材は要らない）。
 
 - どの方式も 10 ms の格子で F0 を返し、既知の音高に近い。無音は無声
-- 方式の選び方（`resolve_estimator`。既定は Gliss のモデル。RMVPE の重みが無ければ Gliss のモデル）
-- 曲ごとの方式（選んでいなければ、前に解析した方式のまま。既定を替えても解析し直さない）
+- 方式の選び方（`resolve_estimator`。既定は RMVPE。RMVPE の重みが無ければ Gliss のモデル）
+- 曲ごとの方式（選んでいなければ、前に解析した方式のまま。RMVPE の重みを後から取っても解析し直さない）
 - 解析のキャッシュが方式で分かれる（方式を替えたら解析し直し、同じ方式なら読むだけ）
 """
 import os
@@ -80,15 +80,21 @@ def test_gliss_long_input_matches_chunked_frames():
     assert np.max([_cents(v, 220.0) for v in mid[mid > 0]]) < 30
 
 
-def test_resolve_estimator(monkeypatch):
-    assert F.DEFAULT_ESTIMATOR == "gliss" and F.ESTIMATORS[0] == "gliss"
-    assert F.chosen_estimator() is None and F.preferred_estimator() == "gliss"
-    assert F.resolve_estimator() == "gliss"
+def test_resolve_estimator(tmp_path, monkeypatch):
+    monkeypatch.delenv(F.ESTIMATOR_ENV, raising=False)
+    assert F.DEFAULT_ESTIMATOR == "rmvpe" and F.ESTIMATORS[0] == "rmvpe"
+    assert F.chosen_estimator() is None and F.preferred_estimator() == "rmvpe"
+    fake = tmp_path / "rmvpe.onnx"
+    fake.write_bytes(b"fake")
+    monkeypatch.setattr(F, "RMVPE_PATH", str(fake))      # RMVPE の重みがある: 既定の RMVPE
+    assert F.resolve_estimator() == "rmvpe"
+    assert F.resolve_estimator(recorded="gliss") == "gliss"   # 重みが無いときに Gliss で解析した曲は、取った後もそのまま
     monkeypatch.setattr(F, "RMVPE_PATH", os.path.join(os.path.dirname(__file__), "no-such-rmvpe.onnx"))
-    F.set_preferred_estimator("rmvpe")
     assert F.preferred_estimator() == "rmvpe"
     assert F.resolve_estimator() == "gliss"             # RMVPE の重みが無い: 同梱のモデルで解析する
     assert F.resolve_estimator(recorded="rmvpe") == "gliss"
+    F.set_preferred_estimator("rmvpe")
+    assert F.resolve_estimator() == "gliss"
     assert F.resolve_estimator("rmvpe") == "rmvpe"      # 名前を指定したときはそのまま
     with pytest.raises(F.ModelMissingError):
         F.estimate_f0(x=_tone(sec=0.5), sr=SR, estimator="rmvpe")
@@ -102,7 +108,7 @@ def test_resolve_estimator(monkeypatch):
     F.set_preferred_estimator(None)
     assert F.chosen_estimator() is None
     assert F.resolve_estimator(recorded="praat") == "praat"   # 選んでいなければ曲を前に解析した方式
-    assert F.resolve_estimator(recorded="fcpe") == "gliss"    # 画面で選べない方式は既定に
+    assert F.resolve_estimator(recorded="fcpe") == "gliss"    # 画面で選べない方式は既定に（RMVPE の重みが無いので Gliss）
     monkeypatch.setenv(F.ESTIMATOR_ENV, "praat")
     assert F.chosen_estimator() == "praat"
     assert F.resolve_estimator() == "praat"
@@ -202,10 +208,13 @@ def test_mcp_set_f0_estimator_and_analyze_take(tmp_path, monkeypatch):
 
 
 def test_project_keeps_the_estimator_it_was_analyzed_with(tmp_path, monkeypatch):
-    """既定を替えても、前に解析した曲は前の方式のまま（音符の区切り・付けた編集の当たり方を変えない）。
-    新しい曲は既定（Gliss）。利用者が選んだ方式は曲の方式より強い。"""
+    """方式を選んでいなければ、前に解析した曲は前の方式のまま（音符の区切り・付けた編集の当たり方を変えない）。
+    新しい曲は既定（RMVPE。重みが無ければ Gliss）。RMVPE の重みを後から取っても、Gliss で解析した曲は Gliss のまま。
+    利用者が選んだ方式は曲の方式より強い。"""
     from vocal_engine.project import Project, store
     monkeypatch.setenv("VOCAL_ENGINE_AUTO_LYRICS", "0")
+    monkeypatch.delenv(F.ESTIMATOR_ENV, raising=False)
+    monkeypatch.setattr(F, "RMVPE_PATH", str(tmp_path / "no-such-rmvpe.onnx"))    # 初回に RMVPE を取らなかった
     assert store.recorded_estimator({}) is None
     assert store.recorded_estimator({"take": {"n_frames": 10}}) == "rmvpe"   # 方式を記録する前の解析
     assert store.recorded_estimator({"take": {"estimator": "praat"}}) == "praat"
@@ -221,7 +230,7 @@ def test_project_keeps_the_estimator_it_was_analyzed_with(tmp_path, monkeypatch)
     sf.write(take, _tone(), SR)
     old = str(tmp_path / "old")
 
-    # 前の版（既定が別の方式）で解析した曲に見立てる: 方式を指定して解析する
+    # 別の方式で解析した曲に見立てる: 方式を指定して解析する
     p = Project.open(take, project_dir=old)
     p.analyze(estimator="praat", auto_lyrics=False)
     assert p.analysis["take"]["estimator"] == "praat"
@@ -233,10 +242,19 @@ def test_project_keeps_the_estimator_it_was_analyzed_with(tmp_path, monkeypatch)
     p.analyze(auto_lyrics=False)
     assert calls == ["praat"] and p.take_f0.estimator == "praat"
 
-    q = Project.open(take, project_dir=str(tmp_path / "new"))    # 新しい曲: 既定
+    new = str(tmp_path / "new")
+    q = Project.open(take, project_dir=new)      # 新しい曲: 既定の RMVPE だが重みが無いので Gliss
     assert q.f0_estimator() == "gliss"
     q.analyze(auto_lyrics=False)
     assert calls == ["praat", "gliss"] and q.take_f0.estimator == "gliss"
+
+    fake = tmp_path / "rmvpe.onnx"               # 後から RMVPE の重みを取った
+    fake.write_bytes(b"fake")
+    monkeypatch.setattr(F, "RMVPE_PATH", str(fake))
+    assert Project.open(take, project_dir=new).f0_estimator() == "gliss"      # Gliss で解析した曲はそのまま
+    assert Project.open(take, project_dir=old).f0_estimator() == "praat"
+    assert Project.open(take, project_dir=str(tmp_path / "newer")).f0_estimator() == "rmvpe"   # 新しい曲は RMVPE
+    monkeypatch.setattr(F, "RMVPE_PATH", str(tmp_path / "no-such-rmvpe.onnx"))
 
     F.set_preferred_estimator("gliss")           # 利用者が選んだ: 前の曲もその方式で解析し直す
     p = Project.open(take, project_dir=old)
@@ -260,7 +278,7 @@ def test_mcp_keeps_the_estimator_per_project(tmp_path, monkeypatch):
         r = m.analyze_take(background=False)                   # 選んでいない: この曲の方式のまま
         assert r["f0"]["estimator"] == "praat"
         info = m.engine_info()
-        assert info["f0_estimator"] == "gliss" and info["f0_estimator_chosen"] is None
+        assert info["f0_estimator"] == "rmvpe" and info["f0_estimator_chosen"] is None
         assert info["f0_estimator_effective"] == "praat"
         assert m.open_project(take, project_dir=str(tmp_path / "project"))["ok"]   # 開き直しても同じ
         assert m.analyze_take(background=False)["f0"]["estimator"] == "praat"

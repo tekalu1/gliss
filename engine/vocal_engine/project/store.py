@@ -498,8 +498,8 @@ class Project:
 
     def f0_estimator(self, estimator=None):
         """この曲を解析する F0 の方式（`f0.resolve_estimator`）。estimator を省くと、このトラックで明示した方式
-        （`estimator_pref`）→ 選んだ方式 → この曲を前に解析した方式 → 既定（Gliss）。既定を替えても、
-        解析・編集済みの曲の音符の区切りは変えない。"""
+        （`estimator_pref`）→ 選んだ方式 → この曲を前に解析した方式 → 既定（RMVPE。重みが無ければ Gliss）。
+        RMVPE の重みを後から取った・既定を替えたときも、解析・編集済みの曲の音符の区切りは変えない。"""
         if estimator is None:
             estimator = self.estimator_pref
         return f0mod.resolve_estimator(estimator, recorded=recorded_estimator(self.analysis))

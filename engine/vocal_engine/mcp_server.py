@@ -660,10 +660,10 @@ def analyze_take(force: bool = False, estimator: str = None,
     """F0 → 音符のかたまり →（ガイドがあれば）DTW。結果はキャッシュする。
 
     estimator: F0 の方式。省くと、そのトラックで前に明示した方式 → 選んだ方式（画面の「ピッチ検出の方式」・
-    set_f0_estimator）→ この曲を前に解析した方式 → 既定 "gliss" の順で決める（RMVPE の重みが無ければ "gliss"）。
+    set_f0_estimator）→ この曲を前に解析した方式 → 既定 "rmvpe" の順で決める（RMVPE の重みが無ければ "gliss"）。
     **明示した方式はそのトラックの方式として覚え**（session に保存。裏の準備もその方式で解析し、既定の方式で
     解析し直して差し替えない）、set_f0_estimator で選び直すと全体の方式に戻る。
-    "gliss"（既定。Gliss の F0 モデル。同梱）/ "rmvpe"（重みは別に取得）/ "praat"（Praat を歌声向けに調整したもの。
+    "rmvpe"（既定・正。重みは別に取得）/ "gliss"（Gliss の F0 モデル。同梱）/ "praat"（Praat を歌声向けに調整したもの。
     重み不要）/ "fcpe"（代替。開発版だけ）/ "auto"（rmvpe → gliss）。
     保存した解析が別の方式のものなら、解析し直す
     confidence_sweep: 確信度を threshold 掃引で細かく出す（13 倍遅い）
@@ -2307,12 +2307,12 @@ def engine_info(reload_addons: bool = False) -> dict:
 
 
 @_tool
-def set_f0_estimator(estimator: str = "gliss") -> dict:
+def set_f0_estimator(estimator: str = "rmvpe") -> dict:
     """ピッチ（F0）検出の方式を選ぶ（このエンジン全体。画面の「ピッチ検出の方式」）。曲は変えない。
 
-    estimator: "gliss"（既定。Gliss の F0 モデル）/ "rmvpe"（重みは別に取得）/ "praat"。
+    estimator: "rmvpe"（既定。重みは別に取得）/ "gliss"（Gliss の F0 モデル。同梱）/ "praat"。
     この後の analyze_take・裏の準備がこの方式で解析する（前に別の方式で解析した曲も、この方式で解析し直す）。
-    選ぶまでは、曲ごとに前に解析した方式（まだ解析していない曲は既定の "gliss"）で解析する。
+    選ぶまでは、曲ごとに前に解析した方式（まだ解析していない曲は既定の "rmvpe"）で解析する。
     "rmvpe" を選んでいても重みが無ければ "gliss" で解析する（返り値の `effective`。開いている曲の方式）。
     """
     p = _project(required=False)

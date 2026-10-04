@@ -2,7 +2,7 @@
 """vocal_engine — Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジン（段階1）。
 
 構成:
-  analysis/  F0（既定は Gliss の F0 モデル（同梱）。RMVPE ONNX・Praat・FCPE も選べる）、音符のかたまり、音素（未実装）、ガイド対応付け
+  analysis/  F0（RMVPE ONNX を正。重みが無ければ Gliss の F0 モデル（同梱）。Praat・FCPE も選べる）、音符のかたまり、音素（未実装）、ガイド対応付け
   project/   元音声の参照＋解析キャッシュ＋編集リスト（非破壊）＋取り消し履歴
   render/    バックエンド抽象（既定は Praat の TD-PSOLA `praat`。自前 TD-PSOLA `psola`、`world` も選べる）
   view/      matplotlib(Agg) のピアノロール PNG
