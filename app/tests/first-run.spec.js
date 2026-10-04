@@ -112,7 +112,9 @@ async function fixture({ corrupt = false, failFirst = false, slow = false } = {}
     } };
 }
 
-test('重み無し・ダウンロード中・準備完了', async () => {
+const HUBERT_MODEL = ['hubertfa', '1218_hfa_model_new_dict', 'model.onnx'];
+
+test('重み無し・ダウンロード中・準備完了（RMVPE は任意で別に取る）', async () => {
   const f = await fixture({ slow: true });
   try {
     fs.mkdirSync(SHOTS, { recursive: true });
@@ -126,12 +128,20 @@ test('重み無し・ダウンロード中・準備完了', async () => {
     await expect(f.win.locator('#firstRunDrop')).toBeVisible();
     await expect(f.win.locator('#firstRunOpen')).toBeEnabled();
     await f.win.screenshot({ path: path.join(SHOTS, 'first-run-downloading.png') });
+    // 必須の重み（HubertFA）だけで準備完了。RMVPE（任意）は取らない
     await expect(f.win.locator('#modelSummary')).toHaveText('準備完了', { timeout: 30000 });
     await f.win.screenshot({ path: path.join(SHOTS, 'first-run-ready.png') });
-    expect(fs.existsSync(path.join(f.models, 'rmvpe.onnx'))).toBe(true);
-    expect(fs.existsSync(path.join(f.models, 'hubertfa', '1218_hfa_model_new_dict', 'model.onnx'))).toBe(true);
+    expect(fs.existsSync(path.join(f.models, ...HUBERT_MODEL))).toBe(true);
+    expect(fs.existsSync(path.join(f.models, 'rmvpe.onnx'))).toBe(false);
     await expect(f.win.locator('#modelDownloadButton')).toBeHidden();
     await expect(f.win.locator('#firstRunDrop')).toBeVisible();
+    // 任意の RMVPE は「RMVPE も取得」で取る
+    await expect(f.win.locator('#modelOptionalButton')).toContainText('RMVPE も取得（任意');
+    await f.win.locator('#modelOptionalButton').click();
+    await expect.poll(() => fs.existsSync(path.join(f.models, 'rmvpe.onnx')), { timeout: 30000 }).toBe(true);
+    await expect(f.win.locator('#modelSummary')).toHaveText('準備完了');
+    await expect(f.win.locator('#modelOptionalButton')).toBeHidden();
+    await expect(f.win.locator('#modelLicenseButton')).toBeHidden();
   } finally { await f.close(); }
 });
 
@@ -150,8 +160,10 @@ test('通信失敗後に再試行できる', async () => {
 test('SHA-256 不一致を拒否する', async () => {
   const f = await fixture({ corrupt: true });
   try {
-    await f.win.locator('#modelDownloadButton').click();
+    await f.win.locator('#modelOptionalButton').click();      // 壊れているのは RMVPE（任意）の zip
     await expect(f.win.locator('#modelError')).toContainText('SHA-256 が一致しない');
+    await expect(f.win.locator('#modelOptionalButton')).toHaveText('RMVPE を再試行');
+    await expect(f.win.locator('#modelDownloadButton')).toHaveText('ダウンロード');
     expect(fs.existsSync(path.join(f.models, 'rmvpe.onnx'))).toBe(false);
   } finally { await f.close(); }
 });
@@ -163,6 +175,7 @@ test('取り消すとダウンロードを止める', async () => {
     await expect(f.win.locator('#modelCancelButton')).toBeVisible();
     await f.win.locator('#modelCancelButton').click();
     await expect(f.win.locator('#modelDownloadButton')).toBeVisible();
+    expect(fs.existsSync(path.join(f.models, ...HUBERT_MODEL))).toBe(false);
     expect(fs.existsSync(path.join(f.models, 'rmvpe.onnx'))).toBe(false);
   } finally { await f.close(); }
 });

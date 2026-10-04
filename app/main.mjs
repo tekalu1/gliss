@@ -721,15 +721,18 @@ ipcMain.handle('app.modelCancel', () => {
   modelDownload?.abort();
   return !!modelDownload;
 });
-ipcMain.handle('app.modelStart', async () => {
+ipcMain.handle('app.modelStart', async (_e, ids) => {
   if (modelDownload) return modelProgress;
+  // ids: 取得するモデル（省くと必須のものだけ）。知らない id は無視する
+  const known = new Set(sourcesFromEnvironment().map((s) => s.id));
+  const wanted = Array.isArray(ids) ? ids.filter((id) => known.has(id)) : null;
   const info = await callTool('engine_info');
   if (info.ok === false) throw new Error(info.error || 'エンジンに接続できない');
   const controller = new AbortController();
   modelDownload = controller;
   // IPC の返答を待たせずに開始し、進捗をすぐ画面へ送る。
   void downloadModels({ net, sources: sourcesFromEnvironment(), modelsDir: MODELS_DIR,
-    present: modelPresence(info), signal: controller.signal, progress: publishModelProgress })
+    present: modelPresence(info), ids: wanted, signal: controller.signal, progress: publishModelProgress })
     .catch((err) => publishModelProgress({ phase: controller.signal.aborted ? 'cancelled' : 'failed',
       error: String(err.message || err), bytes: modelProgress.bytes, total: modelProgress.total }))
     .finally(() => { modelDownload = null; });
