@@ -4,7 +4,7 @@
     vocal-engine.exe            MCP サーバー（stdio）。`python -m vocal_engine.mcp` と同じ
     vocal-engine.exe --check    依存が入っているか・torch を読み込んでいないか・アドオンを読めるかを JSON で出して終わる
 
-重みは Gliss の F0 モデルのほかは同梱しない。環境変数 VOCAL_ENGINE_MODELS_DIR か、既定の %LOCALAPPDATA%\\Gliss\\models（`vocal_engine/config.py`）。
+重みは Gliss の F0 モデル（RMVPE の重みが無いときのピッチ検出）のほかは同梱しない。環境変数 VOCAL_ENGINE_MODELS_DIR か、既定の %LOCALAPPDATA%\\Gliss\\models（`vocal_engine/config.py`）。
 """
 import json
 import os
