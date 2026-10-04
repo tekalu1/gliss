@@ -28,6 +28,7 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
     - pytest: `<wt>\engine` を cwd にして `<main>\.venv\Scripts\python.exe -m pytest`。`.venv` には main の `engine` が editable で入っている。
       `python -m` は cwd を `sys.path` の先頭に入れるので、cwd が `<wt>\engine` のときだけ worktree の `vocal_engine` が読まれる。
       迷ったら `python -c "import vocal_engine; print(vocal_engine.__file__)"` で確かめる。
+      確かめ用のスクリプトを `python <file>.py` で走らせると cwd は `sys.path` に入らず、main の `vocal_engine` を読む（worktree の変更が効かないまま結果が出る）。スクリプトの頭で `sys.path.insert(0, "<wt>/engine")` する。
   - 解析モデルの重みは `%LOCALAPPDATA%\Gliss\models` を共有する（読むだけ）。
 
 ## 構成
