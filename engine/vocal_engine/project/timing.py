@@ -684,6 +684,54 @@ def plan_reset_timing(project, note_ids):
     return plan
 
 
+IDENTITY_TOL_SEC = 1e-5      # 時間の対応が元どおり（編集後の秒 = 編集前の秒）とみなすずれ
+
+
+def reset_timing_window(project, start_sec, end_sec):
+    """範囲の「オリジナルに戻す」のタイミング: (外す編集の id, [A, B])。
+
+    範囲にかかるタイミングの編集（stretch / crop / silence / move / move_boundary）を、
+    時間の対応が元どおりの所（編集後の秒 = 編集前の秒。後ろをずらさない編集の組の切れ目）まで
+    [A, B] を広げて丸ごと外す。外した後の [A, B] は原音の時間、その外は今のまま。
+    ノートの頭・尻を元の位置へ戻す計画（`plan_reset_timing`）は、今のノートの切れ目と合わない編集
+    （解析の方式・版が変わった後の古い編集）を外しきれず、補う伸縮を足してしまう。範囲で戻すときはこちら。"""
+    tm = current_map(project)
+    src = tm.src
+    dur = float(project.duration_sec)
+
+    def delta(t, side):
+        return tm.at(t, side) - t
+
+    def span(e):
+        a, b = project.edit_span(e)
+        return float(a), float(b)
+
+    timing = [e for e in project.edits if e.kind in TIMING_KINDS]
+    A, B = float(start_sec), float(end_sec)
+    for _ in range(1000):
+        lo, hi = A, B
+        for e in timing:
+            a, b = span(e)
+            if (b > A and a < B) or (A - 1e-9 <= a <= B + 1e-9 and b - a <= 1e-9):
+                lo, hi = min(lo, a), max(hi, b)
+        # 左端は「そこより前の編集の積み上げ」が 0、右端は「そこまでの積み上げ」が 0 の所まで広げる
+        if abs(delta(lo, "left")) > IDENTITY_TOL_SEC:
+            ok = [s for s in src if s < lo and abs(delta(s, "left")) <= IDENTITY_TOL_SEC]
+            lo = float(max(ok)) if ok else 0.0
+        if abs(delta(hi, "right")) > IDENTITY_TOL_SEC:
+            ok = [s for s in src if s > hi and abs(delta(s, "right")) <= IDENTITY_TOL_SEC]
+            hi = float(min(ok)) if ok else dur
+        if lo == A and hi == B:
+            break
+        A, B = lo, hi
+    rm = []
+    for e in timing:
+        a, b = span(e)
+        if (b > A and a < B) or (A - 1e-9 <= a <= B + 1e-9 and b - a <= 1e-9):
+            rm.append(e.id)
+    return rm, [A, B]
+
+
 def plan_range_stretch(project, start_sec, end_sec, ratio):
     """範囲 [start, end]（1 つのノートの中）を ratio 倍。同じノートの残りが吸収する。"""
     st, tm = build_structure(project)

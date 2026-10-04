@@ -637,7 +637,7 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 - `list_notes` / `export_view_data` の `fade_in_sec` / `fade_out_sec` に今の値（ノートに収めたもの）が出る。
   `reset_to_original` でそのノートのフェードも外れる。
 
-### `reset_to_original(note_ids?, start_sec?, end_sec?, boundary_ids?)`
+### `reset_to_original(note_ids?, start_sec?, end_sec?, boundary_ids?, whole_track?)`
 
 `reset_to_original` はピッチの編集を外し（範囲のピッチ編集と鉛筆は、そのノートにかかる部分だけ外す）、タイミングは頭・尻を元の位置へ戻す計画で組み直す
 （接続された隣は伸び縮みで合わせる。後ろはずれない）。戻したノートは原音のサンプルそのもの。
@@ -645,6 +645,14 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 `boundary_ids`（`get_phonemes` の `boundaries[].id`）を渡すと、その音素の境目を動かした編集（`move_boundary`）を外す
 （画面の音素の右クリック「子音｜母音の境目を元に戻す」。`export_view_data` の `phonemes.boundaries[].moved`）。
 これも取り消せる（`undo`）。
+
+**範囲（`start_sec` / `end_sec`）で渡したとき**は、範囲（とそこにかかる音程のノート）の音程・タイミング・無音・フェード・接続・
+なだらかさの編集を**全部外す**。範囲の中は書き出しで元のファイルとサンプル一致になる。タイミングの編集（stretch / crop / silence /
+move_boundary）は、範囲の端をまたぐ組があれば、時間の対応が元どおり（編集後の秒 = 編集前の秒）の所まで範囲を広げて丸ごと
+外す（返り値の `timing_span_sec`・`widened`）。補う伸縮は足さない。以前はノートの頭・尻を元の位置へ戻す計画で組み直していたので、
+解析し直してノートの切れ目が変わった後の古い編集（音素単位の伸縮など）を外しきれず、補う伸縮を足して編集が増え、
++45 ms のずれが残った。分割・結合（ノートの切れ目）は残す。`whole_track=true` はトラック全体（0〜素材の長さ）を同じ規則で戻す
+（取り消し 1 回）。ノート（`note_ids`）だけで渡したときは今までどおり（接続された隣は伸び縮みで合わせる）。
 
 ### 2-9. 取り消し `undo(changeset_id?)` / `redo()` — 曲で 1 本の履歴（issue #16）
 

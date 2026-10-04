@@ -1620,7 +1620,7 @@ def set_fade(note_ids: list, fade_in_sec: float = None, fade_out_sec: float = No
 
 @_tool
 def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: float = None,
-                      author: str = "ai", boundary_ids: list = None) -> dict:
+                      author: str = "ai", boundary_ids: list = None, whole_track: bool = False) -> dict:
     """指定したノート／範囲を原音に戻す（1 つの changeset）。
 
     ピッチの編集は外す（鉛筆はこのノートにかかる部分だけ外す）。タイミングは**ノートの頭・尻を元の位置へ戻す**（接続された隣は
@@ -1632,10 +1632,17 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
 
     boundary_ids: **音素の境目**（get_phonemes の boundaries[].id）を動かした編集（move_boundary）を
       外す（画面の音素の右クリック「子音｜母音の境目を元に戻す」）。ノートと一緒に渡してもよい
+    範囲（start_sec / end_sec）で渡したときは、範囲の**音程・タイミング・無音・フェード・接続・なだらかさの編集を
+      全部外して**原音に戻す。タイミングは、範囲の端をまたぐ編集の組があれば、時間の対応が元どおりの所まで広げて
+      外す（返り値の timing_span_sec・widened。補う伸縮は足さない）。解析し直してノートの切れ目が変わった後の
+      古い編集も外れる。分割・結合（ノートの切れ目）は残す
+    whole_track: True でトラック全体を原音に戻す（範囲 = 0〜素材の長さ。1 回の取り消しで戻せる）
     """
     from .project import timing as TM
     p = _project()
     p.reload_if_changed()
+    if whole_track:
+        start_sec, end_sec = 0.0, float(p.duration_sec)
     ids = []
     if note_ids:
         ids = [i for i in note_ids]
@@ -1658,22 +1665,46 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
                    boundary_ids=list(boundary_ids), total_edits=len(p.edits))
     pitched = {n.id for n in TM.pitched_notes(p)}
     spans = {n.id: (n.start_sec, n.end_sec) for n in p.take_notes if n.id in ids}
+    span_list = list(spans.values())
+    window = None
+    if start_sec is not None or end_sec is not None:
+        # 範囲: 範囲とそこにかかる音程のノートを丸ごと（ノート単位の編集の外に残った範囲の編集も外す）。
+        # 無音・息の長い区間で範囲を広げない
+        ps = [sp for i, sp in spans.items() if i in pitched]
+        lo = min([t0] + [s for s, _ in ps])
+        hi = max([t1] + [e for _, e in ps])
+        span_list.append((lo, hi))
+        window = (lo, hi)
     from .project import pitch as PI
     rm = []
-    d_rm, d_add = PI.trim_draws(p, list(spans.values()))   # 鉛筆はこのノートにかかる部分だけ外す
+    d_rm, d_add = PI.trim_draws(p, span_list)   # 鉛筆はこのノートにかかる部分だけ外す
     rm += d_rm
-    p_rm, p_add = PI.trim_pitch_edits(p, list(spans.values()))
+    p_rm, p_add = PI.trim_pitch_edits(p, span_list)
     rm += p_rm
     specs = list(d_add) + list(p_add)
     rm += b_rm
-    m_rm, m_add = _trim_mutes(p, list(spans.values()))      # 無音にしたノートの音を戻す
+    m_rm, m_add = _trim_mutes(p, span_list)      # 無音にしたノートの音を戻す
     rm += m_rm
-    from .project.fades import trim_fades
-    rm += [i for i in trim_fades(p, list(spans.values())) if i not in rm]   # フェードも外す
+    from .project.fades import trim_fades, fade_edits, anchor_of
+    rm += [i for i in trim_fades(p, span_list) if i not in rm]   # フェードも外す
     specs += m_add
-    tids = [i for i in ids if i in pitched]
-    if tids:
-        plan = TM.plan_reset_timing(p, tids)
+    timing_span = None
+    if window is not None:
+        # 範囲のタイミングは、時間の対応が元どおりの所まで広げて編集を丸ごと外す（補う伸縮を足さない）
+        r_ids, timing_span = TM.reset_timing_window(p, *window)
+        rm += [i for i in r_ids if i not in rm]
+        lo, hi = window
+        rm += [e.id for e in fade_edits(p) if lo - 1e-9 <= anchor_of(e) <= hi + 1e-9
+               and e.id not in rm]
+        rm += [e.id for e in p.edits if e.kind in ("connection", "transition")
+               and e.id not in rm
+               and lo - 1e-9 <= p.edit_span(e)[0] and p.edit_span(e)[1] <= hi + 1e-9]
+        outside = [i for i in ids if i in pitched and i in spans
+                   and (spans[i][1] <= lo or spans[i][0] >= hi)]
+    else:
+        outside = [i for i in ids if i in pitched]
+    if outside:
+        plan = TM.plan_reset_timing(p, outside)
         r_ids, t_specs, _ = TM.realize(p, plan, 1.0)
         specs += t_specs
         rm += [i for i in r_ids if i not in rm]
@@ -1681,8 +1712,15 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
         return _ok(changeset=None, removed=0, message="対象の編集が無かった")
     cs = p.apply_changes(rm, specs, author=author, label="原音に戻す（%d ノート）" % len(ids))
     _rec(p, cs, "オリジナルに戻す")
-    return _ok(changeset=cs.id, removed=len(rm), added=len(specs), note_ids=ids,
-               total_edits=len(p.edits))
+    out = {"changeset": cs.id, "removed": len(rm), "added": len(specs), "note_ids": ids,
+           "total_edits": len(p.edits)}
+    if window is not None:
+        out["timing_span_sec"] = [round(timing_span[0], 6), round(timing_span[1], 6)]
+        out["widened"] = bool(timing_span[0] < window[0] - 1e-6 or timing_span[1] > window[1] + 1e-6)
+        if out["widened"]:
+            out["note"] = ("範囲の端をまたぐタイミングの編集があったので、時間の対応が元どおりの所まで"
+                           "広げて外した（timing_span_sec）")
+    return _ok(**out)
 
 
 @_tool
