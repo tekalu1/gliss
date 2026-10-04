@@ -14,7 +14,8 @@ def test_f0_shape_and_hop(f0_take):
     assert f0r.n_frames == n_expect
     assert f0r.hop_s == 0.010
     assert f0r.f0.shape == f0r.confidence.shape == f0r.voiced.shape == f0r.rms_db.shape
-    assert f0r.estimator == "rmvpe"
+    from vocal_engine.analysis.f0 import resolve_estimator
+    assert f0r.estimator == resolve_estimator()        # 既定の方式（Gliss の F0 モデル）
     # V/UV は「F0 が出ている ∧ RMS > -55 dBFS」
     assert np.all(f0r.f0[~f0r.voiced] == 0)
     assert 0.2 < float(np.mean(f0r.voiced)) < 0.95

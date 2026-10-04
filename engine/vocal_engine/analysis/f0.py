@@ -1,11 +1,15 @@
 # -*- coding: utf-8 -*-
 """F0 推定。10 ms ホップ。方式は 4 つ:
 
-- "rmvpe": RMVPE（ONNX）。既定。重みは同梱せず、利用者が取得する
-- "gliss": Gliss の F0 モデル（試作）。条件のはっきりした学習データだけで学習した小さなモデル
-  （SwiftF0 と同じ構造。`models/gliss-f0.onnx`、同梱）。RMVPE の重みが無いときの既定
+- "gliss": Gliss の F0 モデル。既定。条件のはっきりした学習データだけで学習した小さなモデル
+  （SwiftF0 と同じ構造。`models/gliss-f0.onnx`、同梱）
+- "rmvpe": RMVPE（ONNX）。重みは同梱せず、利用者が取得する（任意）。重みが無ければ Gliss のモデルで解析する
 - "praat": Praat（parselmouth）の自己相関法。引数と有声の判定を歌声向けに調整したもの。重みは要らない
 - "fcpe": FCPE（torch。開発版だけ）
+
+どの方式で解析するか（`resolve_estimator`）: トラックで明示した方式（`analyze_take(estimator=…)`。呼び出し側が name で渡す）→
+利用者が選んだ方式（画面の「ピッチ検出の方式」・環境変数）→
+曲を前に解析した方式（`recorded`。既定を替えても、解析・編集済みの曲の音符の区切りを変えない）→ 既定（Gliss）。
 
 V/UV は段階0（方式の評価）の判定を踏襲する:
     有声 = 方式が F0 を出している かつ フレーム RMS > -55 dBFS
@@ -37,20 +41,21 @@ from ..config import models_dir as _models_dir  # noqa: E402
 DEFAULT_MODELS_DIR = _models_dir()
 RMVPE_PATH = os.path.join(DEFAULT_MODELS_DIR, "rmvpe.onnx")
 
-# Gliss の F0 モデル（試作）。エンジンと一緒に配る（135 KB。配布版は vocal-engine.spec が exe に入れる）
+# Gliss の F0 モデル。エンジンと一緒に配る（135 KB。配布版は vocal-engine.spec が exe に入れる）
 GLISS_F0_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "gliss-f0.onnx")
 
 # 画面・MCP で選べる方式（並びは画面の並び）と、版（方式の中身を変えたら上げる。解析のキャッシュを分ける）。
 # Gliss の F0 モデルの版は、同梱のモデルファイルの SHA-256（`estimator_version`。モデルを替えたら自動で変わる）
-ESTIMATORS = ("rmvpe", "gliss", "praat")
+ESTIMATORS = ("gliss", "rmvpe", "praat")
+DEFAULT_ESTIMATOR = "gliss"
 ESTIMATOR_VERSIONS = {"praat": "1"}
 _CHAINS = {"rmvpe": ["rmvpe"], "gliss": ["gliss"], "praat": ["praat"], "fcpe": ["fcpe"],
            "auto": ["rmvpe", "gliss"]}
-ESTIMATOR_ENV = "GLISS_F0_ESTIMATOR"     # 起動時の既定（画面は set_f0_estimator で選ぶ）
+ESTIMATOR_ENV = "GLISS_F0_ESTIMATOR"     # 利用者が選んだ方式（画面が起動時に渡す。画面は set_f0_estimator で選ぶ）
 
 _MODEL_CACHE = {}
 _MODEL_LOCK = threading.Lock()     # 裏の準備（issue #63）と表が同時に初めて読むとき、2 回読まない
-_preferred = None                  # set_preferred_estimator で選んだ方式（None なら環境変数・既定）
+_preferred = None                  # set_preferred_estimator で選んだ方式（None なら環境変数）
 
 
 class ModelMissingError(RuntimeError):
@@ -64,16 +69,22 @@ def check_estimator(name):
     return name
 
 
-def preferred_estimator():
-    """選んでいる方式（`set_preferred_estimator` → 環境変数 GLISS_F0_ESTIMATOR → "rmvpe"）。"""
+def chosen_estimator():
+    """利用者が選んだ方式（`set_preferred_estimator` → 環境変数 GLISS_F0_ESTIMATOR）。選んでいなければ None。"""
     if _preferred:
         return _preferred
     env = (os.environ.get(ESTIMATOR_ENV) or "").strip().lower()
-    return env if env in ESTIMATORS else "rmvpe"
+    return env if env in ESTIMATORS else None
+
+
+def preferred_estimator():
+    """これから解析する曲の方式（選んだ方式。選んでいなければ既定の "gliss"）。"""
+    return chosen_estimator() or DEFAULT_ESTIMATOR
 
 
 def set_preferred_estimator(name):
-    """画面で選んだ方式をエンジン全体の既定にする（解析・裏の準備が使う）。None で戻す。"""
+    """画面で選んだ方式をエンジン全体の方式にする（解析・裏の準備が使う。前に解析した曲もこの方式で
+    解析し直す）。None で戻す（曲ごとに前の方式・新しい曲は既定）。"""
     global _preferred
     if name is not None and name not in ESTIMATORS:
         raise ValueError("estimator は %s のどれか（%r は知らない）" % (" / ".join(ESTIMATORS), name))
@@ -85,11 +96,12 @@ def rmvpe_available():
     return os.path.exists(RMVPE_PATH)
 
 
-def resolve_estimator(name=None):
-    """実際に使う方式。name を省くと選んでいる方式で、それが RMVPE なのに重みが無ければ Gliss のモデル。
+def resolve_estimator(name=None, recorded=None):
+    """実際に使う方式。name を省くと、選んだ方式 → recorded（その曲を前に解析した方式）→ 既定 の順で決め、
+    それが RMVPE なのに重みが無ければ Gliss のモデル。
     名前を指定したときは、そのまま使う（RMVPE の重みが無ければ ModelMissingError になる）。"""
     if name is None:
-        name = preferred_estimator()
+        name = chosen_estimator() or (recorded if recorded in ESTIMATORS else None) or DEFAULT_ESTIMATOR
         if name == "rmvpe" and not rmvpe_available():
             return "gliss"
         return name
@@ -251,8 +263,10 @@ def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
                 energy_floor_db=ENERGY_FLOOR_DB):
     """10 ms ホップの F0 と V/UV。
 
-    estimator: "rmvpe"（正） / "gliss"（Gliss の F0 モデル。試作） / "praat" / "fcpe"（代替） /
-               "auto"（rmvpe → 落ちたら gliss）。None なら `resolve_estimator()`（選んでいる方式）
+    estimator: "rmvpe" / "gliss"（Gliss の F0 モデル） / "praat" / "fcpe"（代替） /
+               "auto"（rmvpe → 落ちたら gliss）。None なら `resolve_estimator()`（選んでいる方式・既定）。
+               引数の既定が "rmvpe" なのは、測る道具・テストの呼び出しが前と同じ結果になるため
+               （画面・MCP の解析は Project.analyze が方式を決めて渡す）
     sweep:     RMVPE の confidence を threshold 掃引で作る（13 倍遅い。ほかの方式では使わない）
     """
     if x is None:
@@ -310,7 +324,7 @@ def _estimate_rmvpe(x, sr, n_frames, sweep, model_path, threshold):
     return f0g, confg
 
 
-# ---------------------------------------------------------------- Gliss の F0 モデル（試作）
+# ---------------------------------------------------------------- Gliss の F0 モデル（既定）
 # 入出力と前処理・後処理は SwiftF0（MIT。https://github.com/lars76/swift-f0 ）の推論コードに従う:
 # 16 kHz モノを入れると、256 サンプル（16 ms）ごとに F0（Hz）と較正済みの確信度（0..1）を返す。
 # STFT・ログ周波数への変換・復号はすべてグラフの中。長い音は 1875 フレームずつ、前に 11・後ろに 10 フレームの

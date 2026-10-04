@@ -60,10 +60,11 @@ def needs_material(*symbols):
 
 @pytest.fixture(scope="session")
 def f0_take():
+    """テイクの F0（画面と同じ既定の方式。GLISS_F0_ESTIMATOR で替えられる）。"""
     from vocal_engine.analysis.f0 import estimate_f0
     from vocal_engine.audio import read_mono
     x, sr = read_mono(TAKE)
-    return estimate_f0(x=x, sr=sr), x, sr
+    return estimate_f0(x=x, sr=sr, estimator=None), x, sr
 
 
 @pytest.fixture

@@ -659,11 +659,12 @@ def analyze_take(force: bool = False, estimator: str = None,
                  confidence_sweep: bool = False, background: bool = None) -> dict:
     """F0 → 音符のかたまり →（ガイドがあれば）DTW。結果はキャッシュする。
 
-    estimator: F0 の方式。省くと、そのトラックで前に明示した方式、無ければ選んでいる方式（画面の「ピッチ検出の方式」・
-    set_f0_estimator。既定 "rmvpe"。RMVPE の重みが無ければ "gliss"）。**明示した方式はそのトラックの方式として覚え**
-    （session に保存。裏の準備もその方式で解析し、既定の方式で解析し直して差し替えない）、set_f0_estimator で選び直すと
-    全体の方式に戻る。"rmvpe"（既定・正）/ "gliss"（Gliss の F0 モデル。試作。同梱）/
-    "praat"（Praat を歌声向けに調整したもの。重み不要）/ "fcpe"（代替。開発版だけ）/ "auto"（rmvpe → gliss）。
+    estimator: F0 の方式。省くと、そのトラックで前に明示した方式 → 選んだ方式（画面の「ピッチ検出の方式」・
+    set_f0_estimator）→ この曲を前に解析した方式 → 既定 "gliss" の順で決める（RMVPE の重みが無ければ "gliss"）。
+    **明示した方式はそのトラックの方式として覚え**（session に保存。裏の準備もその方式で解析し、既定の方式で
+    解析し直して差し替えない）、set_f0_estimator で選び直すと全体の方式に戻る。
+    "gliss"（既定。Gliss の F0 モデル。同梱）/ "rmvpe"（重みは別に取得）/ "praat"（Praat を歌声向けに調整したもの。
+    重み不要）/ "fcpe"（代替。開発版だけ）/ "auto"（rmvpe → gliss）。
     保存した解析が別の方式のものなら、解析し直す
     confidence_sweep: 確信度を threshold 掃引で細かく出す（13 倍遅い）
     background: 省略時は長さから自動判断（20 秒を超えそうならジョブにする）。解析がキャッシュを読むだけで
@@ -681,9 +682,11 @@ def analyze_take(force: bool = False, estimator: str = None,
     from . import prep
     from . import mcp_tracks
     from .project.store import CacheBroken
+    if estimator is not None:
+        f0mod.check_estimator(estimator)          # 知らない名前はここで ValueError
     p = _project()
     p.reload_if_changed()
-    est = f0mod.resolve_estimator(estimator if estimator is not None else p.estimator_pref)   # 知らない名前はここで ValueError
+    est = p.f0_estimator(estimator)
     est_sec = p.duration_sec * (0.45 * (13 if confidence_sweep else 1))
     if p.guide:
         est_sec += p.duration_sec * 1.2      # DTW の分
@@ -691,7 +694,7 @@ def analyze_take(force: bool = False, estimator: str = None,
     if background is None:
         background = est_sec > JOB_THRESHOLD_SEC and not (
             os.path.exists(os.path.join(p.dir, "cache", "take-analysis.json")) and not force)
-    default = not force and est == f0mod.resolve_estimator(p.estimator_pref) and not confidence_sweep
+    default = not force and est == p.f0_estimator() and not confidence_sweep
     # キャッシュを読むだけで済むなら、background を頼まれてもジョブにせず、裏の準備にも合流せずにすぐ返す
     # （issue #63。画面は常に background で呼ぶので、準備済みのトラックでも 200 ms の確認を待っていた）
     cached = default and p.analysis_cached()
@@ -2288,7 +2291,9 @@ def engine_info(reload_addons: bool = False) -> dict:
                rmvpe_model=f0mod.RMVPE_PATH,
                rmvpe_model_found=os.path.exists(f0mod.RMVPE_PATH),
                f0_estimator=f0mod.preferred_estimator(),
-               f0_estimator_effective=f0mod.resolve_estimator(),
+               f0_estimator_chosen=f0mod.chosen_estimator(),
+               f0_estimator_effective=(p.f0_estimator() if p else f0mod.resolve_estimator()),
+               f0_estimator_default=f0mod.DEFAULT_ESTIMATOR,
                f0_estimators=list(f0mod.ESTIMATORS),
                gliss_f0_model_found=os.path.exists(f0mod.GLISS_F0_PATH),
                models_dir=f0mod.DEFAULT_MODELS_DIR,
@@ -2302,17 +2307,24 @@ def engine_info(reload_addons: bool = False) -> dict:
 
 
 @_tool
-def set_f0_estimator(estimator: str = "rmvpe") -> dict:
-    """ピッチ（F0）検出の方式を選ぶ（このエンジンの既定。画面の「ピッチ検出の方式」）。曲は変えない。
+def set_f0_estimator(estimator: str = "gliss") -> dict:
+    """ピッチ（F0）検出の方式を選ぶ（このエンジン全体。画面の「ピッチ検出の方式」）。曲は変えない。
 
-    estimator: "rmvpe"（既定）/ "gliss"（Gliss の F0 モデル。試作）/ "praat"。
-    この後の analyze_take・裏の準備がこの方式で解析する（保存した解析が別の方式のものなら解析し直す）。
-    "rmvpe" を選んでいても重みが無ければ "gliss" で解析する（返り値の `effective`）。
+    estimator: "gliss"（既定。Gliss の F0 モデル）/ "rmvpe"（重みは別に取得）/ "praat"。
+    この後の analyze_take・裏の準備がこの方式で解析する（前に別の方式で解析した曲も、この方式で解析し直す）。
+    選ぶまでは、曲ごとに前に解析した方式（まだ解析していない曲は既定の "gliss"）で解析する。
+    "rmvpe" を選んでいても重みが無ければ "gliss" で解析する（返り値の `effective`。開いている曲の方式）。
     """
-    before = f0mod.resolve_estimator()
-    effective = f0mod.set_preferred_estimator(estimator)
+    p = _project(required=False)
+
+    def now():
+        return p.f0_estimator() if p is not None else f0mod.resolve_estimator()
+
+    before, chosen = now(), f0mod.chosen_estimator()
+    f0mod.set_preferred_estimator(estimator)
     cleared = _mcp_tracks.forget_track_estimators()      # analyze_take(estimator=…) で明示した方式は、選び直しで全体の方式に戻る
-    if effective != before or cleared:
+    effective = now()
+    if effective != before or f0mod.chosen_estimator() != chosen or cleared:
         _mcp_tracks.reschedule_prep()            # 裏の準備の組み合わせ（方式を含む）を入れ直す
     return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
                estimators=list(f0mod.ESTIMATORS),
