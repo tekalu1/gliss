@@ -97,7 +97,7 @@ DAW がイベントの上に音符を描く・MIDI に書き出す・ほかの�
 
 | DAW | 確かめること |
 |---|---|
-| Fender Studio Pro 8 | **未確認**。イベントの上・ピアノロールに Gliss のノートが出るか（JUCE フォーラム 2023-10 に、Reaper では出るが Studio One では出ない・Melodyne を載せた後に出たという報告があり、条件が分かっていない）。「音声を MIDI に」のような操作で `adjusted` のノートが使われるか。編集の後に描き直されるか（`notifyContentChanged(notesAreAffected)` を受けるか）。プラグインのログ（`GLISS_ARA_TRACE_DIR`）の `notes: the host requested the analysis` で、DAW が解析を頼むかも分かる |
+| Fender Studio Pro 8 | **確認済み（8.1.2.113407、2026-10-04。このブランチの 0239d26 のビルド）**: 挿す・開く・解析・再生・Export Selection（オフラインの描画）・ソングの保存と開き直し（アーカイブの復元・ガイドの指定も戻る）・外部の AI からの編集（下の「外部の AI からの操作を DAW で確かめる」）。書き出しは Gliss の再合成と ±0.3 セント、開き直し前後の書き出しはサンプル単位でほぼ同じ（差 4e-6）。リアルタイムの再生は、開始位置の約 0.9 秒手前（Studio Pro の先行描画）の頭の約 80 ms だけ先読みが間に合わず無音のブロック（`incompleteReads` 19〜35）。ループの折り返しでは出ない。**未確認**: イベントの上・ピアノロールに Gliss のノートが出るか（この日の操作の間、Studio Pro は内容の読み出しを頼まなかった＝`notes: the host requested the analysis` の行が無い）（JUCE フォーラム 2023-10 に、Reaper では出るが Studio One では出ない・Melodyne を載せた後に出たという報告があり、条件が分かっていない）。「音声を MIDI に」のような操作で `adjusted` のノートが使われるか。編集の後に描き直されるか（`notifyContentChanged(notesAreAffected)` を受けるか）。プラグインのログ（`GLISS_ARA_TRACE_DIR`）の `notes: the host requested the analysis` で、DAW が解析を頼むかも分かる |
 | Cubase / Nuendo | 未確認。ARA の拡張の「音声を MIDI に」などでノートが取れるか、`detected` と `adjusted` で扱いが変わるか |
 | Reaper | 未確認（この PC に無い）。報告では ARA のノートを MIDI のアイテムに書き出せる |
 
@@ -140,6 +140,22 @@ AI からの手順:
 5. Claude Code（`~/.claude.json` の `gliss`。外部のエンジンは main の `engine` でなく worktree の `engine` を読むよう、`PYTHONPATH` か `cwd` を `<wt>\engine` にする）から
    `ara_documents` → `ara_attach` → `analyze_take` → `shift_pitch` を呼び、再生の音・イベントの上のノート・プラグインの画面（描き直し）が変わること、
    ソングを保存して開き直しても編集が残ることを確かめる。
+
+実機の結果（Fender Studio Pro 8.1.2.113407、2026-10-04。このブランチの 0239d26 のビルド。Studio Pro の操作は fender-studio-pro-mcp の MCP、
+記録はそのリポジトリの `evidence/ara-relay-2026-10-04.json`）:
+
+- 2 の置き場は、インストール済みのフォルダを VST3 の探す場所の外（`%LOCALAPPDATA%\Gliss\backup\…`）へ移し、同じ場所にビルドを写した。
+  Studio Pro は起動時に Gliss だけを読み直した（`VSTPlugInScanner.log`）。worktree のエンジンが動いたことは、`ara-sessions` に記録ができた
+  （`ara_relay.py` は worktree のエンジンにしか無い）ことで分かる。
+- 1 音: `shift_pitch(+100)` は約 1 秒で `ara_render_dirty`・`sync: external edit`・`ara_notes … adjusted` がログに出て、画面は「外部の変更を読み込んだ」で
+  描き直した。Export Selection で測ると、そのノートだけ +99.9 セント（前後のノート 0.0）。`undo` で書き出しは元とサンプル単位でほぼ同じ（差 3e-6）。
+- ガイドに合わせる: ガイド（vo-main.wav）と録り直しを別のトラックの同じ位置に置き、どちらにも Gliss を挿す。外部から `set_guide_track`（中継でそのまま使える。
+  ARA 用の別のツールは要らない）→ 範囲 40–55 秒に `correct_to_guide`（タイミング 1.0 → 音程 1.0・`pitch_mode="contour"`）。`measure_against_guide` で
+  区間の音程の残差 45.3 → 4.5 セント（±10 以内 12.5% → 83.3%）、発音の頭 19.9 → 0.2 ms（再合成して測り直した値）。Studio Pro の書き出しが変わったのは
+  40–54 秒だけ（範囲外は −121 dB）で、Gliss の再合成した窓（`ara-out` の `.f32`）と ±0.3 セントで同じ。
+- 保存すると、Gliss のアーカイブ（`ARA/ModelData` の `gliss-ara`）にガイドの persistentID と changeset が入る。開き直すと `ara_restore … ok (60 edit(s))`、
+  ガイドの指定も戻り、`measure_against_guide` と書き出しは保存前と同じ。ただし開き直した後は `ara_revs` の編集の署名が変わる（音は同じ。開いたときに 1 回再合成する）。
+- 比べるときは DAW の書き出しどうしで比べる（作業場所の 48 kHz のソースを手元で 44.1 kHz に直すと、変換の誤差を「範囲外が変わった」と取り違える）。
 
 ### エディタ（`GlissEditor`・`plugin/src/editor`）
 
