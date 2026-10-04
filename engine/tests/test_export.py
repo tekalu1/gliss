@@ -156,3 +156,32 @@ def test_export_tool_is_registered():
     names = [f.__name__ for f in m.TOOLS]
     assert {"split_track", "join_track", "mute_track_range"} <= set(names)    # クリップの分割・部分のミュート
     assert len(m.TOOLS) == 65
+
+
+@pytest.mark.parametrize("subtype", ["FLOAT", "PCM_16"])
+def test_export_subtype(proj, tmp_path, subtype):
+    """subtype でビット深度を変えられる。長さ・開始位置は元と同じ、編集していない所は元の値を変換しただけ。"""
+    from vocal_engine.render.export import export_wav
+    _add(proj, "pitch_shift", 0.65, 0.86, {"cents": 100.0}, "+1 半音")
+    out = str(tmp_path / ("out-%s.wav" % subtype))
+    r = export_wav(proj, path=out, subtype=subtype)
+    src, dst = sf.info(TAKE), sf.info(out)
+    assert dst.subtype == subtype and r["subtype"] == subtype and r["source_subtype"] == src.subtype
+    assert (dst.samplerate, dst.channels, dst.frames) == (src.samplerate, src.channels, src.frames)
+    assert "subtype" not in r["same_as_source"] and all(r["same_as_source"].values())
+    a, sr = sf.read(TAKE, dtype="float64", always_2d=True)
+    b, _ = sf.read(out, dtype="float64", always_2d=True)
+    mask = np.ones(len(a), dtype=bool)
+    for s0, e0 in r["replaced_spans_sec"]:
+        mask[int(round(s0 * sr)):int(round(e0 * sr))] = False
+    err = np.max(np.abs(a[mask] - b[mask]))
+    if subtype == "FLOAT":
+        assert err == 0.0, "PCM_24 → FLOAT は値が変わらない"
+    else:
+        assert err <= 2.0 ** -15, "PCM_16 の量子化の幅まで"
+
+
+def test_export_subtype_rejects_unknown(proj, tmp_path):
+    from vocal_engine.render.export import ExportError, export_wav
+    with pytest.raises(ExportError):
+        export_wav(proj, path=str(tmp_path / "x.wav"), subtype="MP3")

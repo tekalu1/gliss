@@ -1869,7 +1869,7 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
 @_tool
 def export_wav(path: str = None, start_sec: float = None, end_sec: float = None,
                backend: str = "praat", background: bool = None,
-               full_source: bool = False) -> dict:
+               full_source: bool = False, subtype: str = None) -> dict:
     """編集を当てた WAV を書き出す。**元と同じ長さ・開始位置**で、編集区間だけ差し替える。
 
     `render_preview` との違い: こちらは **DAW に戻すファイル**なので、
@@ -1895,7 +1895,12 @@ def export_wav(path: str = None, start_sec: float = None, end_sec: float = None,
     **トラックビューで消した区間（mute_track_range）は 0 にして書く**（前後 5 ms をフェード。返り値の `muted_spans_sec`。
     ノートの無音とは別。編集対象のトラックの区間だけ）。
 
+    subtype: 書くビット深度 "PCM_16" / "PCM_24" / "PCM_32" / "FLOAT"（32 bit float）/ "DOUBLE"。省略時は元と同じ。
+        元と違うときも長さ・開始位置・BWF は元と同じで、編集していない所は元の値を変換しただけ
+        （整数 → FLOAT は値が同じ。ビット数を減らすと量子化される。float → 整数で ±1 を超える所は切り詰めて warnings）
+
     返り値の `replaced_spans_sec` が実際に差し替えた区間。その外は元のサンプルのまま。
+    再合成でピークが 1.0 を超えた（元より大きい）ときは warnings に時刻と値を書く。
     """
     p = _project()
     from .render.export import export_wav as _export
@@ -1910,7 +1915,7 @@ def export_wav(path: str = None, start_sec: float = None, end_sec: float = None,
         with _prep_yield():
             r = _export(p, path=path, start_sec=start_sec, end_sec=end_sec, backend=backend,
                         full_source=full_source, position_shift_sec=shift, mutes=mutes,
-                        cancel=cancel, progress=report, commit=commit)
+                        cancel=cancel, progress=report, commit=commit, subtype=subtype)
         r["timeline_offset_sec"] = round(shift, 6)
         return r
 

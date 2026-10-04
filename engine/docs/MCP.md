@@ -737,7 +737,7 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | ツール | 返すもの |
 |---|---|
 | `render_preview(start_sec?, end_sec?, backend?, name?)` | WAV のパス。**編集していない区間は原音のサンプルそのまま**、編集区間だけ 20 ms クロスフェードでつなぐ |
-| **`export_wav(path?, start_sec?, end_sec?, backend?, full_source?)`** | **DAW に戻す WAV。元と同じ sr / ビット深度 / ch / 長さ / 開始位置** |
+| **`export_wav(path?, start_sec?, end_sec?, backend?, full_source?, subtype?)`** | **DAW に戻す WAV。元と同じ sr / ビット深度 / ch / 長さ / 開始位置**（`subtype` でビット深度だけ変えられる） |
 | `render_region(start_sec?, end_sec?, backend?, channels?, path?)` | **区間 → PCM**（32 bit float の WAV のパス。`channels` の既定は `"all"`＝素材のチャンネルそのまま。Python の `render/region.py` の既定は `"mono"`）。長さが変わらず、中身は `export_wav` が同じ範囲に書くものと同じ。`source_start_sec`・`rendered_windows_sec`・`timing_sec` を返す（DAW 連携 段階 0） |
 | `render_audition(note_id, cents?, start_sec?, end_sec?, backend?)` | **画面向け**: つかんだノートのプレビュー音（issue #27）。ノートを `cents` 動かした**つもり**で範囲（既定はノートの範囲）を再合成したモノラルの WAV（`renders/audition.wav`。毎回上書き）のパス。**プロジェクトは書き換えない**。中身は `shift_pitch` を当ててから `render_region` したものと同じ |
 | `render_view(start_sec?, end_sec?, show_guide?, title?)` | ピアノロール PNG のパス（波形・テイク F0・ガイド F0・ノートの帯・編集区間） |
@@ -773,6 +773,11 @@ praat-parselmouth が import できない環境では `praat` を頼んでも `p
   （返り値の `start_sec` = ソース上の開始秒）。`full_source=true` で**ソースと同じ長さ**
   （クリップの範囲だけ差し替え、他はソースのサンプルそのまま）。
 - 素材が 60 秒を超えると自動でジョブになる（`get_job` で取りに行く）。
+- **`subtype`** でビット深度を変えられる: `PCM_16` / `PCM_24` / `PCM_32` / `FLOAT`（32 bit float）/ `DOUBLE`。省略時は元と同じ。
+  変えても長さ・開始位置・BWF は元と同じで、編集していない所は元の値を変換しただけ（整数 → `FLOAT` は値が同じ。ビット数を
+  減らすと量子化される）。float → 整数で ±1.0 を超えるサンプルは切り詰めて `warnings` に数を書く。形式が受けない組
+  （FLAC に `FLOAT` など）はエラー。返り値の `subtype` は書いたもの、`source_subtype` は元。`same_as_source` から `subtype` は外れる。
+- 再合成でピークが 1.0 を超えた（元のピークより大きい。float の素材）ときは `warnings` に値と秒を書く（整数に直す DAW では切れる）。
 
 - **BWF（`bext` / `iXML`）を元から書き写す**（DAW 連携 段階 1。`vocal_engine/bwf.py`）。DAW は
   `bext` の TimeReference（録音・バウンスした位置。サンプル数）で「元の位置」を知るので、書き出した

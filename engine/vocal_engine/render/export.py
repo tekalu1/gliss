@@ -216,9 +216,27 @@ def apply_mutes(out, sr, mutes, kind, offset_frames=0):
     return [[round(ia / sr, 4), round(ib / sr, 4)] for ia, ib in spans]
 
 
+SUBTYPES = ("PCM_16", "PCM_24", "PCM_32", "FLOAT", "DOUBLE")
+
+
+def _convert(out, kind, subtype, warnings):
+    """書く配列を、頼まれたビット深度に合わせる（元と同じなら何もしない）。
+
+    整数 → FLOAT / DOUBLE: 値は変わらない（PCM_24 の値は float32 でそのまま表せる）。
+    float → 整数: ±1 を超える所は切り詰めて warnings に書く（libsndfile に渡すと回り込むため）。"""
+    if subtype in FLOAT_SUBTYPES:
+        return _to_float(out, kind) if kind == "int32" else out
+    if kind == "int32":
+        return out                               # 整数どうし: libsndfile が上位ビットを取る（丸めは切り捨て）
+    over = int(np.count_nonzero(np.abs(out) > 1.0))
+    if over:
+        warnings.append("%s に書くため、±1.0 を超えた %d サンプルを切り詰めた（クリップ）" % (subtype, over))
+    return np.clip(out, -1.0, 1.0 - 2.0 ** -31)
+
+
 def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
                full_source=False, position_shift_sec=0.0, mutes=None, cancel=None, progress=None,
-               commit=None):
+               commit=None, subtype=None):
     """編集を当てた WAV を書く。**元と同じ長さ・開始位置**で、編集区間だけ差し替える。
 
     テイクがソースの一部（クリップ。`media.py`）なら、既定では**クリップの長さ**の WAV を書く
@@ -232,6 +250,10 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
 
     `mutes`: クリップで消した区間 [[始め, 終わり]…]（セッションのトラックの `mutes`。トラックの頭＝クリップの頭が 0 の秒）。
     その区間を 0 にし、前後 5 ms をフェードにする（聞こえているとおりに書く）。返り値の `muted_spans_sec`。
+
+    `subtype`: 書くビット深度（`PCM_16` / `PCM_24` / `PCM_32` / `FLOAT` / `DOUBLE`）。省略時は元と同じ。
+    元と違うときも長さ・開始位置・BWF は同じ。編集していない所は元の値を変換しただけ（整数 → float は値が同じ、
+    ビット数を減らすときは量子化される）。
     """
     from .region import RegionRenderer
     def advance(value):
@@ -250,6 +272,13 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
         raise ExportError("元の音声と同じパスには書き出さない: %s" % path)
     info = sf.info(src_path)
     sr = int(info.samplerate)
+    if subtype is not None:
+        subtype = str(subtype).upper()
+        if subtype not in SUBTYPES:
+            raise ExportError("subtype は %s のどれか（省略で元と同じ）" % " / ".join(SUBTYPES))
+        if not sf.check_format(info.format, subtype):
+            raise ExportError("%s の形式には %s で書けない" % (info.format, subtype))
+    out_subtype = subtype or info.subtype
     dur = project.duration_sec
     t0 = 0.0 if start_sec is None else max(0.0, float(start_sec))
     t1 = dur if end_sec is None else min(dur, float(end_sec))
@@ -305,6 +334,15 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
         out = whole
     if muted:
         warnings.append("クリップで消した区間 %d か所を 0 にして書いた" % len(muted))
+    if replaced and kind != "int32" and out.size:
+        # 再合成でピークが元を超えて 1.0 を超えた（float の WAV なので切れないが、整数に直す DAW では切れる）
+        peak, src_peak = float(np.max(np.abs(out))), float(np.max(np.abs(data))) if data.size else 0.0
+        if peak > 1.0 and peak > src_peak + 1e-9:
+            at = int(np.argmax(np.max(np.abs(out), axis=1)))
+            warnings.append("再合成でピークが %.4f（%.3f 秒）になり 1.0 を超えた（元のピーク %.4f）"
+                            % (peak, at / sr, src_peak))
+    if out_subtype != info.subtype:
+        out = _convert(out, kind, out_subtype, warnings)
     start = 0.0 if full_source else off / sr
     expect_frames = out.shape[0]
 
@@ -324,7 +362,7 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
         os.makedirs(os.path.dirname(target), exist_ok=True)
         t = target + ".tmp.wav"
         try:
-            sf.write(t, out, sr, subtype=info.subtype, format=info.format)
+            sf.write(t, out, sr, subtype=out_subtype, format=info.format)
             b = (bwf.write_meta(t, meta, shift_frames=shift) if is_wav else
                  {"bext": False, "ixml": False, "time_reference": None, "skipped": None})
         except BaseException:
@@ -392,6 +430,8 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
     after = sf.info(path)
     same = {"sr": after.samplerate == sr, "channels": after.channels == n_ch,
             "subtype": after.subtype == info.subtype, "frames": after.frames == expect_frames}
+    if out_subtype != info.subtype:
+        same.pop("subtype")                       # 頼んで変えた
     if not all(same.values()):
         warnings.append("元と揃っていない項目がある: %s"
                         % ", ".join(k for k, v in same.items() if not v))
@@ -401,7 +441,7 @@ def export_wav(project, path=None, start_sec=None, end_sec=None, backend=None,
     return {
         "path": path,
         "source_path": src_path,
-        "sr": sr, "channels": n_ch, "subtype": info.subtype,
+        "sr": sr, "channels": n_ch, "subtype": after.subtype, "source_subtype": info.subtype,
         "frames": int(after.frames), "duration_sec": round(after.frames / sr, 6),
         "start_sec": round(start, 6),
         "same_as_source": same,
