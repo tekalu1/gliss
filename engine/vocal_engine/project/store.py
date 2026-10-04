@@ -22,7 +22,7 @@ import numpy as np
 
 from .. import log
 from ..analysis.align import DEFAULT_METHOD as ALIGN_METHOD
-from ..analysis.align import Alignment, boundary_deviations, deviations
+from ..analysis.align import ALIGN_VERSION, Alignment, boundary_deviations, deviations
 from ..analysis.f0 import ENERGY_FLOOR_DB, RMVPE_THRESHOLD, F0Result, estimate_f0
 from ..analysis import f0 as f0mod
 from ..analysis.notes import Note, segment_notes
@@ -973,6 +973,8 @@ class Project:
                self._take_f0.meta.get("threshold"), bool(self._take_f0.meta.get("sweep"))]
         if self._take_f0.meta.get("version") is not None:
             key.append(self._take_f0.meta["version"])
+        if ALIGN_VERSION != 1:
+            key.append(["align", ALIGN_VERSION])        # 対応付けの中身を変えたら作り直す（帯の制約）
         return self._guide_cache_dir("alignment", key)
 
     def _prune_guide_cache(self, kind):
