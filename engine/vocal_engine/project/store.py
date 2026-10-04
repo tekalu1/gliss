@@ -41,7 +41,17 @@ def _default_projects_root():
         os.path.abspath(__file__)))), "..", "projects"))
 
 
-PROJECTS_ROOT = os.environ.get("VOCAL_ENGINE_PROJECTS") or _default_projects_root()
+_DEFAULT_PROJECTS_ROOT = _default_projects_root()
+PROJECTS_ROOT = os.environ.get("VOCAL_ENGINE_PROJECTS") or _DEFAULT_PROJECTS_ROOT
+
+
+def projects_root():
+    """旧形式のプロジェクトの置き場。`VOCAL_ENGINE_PROJECTS` を渡していなくて作業場所（`VOCAL_ENGINE_WORK_DIR`）を
+    渡していれば、その下の `projects`（作業場所を分けて動かす AI・テストが `<リポジトリ>/projects` を汚さない）。"""
+    if PROJECTS_ROOT != _DEFAULT_PROJECTS_ROOT or os.environ.get("VOCAL_ENGINE_PROJECTS"):
+        return PROJECTS_ROOT
+    work = os.environ.get("VOCAL_ENGINE_WORK_DIR")
+    return os.path.join(os.path.abspath(work), "projects") if work else PROJECTS_ROOT
 SCHEMA_VERSION = 2              # 2: take / guide にソース ID とソース内オフセット（media.py）
 ARCHIVE_FORMAT = "vocal-editor-archive"
 ARCHIVE_VERSION = 1
@@ -2275,4 +2285,4 @@ def _default_project_dir(clip, sha=None):
         info = sf.info(path)
         sr, total = int(info.samplerate), int(info.frames)
     off, n = M.resolve_range(clip, sr, total)
-    return os.path.join(PROJECTS_ROOT, "%s-%s%s" % (stem, key, M.range_suffix(off, n, total)))
+    return os.path.join(projects_root(), "%s-%s%s" % (stem, key, M.range_suffix(off, n, total)))

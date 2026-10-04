@@ -90,7 +90,7 @@ undo()                        # 修正を戻す
 |---|---|---|---|
 | `take_path` | string | 必須 | 編集したい音声（WAV）の絶対パス |
 | `guide_path` | string | null | ガイドボーカル。あると `list_deviations` / `correct_to_guide` が使える |
-| `project_dir` | string | null | 省略時は `<repo>/projects/<名前>-<sha8>/`（配布版のエンジン exe は `%LOCALAPPDATA%\Gliss\projects`） |
+| `project_dir` | string | null | 省略時は `<repo>/projects/<名前>-<sha8>/`（配布版のエンジン exe は `%LOCALAPPDATA%\Gliss\projects`。`VOCAL_ENGINE_PROJECTS` で変えられる。それを渡さず `VOCAL_ENGINE_WORK_DIR` を渡したエンジンは `<作業場所>/projects`） |
 | `reuse` | bool | true | 同じ素材なら既存プロジェクト（編集リスト）を開き直す |
 | `lyrics` | string | null | テイクの歌詞。**かな・カナ・漢字混じりのどれでもよい**（段階2） |
 | `guide_lyrics` | string | null | ガイドの歌詞。**あるとタイミング補正の精度が上がる**（§1 の `set_lyrics`） |
@@ -988,7 +988,7 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
 | ツール | 何をするか |
 |---|---|
 | `new_project(name?, take_path?, guide_path?, author?)` | 新しいプロジェクト（`kind: "untitled"`）。`take_path` を渡すと最初のトラック（ボーカル・編集対象）にする。**そのテイクの旧形式のプロジェクトがあれば、新しく作らずにそちらを開く**（`opened: "legacy"` か、保存済みなら `"gliss"`）。無題は保存するまで作業場所にだけある |
-| `load_project(path?, author?)` | 開く。**`path` を省くと Gliss の画面で今開いている曲**（と画面で編集中のトラック。§4-1 の bridge.json）を開き、返り値に `from_app: true`（画面で何も開いていなければ ok=false）。`path` は `.gliss`・旧形式のディレクトリかその `session.json` / `project.json`・無題の作業場所・音声ファイル（= `new_project(take_path)`）。返り値は `open_project` と同じ形に `document`・`opened`・`missing`・`recovered`・`backup` |
+| `load_project(path?, author?, fresh?)` | 開く。**`path` を省くと Gliss の画面で今開いている曲**（と画面で編集中のトラック。§4-1 の bridge.json）を開き、返り値に `from_app: true`（画面で何も開いていなければ ok=false）。`path` は `.gliss`・旧形式のディレクトリかその `session.json` / `project.json`・無題の作業場所・音声ファイル（= `new_project(take_path)`）。返り値は `open_project` と同じ形に `document`・`opened`・`missing`・`recovered`・`backup`。**`recovered: true`（作業場所に保存していない編集が残っていて、その続きから開いた）のときは `warnings` にも書く**（前に当てた補正が乗ったままなので、当て直すと二重になる）。`fresh=true`（`.gliss`）はその変更を捨てて保存した中身から開く（`discarded_unsaved: true`） |
 | `save_project(path?)` | 保存。`path` を渡すと名前を付けて保存（`.gliss` を付ける）。無題・旧形式は `path` が要る。作業場所が変わったら（`moved: true`）編集対象を開き直すので `analyze_take` |
 | `project_status()` | `document = {kind: "gliss" / "untitled" / "legacy", path, name, dirty, work_dir, tracks, saved_at}`（開いていなければ null）。編集・トラックのツールの返り値にも `document` が付く |
 | `close_project(discard?)` | 閉じる。`discard=true` で保存していない変更を捨てる（`.gliss` は最後に保存した中身に戻し、無題は作業場所ごと消す）。無題の削除結果は `removal: "removed" / "deferred"`。延期分は次回起動時にも片付ける。延期の間に同じ作業場所を `load_project` で開き直したら、削除の予定は取り消す |
