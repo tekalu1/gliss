@@ -87,10 +87,10 @@ public:
         return ok();
     }
 
-    juce::var preview (const juce::String& op, const juce::var&) override
+    void preview (const juce::String& op, const juce::var&, Completion done) override
     {
         previewOps.add (op);
-        return ok();
+        done (ok());
     }
 
     void setCompare (bool on) override { compare = on; }

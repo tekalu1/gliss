@@ -33,8 +33,8 @@ public:
     /** 再生の制御。op: play・stop・toggle・seek・loop。返り値 { ok, reason? }（制御が無ければ reason "no-controller"）。 */
     virtual juce::var transport (const juce::String& op, const juce::var& arg) = 0;
 
-    /** つかんだノートの試聴。op: start（arg { path, loop, note, cents }）・stop。返り値 { ok }。 */
-    virtual juce::var preview (const juce::String& op, const juce::var& arg) = 0;
+    /** つかんだノートの試聴。start の WAV 読み込みは作業スレッドで行い、結果を非同期に返す。 */
+    virtual void preview (const juce::String& op, const juce::var& arg, Completion done) = 0;
 
     /** 原音と比べる（編集を外して鳴らす）。 */
     virtual void setCompare (bool on) = 0;

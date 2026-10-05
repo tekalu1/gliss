@@ -6,6 +6,7 @@
 #include "ara/DocumentBridge.h"
 #include "ara/DocumentSync.h"
 #include "ara/PlayheadState.h"
+#include "ara/PreviewAudio.h"
 #include "cache/EditedPcm.h"
 
 #include <map>
@@ -69,7 +70,7 @@ public:
     juce::var bootstrap() override;
     void saveState (const juce::var& patch) override;
     juce::var transport (const juce::String& op, const juce::var& arg) override;
-    juce::var preview (const juce::String& op, const juce::var& arg) override;
+    void preview (const juce::String& op, const juce::var& arg, Completion done) override;
     void setCompare (bool on) override;
     juce::var hostState() override;
     void restartEngine (Completion done) override;
@@ -151,6 +152,7 @@ private:
     void onSyncEvent (const juce::String& name, const juce::var& data);
     juce::var describeSelection() const;
     juce::var describePlayhead() const;
+    juce::var describePlayhead (const PlayheadSnapshot&) const;
     juce::var loadedState();
     const TrackView* findTrackByTrackId (const juce::String& trackId) const;
     std::optional<double> toSongSeconds (const juce::var& arg, const juce::String& secKey) const;
@@ -161,6 +163,8 @@ private:
     juce::String workKey;
     std::unique_ptr<DocumentSync> sync;
     PlayheadState playheadState;
+    std::shared_ptr<PreviewAudio> previewAudio = std::make_shared<PreviewAudio>();
+    std::atomic<std::uint64_t> previewGeneration { 0 };
     std::atomic<bool> compare { false };
 
     std::map<juce::ARAAudioSource*, SourceEntry> sourceEntries;
@@ -172,6 +176,7 @@ private:
     RegionTimes selectionRegion;
     bool hasSelection = false;
     juce::String lastPlayheadJson;
+    bool lastHostPlaying = false;
 
     juce::var pluginState;
     bool pluginStateLoaded = false;

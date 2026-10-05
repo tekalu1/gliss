@@ -158,6 +158,8 @@ void GlissDocumentController::didEndEditing (juce::ARADocument*)
 
 void GlissDocumentController::willDestroyDocument (juce::ARADocument*)
 {
+    previewGeneration.fetch_add (1);
+    previewAudio->stop();
     // 先に同期とエンジンを止める（この後、モデルの各オブジェクトが壊される）。
     sync->shutdown();
 }
@@ -328,7 +330,7 @@ juce::ARAPlaybackRenderer* GlissDocumentController::doCreatePlaybackRenderer() n
 
 juce::ARAEditorRenderer* GlissDocumentController::doCreateEditorRenderer() noexcept
 {
-    return new GlissEditorRenderer (getDocumentController());
+    return new GlissEditorRenderer (getDocumentController(), previewAudio);
 }
 
 juce::ScopedTryReadLock GlissDocumentController::getProcessingLock()
@@ -690,10 +692,17 @@ void GlissDocumentController::removeListener (Listener* l)
 
 void GlissDocumentController::timerCallback()
 {
-    if (! playheadState.read().valid)
+    const auto position = playheadState.read();
+    if (! position.valid)
         return;
+    if (position.playing && ! lastHostPlaying)
+    {
+        previewGeneration.fetch_add (1);
+        previewAudio->stop();
+    }
+    lastHostPlaying = position.playing;
 
-    const auto event = describePlayhead();
+    const auto event = describePlayhead (position);
     auto json = juce::JSON::toString (event, true);
 
     if (json == lastPlayheadJson)
@@ -705,12 +714,17 @@ void GlissDocumentController::timerCallback()
 
 juce::var GlissDocumentController::describePlayhead() const
 {
+    return describePlayhead (playheadState.read());
+}
+
+juce::var GlissDocumentController::describePlayhead (const PlayheadSnapshot& position) const
+{
     std::vector<std::pair<juce::String, std::vector<RegionTimes>>> list;
 
     for (const auto& t : tracks)
         list.emplace_back (sync->getModStatus (t.araId).trackId, t.regions);
 
-    return playhead::describe (playheadState.read(), list);
+    return playhead::describe (position, list);
 }
 
 juce::var GlissDocumentController::describeSelection() const
@@ -826,7 +840,8 @@ juce::var GlissDocumentController::bootstrap()
     for (const auto* key : { "keys", "grid", "view", "f0Estimator" })
         o->setProperty (key, state.getProperty (key, {}));
 
-    // preview は省く（つかんだノートの試聴は EditorRenderer が鳴らせるまで出さない。画面は省略をオフと読む）。
+    o->setProperty ("preview", previewAudio->hasRenderer() && (bool) state.getProperty ("preview", true));
+    o->setProperty ("hostCanPreview", previewAudio->hasRenderer());
     o->setProperty ("selection", describeSelection());
     o->setProperty ("compare", compare.load());
     o->setProperty ("hostCanTransport", getDocumentController()->getHostPlaybackController() != nullptr);
@@ -937,10 +952,69 @@ juce::var GlissDocumentController::transport (const juce::String& op, const juce
     return object ({ { "ok", true } });
 }
 
-juce::var GlissDocumentController::preview (const juce::String&, const juce::var&)
+void GlissDocumentController::preview (const juce::String& op, const juce::var& arg, Completion done)
 {
-    // つかんだノートの試聴（EditorRenderer で DAW の出力に鳴らす）はまだ作っていない。bootstrap も preview を出さない。
-    return object ({ { "ok", false }, { "reason", "unsupported" } });
+    const auto result = [] (bool ok, const juce::String& reason = {})
+    {
+        return object ({ { "ok", ok }, { "reason", reason } });
+    };
+    if (op == "stop")
+    {
+        previewGeneration.fetch_add (1);
+        previewAudio->stop();
+        done (result (true));
+        return;
+    }
+    if (op != "start") { done (result (false, "unknown-op")); return; }
+    if (! previewAudio->hasRenderer()) { done (result (false, "no-editor-renderer")); return; }
+    if (playheadState.read().playing) { done (result (false, "host-playing")); return; }
+
+    const juce::File file (arg.getProperty ("path", {}).toString());
+    if (! isReadableByEditor (file) || ! file.hasFileExtension ("wav"))
+    {
+        done (result (false, "invalid-path"));
+        return;
+    }
+
+    const auto generation = previewGeneration.fetch_add (1) + 1;
+    const auto audio = previewAudio;
+    const auto cancellationEpoch = audio->getCancellationEpoch();
+    bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), file, generation, cancellationEpoch, audio, done = std::move (done)]
+    {
+        std::unique_ptr<PreviewAudio::Clip> clip;
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (file.createInputStream().release(), true));
+        if (reader != nullptr && reader->sampleRate > 0 && reader->lengthInSamples > 1
+            && reader->lengthInSamples <= (juce::int64) (reader->sampleRate * 15.0)
+            && reader->numChannels > 0 && reader->numChannels <= 2)
+        {
+            juce::AudioBuffer<float> decoded ((int) reader->numChannels, (int) reader->lengthInSamples);
+            if (reader->read (&decoded, 0, decoded.getNumSamples(), 0, true, true))
+            {
+                clip = std::make_unique<PreviewAudio::Clip>();
+                clip->sampleRate = reader->sampleRate;
+                for (int ch = 0; ch < decoded.getNumChannels(); ++ch)
+                {
+                    const auto* pcm = decoded.getReadPointer (ch);
+                    clip->channels.emplace_back (pcm, pcm + decoded.getNumSamples());
+                }
+                PreviewAudio::fadeEdges (*clip);
+            }
+        }
+
+        auto pending = std::make_shared<std::unique_ptr<PreviewAudio::Clip>> (std::move (clip));
+        juce::MessageManager::callAsync ([this, token, audio, generation, cancellationEpoch, pending, done]() mutable
+        {
+            if (token.lock() == nullptr) return;
+            if (generation != previewGeneration.load() || cancellationEpoch != audio->getCancellationEpoch())
+            { done (object ({ { "ok", false }, { "reason", "cancelled" } })); return; }
+            if (*pending == nullptr) { done (object ({ { "ok", false }, { "reason", "invalid-audio" } })); return; }
+            if (playheadState.read().playing) { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
+            if (! audio->publish (std::move (*pending), cancellationEpoch))
+            { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
+            done (object ({ { "ok", true } }));
+        });
+    });
 }
 
 void GlissDocumentController::setCompare (bool on)

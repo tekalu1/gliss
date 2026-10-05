@@ -262,7 +262,7 @@ const PREVIEW_GAP_MS = 45;    // 作り直しの間隔の下限（間引き）
 const PREVIEW_FADE = 0.006;   // ループのつなぎ目・差し替えのフェード（秒）
 let previewOn = true;
 const PV = { token: 0, note: null, range: null, want: 0, busy: 0, timer: 0, lastAt: 0,
-  src: null, gain: null, t0: 0, dur: 0, cents: null, host: false };
+  src: null, gain: null, t0: 0, dur: 0, cents: null, host: false, phase: 'idle', error: null };
 const previewLog = [];        // 鳴らそうとしたもの（テスト用。音は出さずにこれで確かめる）
 
 export function previewEnabled() { return previewOn; }
@@ -294,6 +294,7 @@ export function startPreview(noteId) {
   PV.note = noteId;
   PV.range = [+a.toFixed(6), +b.toFixed(6)];
   PV.want = wantCents(noteId);
+  PV.phase = 'preparing'; PV.error = null;
   requestPreview();
 }
 
@@ -314,6 +315,7 @@ function schedulePreview() {
 
 async function requestPreview() {
   if (!PV.note || PV.busy) return;
+  if (S.playing) { stopPreview(); return; }
   const tok = PV.token;
   const note = PV.note;
   const cents = PV.want;
@@ -324,9 +326,12 @@ async function requestPreview() {
   try {
     const r = await call('render_audition', { note_id: note, cents, start_sec: a, end_sec: b });
     if (tok !== PV.token) return;
-    if (ARA) {                      // 作った WAV は C++ が DAW の出力でループ再生する（差し替えは C++ が鳴っている位置のまま）
+    if (ARA) {                      // native は準備した PCM を EditorRenderer へ渡してから ok を返す
+      const result = await araPreview('start', { path: r.path, loop: true, note, cents });
+      if (tok !== PV.token) return;
+      if (!result?.ok) throw new Error(result?.reason || 'DAW の試聴出力を使えない');
       PV.host = true;
-      await araPreview('start', { path: r.path, loop: true, note, cents });
+      PV.phase = 'sounding'; PV.error = null; PV.cents = cents;
       return;
     }
     const bytes = await window.api.readFile(r.path);
@@ -334,8 +339,12 @@ async function requestPreview() {
     const buf = await audioCtx().decodeAudioData(bytes);
     if (tok !== PV.token || S.playing) return;
     swapPreview(buf, cents);
+    PV.phase = 'sounding'; PV.error = null;
   } catch (err) {
-    if (tok === PV.token) status(`プレビューの音を作れなかった: ${err.message}`);
+    if (tok === PV.token) {
+      PV.phase = 'error'; PV.error = err.message;
+      status(`プレビューの音を作れなかった: ${err.message}`);
+    }
   } finally {
     if (PV.busy === (tok || -1)) PV.busy = 0;
     // 作っている間に高さが変わった: いまの高さでもう一度（最後の高さだけ）
@@ -392,13 +401,16 @@ function releaseVoice(src, g) {
 
 /** 離した（か再生を始めた・設定を切った）: 止める。作りかけの音は捨てる。 */
 export function stopPreview() {
+  const hadPreview = !!(PV.note || PV.busy || PV.host);
   PV.token += 1;
   clearTimeout(PV.timer);
   PV.timer = 0;
   PV.busy = 0;
   PV.note = null;
   PV.range = null;
-  if (PV.host) { PV.host = false; araPreview('stop'); }
+  PV.phase = 'idle'; PV.error = null;
+  PV.host = false;
+  if (ARA && hadPreview) araPreview('stop');
   releaseVoice(PV.src, PV.gain);
   PV.src = null; PV.gain = null; PV.dur = 0; PV.cents = null;
 }
@@ -407,8 +419,14 @@ export function stopPreview() {
 export function previewState() {
   return {
     enabled: previewOn, note: PV.note, range: PV.range ? [...PV.range] : null, want: PV.note ? PV.want : null,
-    sounding: PV.src ? { cents: PV.cents, duration: PV.dur } : null,
+    phase: PV.phase, error: PV.error,
+    sounding: PV.src || PV.host ? { cents: PV.cents, duration: PV.dur || null } : null,
   };
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('blur', stopPreview);
+  window.addEventListener('gliss-host-play', stopPreview);
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopPreview(); });
 }
 export function previewLogOf() { return previewLog.map((x) => ({ ...x, range: [...x.range] })); }
 export function clearPreviewLog() { previewLog.length = 0; }

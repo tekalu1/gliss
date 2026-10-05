@@ -6,6 +6,7 @@
 #include "ara/FloatWavWriter.h"
 #include "ara/PlayheadState.h"
 #include "ara/PluginState.h"
+#include "ara/PreviewAudio.h"
 #include "ara/RegionMapping.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -13,6 +14,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <thread>
 
 namespace gliss
 {
@@ -344,6 +346,191 @@ public:
             const auto loop = playhead::describe (s, {}).getProperty ("loop", {});
             expect (loop.isArray() && loop.size() == 2 && (double) loop[1] == 2.0);
         }
+
+        beginTest ("one source owns the coherent position while playing");
+        {
+            PlayheadState state;
+            juce::AudioPlayHead::PositionInfo first, other;
+            first.setTimeInSeconds (4.0); first.setIsPlaying (true);
+            other.setTimeInSeconds (100.0); other.setIsPlaying (true);
+            state.write (first, 1);
+            const auto version = state.read().sequence;
+            state.write (other, 2);
+            expectWithinAbsoluteError (state.read().songSec, 4.0, 1.0e-12);
+            expectEquals (state.read().sequence, version);
+            first.setIsPlaying (false);
+            state.write (first, 1);
+            state.write (other, 2);
+            expectWithinAbsoluteError (state.read().songSec, 100.0, 1.0e-12);
+            expect (state.read().sequence > version);
+        }
+
+        beginTest ("concurrent reads never mix song and loop from different blocks");
+        {
+            PlayheadState state;
+            std::atomic<bool> done { false };
+            std::thread writer ([&]
+            {
+                for (int n = 2; n < 4002; ++n)
+                {
+                    juce::AudioPlayHead::PositionInfo info;
+                    info.setTimeInSeconds ((double) n);
+                    info.setPpqPosition ((double) n);
+                    info.setBpm (60.0);
+                    info.setIsPlaying (true);
+                    info.setIsLooping (true);
+                    info.setLoopPoints (juce::AudioPlayHead::LoopPoints { (double) n - 1.0, (double) n + 1.0 });
+                    state.write (info, 1);
+                }
+                done.store (true);
+            });
+            bool coherent = true;
+            while (! done.load())
+            {
+                const auto s = state.read();
+                if (s.valid && s.looping && (std::abs (s.loopStartSec - (s.songSec - 1.0)) > 1.0e-12
+                                           || std::abs (s.loopEndSec - (s.songSec + 1.0)) > 1.0e-12))
+                { coherent = false; break; }
+            }
+            writer.join();
+            expect (coherent);
+        }
+    }
+};
+
+class AraPreviewTests final : public juce::UnitTest
+{
+public:
+    AraPreviewTests() : juce::UnitTest ("ARA preview audio", "Gliss") {}
+
+    void runTest() override
+    {
+        const ScopedStdoutLogger logger;
+        PreviewAudio audio;
+        PreviewAudio::Cursor cursor;
+        const auto makeClip = [] (float value)
+        {
+            auto clip = std::make_unique<PreviewAudio::Clip>();
+            clip->sampleRate = 48000.0;
+            clip->channels.push_back (std::vector<float> (4800, value));
+            return clip;
+        };
+        juce::AudioBuffer<float> buffer (2, 480);
+        const auto render = [&]
+        {
+            buffer.clear();
+            audio.render (buffer, 48000.0, cursor);
+        };
+
+        beginTest ("start makes actual samples and fades in");
+        audio.publish (makeClip (0.4f));
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.0f, 1.0e-6f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), 0.4f, 1.0e-6f);
+        expectWithinAbsoluteError (buffer.getSample (1, 400), 0.4f, 1.0e-6f);
+
+        beginTest ("loop edges fade to zero before the PCM wraps");
+        {
+            PreviewAudio loop;
+            PreviewAudio::Cursor loopCursor;
+            auto clip = makeClip (0.4f);
+            PreviewAudio::fadeEdges (*clip);
+            loop.publish (std::move (clip));
+            juce::AudioBuffer<float> oneLoop (1, 5000);
+            oneLoop.clear();
+            loop.render (oneLoop, 48000.0, loopCursor);
+            expectWithinAbsoluteError (oneLoop.getSample (0, 4500), 0.4f, 1.0e-6f);
+            expect (std::abs (oneLoop.getSample (0, 4799)) < 0.005f);
+            expectWithinAbsoluteError (oneLoop.getSample (0, 4800), 0.0f, 1.0e-6f);
+        }
+
+        beginTest ("a changed pitch clip crossfades without a sample jump");
+        audio.publish (makeClip (-0.4f));
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.4f, 1.0e-6f);
+        expect (std::abs (buffer.getSample (0, 144)) < 0.01f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), -0.4f, 1.0e-6f);
+
+        beginTest ("release in the middle of a nonzero sample fades to silence");
+        audio.stop();
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), -0.4f, 1.0e-6f);
+        expect (buffer.getSample (0, 100) < -0.2f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), 0.0f, 1.0e-6f);
+        render();
+        expectWithinAbsoluteError (buffer.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+
+        beginTest ("a new note during the release crossfades from the releasing clip");
+        audio.publish (makeClip (0.4f));
+        render();
+        audio.stop();
+        juce::AudioBuffer<float> shortRelease (1, 100);
+        shortRelease.clear(); audio.render (shortRelease, 48000.0, cursor);
+        audio.publish (makeClip (-0.4f));
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.4f, 1.0e-6f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), -0.4f, 1.0e-6f);
+
+        beginTest ("a finished release never resurrects the old note");
+        audio.stop(); render();
+        audio.publish (makeClip (0.4f)); render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.0f, 1.0e-6f);
+
+        beginTest ("cancelled preview stays silent until a new clip is published");
+        audio.stop();
+        render();
+        render();
+        expectWithinAbsoluteError (buffer.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+
+        beginTest ("brief host playback cancels a pending and an existing preview");
+        {
+            PreviewAudio host;
+            PreviewAudio::Cursor hostCursor;
+            juce::AudioBuffer<float> samples (1, 480);
+            const auto pendingEpoch = host.getCancellationEpoch();
+            host.publish (makeClip (0.4f));
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expect (samples.getSample (0, 400) > 0.3f);
+            host.cancelFromAudioThread();
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expectWithinAbsoluteError (samples.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+            expect (! host.publish (makeClip (0.4f), pendingEpoch));
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expectWithinAbsoluteError (samples.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+            expect (host.publish (makeClip (-0.4f), host.getCancellationEpoch()));
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expect (samples.getSample (0, 400) < -0.3f);
+        }
+
+        beginTest ("new audition PCM changes the actual output pitch");
+        {
+            PreviewAudio pitched;
+            PreviewAudio::Cursor phase;
+            juce::AudioBuffer<float> sound (1, 4800);
+            const auto sine = [] (double hz)
+            {
+                auto clip = std::make_unique<PreviewAudio::Clip>();
+                clip->sampleRate = 48000.0;
+                auto& ch = clip->channels.emplace_back (48000);
+                for (int i = 0; i < 48000; ++i)
+                    ch[(size_t) i] = (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / 48000.0);
+                return clip;
+            };
+            const auto crossings = [&]
+            {
+                int count = 0;
+                for (int i = 1001; i < sound.getNumSamples(); ++i)
+                    if (sound.getSample (0, i - 1) <= 0.0f && sound.getSample (0, i) > 0.0f) ++count;
+                return count;
+            };
+            pitched.publish (sine (220.0));
+            sound.clear(); pitched.render (sound, 48000.0, phase);
+            const auto low = crossings();
+            pitched.publish (sine (440.0));
+            sound.clear(); pitched.render (sound, 48000.0, phase);
+            const auto high = crossings();
+            expect (low >= 15 && high > low * 1.8, juce::String (low) + " -> " + juce::String (high));
+        }
     }
 };
 
@@ -631,6 +818,7 @@ public:
 static AraArchiveTests araArchiveTests;
 static AraRegionTests araRegionTests;
 static AraPlayheadTests araPlayheadTests;
+static AraPreviewTests araPreviewTests;
 static AraEngineCallTests araEngineCallTests;
 static AraFilesTests araFilesTests;
 static AraDocumentSyncTests araDocumentSyncTests;

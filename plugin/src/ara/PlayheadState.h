@@ -5,6 +5,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 
 #include <atomic>
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -21,19 +22,21 @@ struct PlayheadSnapshot
     bool looping = false;
     double loopStartSec = 0.0, loopEndSec = 0.0;
     juce::uint32 stampMs = 0;    // 書いた時刻（Time::getMillisecondCounter）
+    std::uint64_t sequence = 0; // 受信側で古い通知を捨てるための版
 };
 
-/** processBlock（どのインスタンスでも）が書き、メッセージスレッドの 30 Hz のタイマーが読む。
-    オーディオスレッドは原子変数に書くだけ（確保・ロックをしない）。値ごとの原子変数なので、読みと書きが重なると
-    別のブロックの値が混ざりうるが、表示に使うだけなので許す。止まっているときに processBlock を呼ばないホストがあるので、
-    最後の値を残す。 */
+/** オーディオスレッドは待たずに一つのインスタンスの位置を公開する。
+    読み手は sequence の前後一致で一つのブロックの値だけを受け取る。 */
 class PlayheadState
 {
 public:
-    void write (const juce::AudioPlayHead::PositionInfo&) noexcept;
+    void write (const juce::AudioPlayHead::PositionInfo&, std::uintptr_t source = 1) noexcept;
     PlayheadSnapshot read() const noexcept;
 
 private:
+    std::atomic<bool> writing { false };
+    std::atomic<std::uint64_t> sequence { 0 };
+    std::uintptr_t masterSource = 0; // writing を獲得したスレッドだけが触る
     std::atomic<bool> valid { false }, playing { false }, looping { false };
     std::atomic<double> songSec { 0.0 }, loopStartSec { 0.0 }, loopEndSec { 0.0 };
     std::atomic<juce::uint32> stampMs { 0 };

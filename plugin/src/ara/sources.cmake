@@ -8,6 +8,7 @@ list(APPEND GLISS_UNIT_SOURCES
     src/ara/NoteContent.cpp
     src/ara/PlayheadState.cpp
     src/ara/PluginState.cpp
+    src/ara/PreviewAudio.cpp
     src/ara/RegionMapping.cpp
 )
 

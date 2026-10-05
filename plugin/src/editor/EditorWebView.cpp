@@ -175,7 +175,8 @@ juce::WebBrowserComponent::Options EditorWebView::makeOptions()
                                  done (true);
                              })
         .withNativeFunction ("transport", [this] (Args args, Completion done) { done (bridge.transport (args[0].toString(), args[1])); })
-        .withNativeFunction ("preview", [this] (Args args, Completion done) { done (bridge.preview (args[0].toString(), args[1])); })
+        .withNativeFunction ("preview", [this] (Args args, Completion done)
+                             { bridge.preview (args[0].toString(), args[1], guarded (std::move (done))); })
         .withNativeFunction ("setCompare", [this] (Args args, Completion done)
                              {
                                  bridge.setCompare ((bool) args[0]);

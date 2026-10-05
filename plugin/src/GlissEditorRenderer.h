@@ -1,25 +1,34 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "ara/PreviewAudio.h"
+#include <memory>
 
 namespace gliss
 {
 
-/** EditorRenderer（編集中の試聴を DAW の出力に足す役）。つかんだノートの試聴（render_audition の WAV）はまだ作っていないので、
-    何も足さない（DocumentBridge::preview は {ok:false}、bootstrap は preview を出さない）。
-
-    作るときの注意（調べた範囲の報告。実物では未確認）: Reaper は PlaybackRenderer と EditorRenderer を同じバッファで順に呼ぶ。
-    再生中に鳴らすと二重に鳴るので、止まっているときだけ鳴らす。 */
+/** 補正後の試聴 PCM を DAW の出力に足す。通常再生中とオフライン描画では足さない。 */
 class GlissEditorRenderer final : public juce::ARAEditorRenderer
 {
 public:
-    using ARAEditorRenderer::ARAEditorRenderer;
+    GlissEditorRenderer (ARA::PlugIn::DocumentController* controller, std::shared_ptr<PreviewAudio> preview);
+    ~GlissEditorRenderer() override;
+
+    void prepareToPlay (double sampleRate, int maximumSamplesPerBlock, int numChannels,
+                        juce::AudioProcessor::ProcessingPrecision precision,
+                        AlwaysNonRealtime alwaysNonRealtime = AlwaysNonRealtime::no) override;
+    void reset() override { cursor = {}; hostPlaying = false; }
 
     bool processBlock (juce::AudioBuffer<float>& buffer,
                        juce::AudioProcessor::Realtime realtime,
                        const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept override;
 
     using ARAEditorRenderer::processBlock;
+private:
+    std::shared_ptr<PreviewAudio> previewAudio;
+    double outputRate = 0.0;
+    PreviewAudio::Cursor cursor;
+    bool hostPlaying = false;
 };
 
 } // namespace gliss

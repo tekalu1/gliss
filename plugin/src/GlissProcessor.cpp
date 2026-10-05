@@ -44,7 +44,7 @@ void GlissProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
         if (auto* hostPlayHead = getPlayHead())
             if (const auto position = hostPlayHead->getPosition())
                 juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<GlissDocumentController> (documentController)
-                    ->getPlayheadState().write (*position);
+                    ->getPlayheadState().write (*position, reinterpret_cast<std::uintptr_t> (this));
 
     // ARA に結び付いていれば PlaybackRenderer が buffer を置き換える。そうでなければ入力をそのまま通す。
     processBlockForARA (buffer, isRealtime(), getPlayHead());

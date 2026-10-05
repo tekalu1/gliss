@@ -27,6 +27,11 @@ const A = {
   flashUntil: 0,
   loopHold: 0,              // 画面でループを動かした直後は DAW の値で上書きしない（ミリ秒の時刻）
   chipKey: '',
+  position: null,           // { song, at, sequence, playing }: 曲の秒。編集の秒とは分ける
+  positionRaf: 0,
+  reverseSince: 0,
+  clockBase: null,           // C++ の uint32 stamp_ms と performance.now の差分用
+  latencyWindow: [],        // 直近の通知遅延。最小値を基準にジッター分を除く
 };
 let H = {};                 // main.js から渡される画面の部品（araBoot）
 
@@ -35,6 +40,12 @@ export const araFeatures = () => ({ transport: A.transport, fileGuide: A.fileGui
 export const araEngine = () => ({ ...A.engine });
 export const araCacheOf = (id) => (ARA ? A.cache.get(id) || null : null);
 export const araRegions = (t) => (ARA ? A.regions.get(t.id) || null : null);
+/** ピアノロールだけで使う秒。上段と時計の S.head は常にソングの秒。 */
+export function araEditorHead() {
+  if (!ARA) return S.head;
+  const t = S.tracks.find((x) => x.id === S.session?.current);
+  return t ? araToRep(t, S.head) : S.head;
+}
 /** トラックビュー・見出しを描き直すかの判定に足す（リージョンとキャッシュの状態）。 */
 export const araSig = () => (ARA ? JSON.stringify([[...A.regions], [...A.cache].map(([k, v]) => [k, v.state])]) : '');
 
@@ -97,14 +108,52 @@ export async function araCompare(on) {
 }
 
 // ---------------------------------------------------------------- DAW の再生位置
-function onPlayhead(p) {
+const EXTRAPOLATE_MS = 55; // 通知が途切れたら止め、ホストとの差を長く隠さない
+function paintPosition() {
+  A.positionRaf = 0;
+  const p = A.position;
+  if (!p || !p.playing) return;
+  const elapsed = performance.now() - p.at;
+  S.head = p.song + Math.min(EXTRAPOLATE_MS, Math.max(0, elapsed)) / 1000;
+  H.follow?.();
+  H.movePlayhead?.();
+  A.positionRaf = requestAnimationFrame(paintPosition);
+}
+
+export function onPlayhead(p) {
   if (!p || typeof p !== 'object') return;
-  const cur = S.session?.current;
-  const m = cur && p.mapped ? p.mapped[cur] : null;
-  S.head = m != null ? S.off + m : (Number.isFinite(p.song_sec) ? p.song_sec : S.head);
+  if (!Number.isFinite(p.song_sec)) return;
+  const now = performance.now();
+  const seq = Number.isSafeInteger(p.sequence) ? p.sequence : null;
+  if (seq !== null && A.position?.sequence !== null && A.position?.sequence !== undefined && seq <= A.position.sequence) return;
+  let arrivalCorrection = 0;
+  if (Number.isInteger(p.stamp_ms) && p.stamp_ms >= 0 && p.stamp_ms <= 0xffffffff) {
+    if (!A.clockBase) A.clockBase = { stamp: p.stamp_ms, at: now };
+    const elapsedStamp = ((p.stamp_ms - A.clockBase.stamp + 0x80000000) >>> 0) - 0x80000000;
+    const latency = now - A.clockBase.at - elapsedStamp;
+    A.latencyWindow.push({ at: now, value: latency });
+    A.latencyWindow = A.latencyWindow.filter((x) => now - x.at < 3000);
+    const floor = Math.min(...A.latencyWindow.map((x) => x.value));
+    arrivalCorrection = Math.min(80, Math.max(0, latency - floor)) / 1000;
+  }
+  const reportedSong = p.song_sec + (p.playing ? arrivalCorrection : 0);
   const playing = !!p.playing;
   const was = S.playing;
+  const expected = A.position?.playing ? S.head : A.position?.song;
+  const delta = reportedSong - expected;
+  // 20 ms 未満の一時的な逆行だけ一通知分保持する。継続した逆行・シーク・ループは本当の位置へ戻す。
+  let song = reportedSong;
+  if (playing && was && delta < 0 && delta > -0.02) {
+    if (!A.reverseSince) A.reverseSince = now;
+    if (now - A.reverseSince < 50) song = expected;
+  } else A.reverseSince = 0;
+  if (!playing || !was || Math.abs(delta) >= 0.1) A.reverseSince = 0;
+  A.position = { song, at: now, sequence: seq, playing };
+  S.head = song;
   S.playing = playing;
+  if (playing && !was) window.dispatchEvent(new Event('gliss-host-play'));
+  if (A.positionRaf) cancelAnimationFrame(A.positionRaf);
+  if (playing) A.positionRaf = requestAnimationFrame(paintPosition);
   const loop = Array.isArray(p.loop) && p.loop.length === 2 ? [p.loop[0], p.loop[1]] : null;
   const loopChanged = A.transport && performance.now() > A.loopHold
     && JSON.stringify(loop) !== JSON.stringify(S.loop);
