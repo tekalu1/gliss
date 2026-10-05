@@ -18,7 +18,7 @@ test('ARA position uses host timestamps, keeps song/source axes separate, and sn
   const frame = () => { const [id, fn] = frames.entries().next().value || []; if (fn) { frames.delete(id); fn(); } };
   try {
     const { onPlayhead, araEditorHead, pullHostState } = await import('../../renderer/ara.js');
-    const { S } = await import('../../renderer/state.js');
+    const { S, invalidateWarp } = await import('../../renderer/state.js');
     S.session = { current: 'vocal' };
     S.tracks = [{ id: 'vocal', kind: 'vocal', offset_sec: 10 }];
     S.off = 10; S.head = 0; S.playing = false; S.loop = null;
@@ -51,6 +51,16 @@ test('ARA position uses host timestamps, keeps song/source axes separate, and sn
     expect(S.head).toBeCloseTo(10.11, 6);
     now = 300; frame();
     expect(S.head).toBeCloseTo(10.11, 6);
+    // The lower bar uses the same edited and temporary display axis as notes.
+    S.vd = { time_map: { src_sec: [0, 4], out_sec: [0, 8] } };
+    expect(araEditorHead() - S.off).toBeCloseTo(4.11, 6);
+    S.bounds = [{ index: 0, edited_sec: 4 }, { index: 1, edited_sec: 5 }];
+    S.local.btime.set(0, 4.2); S.local.btime.set(1, 5.2);
+    invalidateWarp();
+    expect(araEditorHead() - S.off).toBeCloseTo(4.31, 6);
+    S.head = 9; // song gap: no lower playhead or follow target
+    expect(araEditorHead()).toBeNull();
+    S.local.btime.clear(); S.bounds = []; invalidateWarp();
   } finally {
     if (original) Object.defineProperty(globalThis, 'performance', original);
     else delete globalThis.performance;

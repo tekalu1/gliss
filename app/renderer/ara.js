@@ -10,7 +10,7 @@
 //  - DAW の選択に画面が追従する（`selection`: 選ばれたリージョンのトラックに切り替え、表示範囲をリージョンに寄せる）
 //  - DAW の再生位置・ループを画面に出す（`playhead` → S.head・S.playing・S.loop）／画面の操作を DAW へ（transport）
 //  - リージョンの枠・キャッシュの状態（reading・syncing…）・エンジンの状態を、トラックビューとツールバーの札に出す
-import { S } from './state.js';
+import { S, toEdited, warp } from './state.js';
 
 export const ARA = typeof window !== 'undefined' && window.api?.mode === 'ara';
 if (ARA) document.documentElement.dataset.mode = 'ara';
@@ -40,11 +40,21 @@ export const araFeatures = () => ({ transport: A.transport, fileGuide: A.fileGui
 export const araEngine = () => ({ ...A.engine });
 export const araCacheOf = (id) => (ARA ? A.cache.get(id) || null : null);
 export const araRegions = (t) => (ARA ? A.regions.get(t.id) || null : null);
-/** ピアノロールだけで使う秒。上段と時計の S.head は常にソングの秒。 */
+/** ピアノロールだけで使う表示秒 + S.off。上段と時計の S.head はソング秒。リージョン外は null。 */
 export function araEditorHead() {
   if (!ARA) return S.head;
-  const t = S.tracks.find((x) => x.id === S.session?.current);
-  return t ? araToRep(t, S.head) : S.head;
+  const t = S.tracks.find((x) => S.projectDir && x.project_dir && norm(x.project_dir) === norm(S.projectDir))
+    || S.tracks.find((x) => x.id === S.session?.current);
+  const rs = t && A.regions.get(t.id);
+  if (!rs) return null;
+  // C++ PlayheadState と同じく、重なるリージョンでは後から始まるものを選ぶ。
+  let r = null;
+  for (const x of rs) {
+    if (S.head >= x.song_start && S.head < x.song_end && (!r || x.song_start > r.song_start)) r = x;
+  }
+  if (!r) return null;
+  const modSec = r.mod_start + (S.head - r.song_start) / araScale(r);
+  return S.off + warp(toEdited(modSec));
 }
 /** トラックビュー・見出しを描き直すかの判定に足す（リージョンとキャッシュの状態）。 */
 export const araSig = () => (ARA ? JSON.stringify([[...A.regions], [...A.cache].map(([k, v]) => [k, v.state])]) : '');
