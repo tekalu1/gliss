@@ -108,6 +108,9 @@ EditorWebView::EditorWebView (DocumentBridge& bridgeIn)
 
 EditorWebView::~EditorWebView()
 {
+    // The document can remain alive after this native editor is closed.
+    bridge.preview ("stop", {}, [] (const juce::var&) {});
+    diag::log ("editor: preview stopped on close");
     bridge.removeListener (this);
     pendingConfirm = nullptr;
     messageBox.close();

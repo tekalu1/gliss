@@ -458,12 +458,25 @@ private:
 
     void closeViews()
     {
+        const auto editorsToClose = (int) views.size();
+        const auto countStops = [this]
+        {
+            int count = 0;
+            if (fake != nullptr)
+                for (const auto& op : fake->previewOps)
+                    if (op == "stop") ++count;
+            return count;
+        };
+        const auto stopsBeforeClose = countStops();
         // DAW と同じく、窓より先にエディタを壊す
         for (auto& w : windows)
             w->removeKeyListener (&recorder);
 
         views.clear();
         windows.clear();
+        if (editorsToClose > 0)
+            check (fake != nullptr && countStops() == stopsBeforeClose + editorsToClose,
+                   "closing each native editor sends preview stop to the document");
     }
 
     /** 画面の外の窓（GlissHostCheck の OffscreenWindow と同じ置き方）。 */

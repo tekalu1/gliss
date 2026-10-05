@@ -6,12 +6,12 @@ namespace gliss
 GlissEditorRenderer::GlissEditorRenderer (ARA::PlugIn::DocumentController* controller, std::shared_ptr<PreviewAudio> preview)
     : ARAEditorRenderer (controller), previewAudio (std::move (preview))
 {
-    previewAudio->addRenderer();
+    rendererId = previewAudio->addRenderer();
 }
 
 GlissEditorRenderer::~GlissEditorRenderer()
 {
-    previewAudio->removeRenderer();
+    previewAudio->removeRenderer (rendererId);
 }
 
 void GlissEditorRenderer::prepareToPlay (double sampleRate, int maximumSamplesPerBlock, int numChannels,
@@ -37,7 +37,7 @@ bool GlissEditorRenderer::processBlock (juce::AudioBuffer<float>& buffer,
     else if (realtime == juce::AudioProcessor::Realtime::yes)
     {
         hostPlaying = false;
-        previewAudio->render (buffer, outputRate, cursor);
+        previewAudio->renderForRenderer (buffer, outputRate, cursor, rendererId, juce::Time::getMillisecondCounter());
     }
     else
     {

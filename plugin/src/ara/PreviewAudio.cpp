@@ -54,6 +54,38 @@ void PreviewAudio::stop()
     publish (nullptr);
 }
 
+void PreviewAudio::removeRenderer (std::uint64_t id) noexcept
+{
+    auto expected = id;
+    activeRendererId.compare_exchange_strong (expected, 0);
+    renderers.fetch_sub (1);
+}
+
+bool PreviewAudio::renderForRenderer (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor,
+                                      std::uint64_t rendererId, std::uint32_t nowMs) noexcept
+{
+    if (rendererId == 0 || renderGate.test_and_set (std::memory_order_acquire)) return false;
+    auto owner = activeRendererId.load();
+    if (owner != rendererId)
+    {
+        if (owner != 0 && (std::uint32_t) (nowMs - ownerStampMs.load()) <= 250)
+        {
+            renderGate.clear (std::memory_order_release);
+            return false;
+        }
+        if (! activeRendererId.compare_exchange_strong (owner, rendererId))
+        {
+            renderGate.clear (std::memory_order_release);
+            return false;
+        }
+        cursor.released = true;
+    }
+    ownerStampMs.store (nowMs);
+    render (output, outputRate, cursor);
+    renderGate.clear (std::memory_order_release);
+    return true;
+}
+
 void PreviewAudio::render (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor) noexcept
 {
     if ((cancelState.load() & 1) != 0) { cursor.released = true; return; }

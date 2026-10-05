@@ -29,6 +29,7 @@ private:
     double outputRate = 0.0;
     PreviewAudio::Cursor cursor;
     bool hostPlaying = false;
+    std::uint64_t rendererId = 0;
 };
 
 } // namespace gliss

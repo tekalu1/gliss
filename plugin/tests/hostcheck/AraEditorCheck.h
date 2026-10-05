@@ -299,11 +299,20 @@ private:
     void finish()
     {
         // DAW と同じく、エディタを閉じてもメッセージループを回し、少し待ってからインスタンス → モデル → ドキュメントの順に手放す
+        const auto editorWasOpen = editor != nullptr;
         window.reset();
         editor.reset();
 
-        juce::Timer::callAfterDelay (1500, [this]
+        juce::Timer::callAfterDelay (1500, [this, editorWasOpen]
         {
+            if (editorWasOpen)
+            {
+                juce::String trace;
+                for (const auto& file : traceDir.findChildFiles (juce::File::findFiles, false, "gliss-ara-*.log"))
+                    trace << file.loadFileAsString();
+                check (document != nullptr && trace.contains ("editor: preview stopped on close"),
+                       "native editor close stops preview while the ARA document remains");
+            }
             releaseAll();
             report ("teardown: document released");
 

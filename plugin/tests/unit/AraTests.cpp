@@ -502,6 +502,39 @@ public:
             expect (samples.getSample (0, 400) < -0.3f);
         }
 
+        beginTest ("one document feeds only one live EditorRenderer");
+        {
+            PreviewAudio shared;
+            const auto firstId = shared.addRenderer();
+            const auto secondId = shared.addRenderer();
+            PreviewAudio::Cursor firstCursor, secondCursor;
+            juce::AudioBuffer<float> firstOutput (1, 480), secondOutput (1, 480);
+            shared.publish (makeClip (0.4f));
+            firstOutput.clear(); secondOutput.clear();
+            expect (shared.renderForRenderer (firstOutput, 48000.0, firstCursor, firstId, 1000));
+            expect (! shared.renderForRenderer (secondOutput, 48000.0, secondCursor, secondId, 1000));
+            expect (firstOutput.getSample (0, 400) > 0.3f);
+            expectWithinAbsoluteError (secondOutput.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+
+            shared.removeRenderer (firstId);
+            secondOutput.clear();
+            expect (shared.renderForRenderer (secondOutput, 48000.0, secondCursor, secondId, 1001));
+            expect (secondOutput.getSample (0, 400) > 0.3f);
+            shared.removeRenderer (secondId);
+
+            const auto thirdId = shared.addRenderer();
+            const auto fourthId = shared.addRenderer();
+            PreviewAudio::Cursor thirdCursor, fourthCursor;
+            firstOutput.clear(); secondOutput.clear();
+            expect (shared.renderForRenderer (firstOutput, 48000.0, thirdCursor, thirdId, 2000));
+            expect (shared.renderForRenderer (secondOutput, 48000.0, fourthCursor, fourthId, 2251));
+            firstOutput.clear();
+            expect (! shared.renderForRenderer (firstOutput, 48000.0, thirdCursor, thirdId, 2251));
+            expectWithinAbsoluteError (firstOutput.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+            shared.removeRenderer (thirdId);
+            shared.removeRenderer (fourthId);
+        }
+
         beginTest ("new audition PCM changes the actual output pitch");
         {
             PreviewAudio pitched;
