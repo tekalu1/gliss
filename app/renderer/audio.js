@@ -322,6 +322,16 @@ function schedulePreview() {
   PV.timer = setTimeout(() => { PV.timer = 0; requestPreview(); }, wait);
 }
 
+function araPreviewError(reason) {
+  switch (reason) {
+    case 'no-editor-renderer': return 'この DAW では試聴出力を使えません';
+    case 'host-playing': return 'DAW の再生中は試聴できません';
+    case 'invalid-path':
+    case 'invalid-audio': return '試聴用の音を読み込めません';
+    default: return 'DAW で試聴を開始できません';
+  }
+}
+
 async function requestPreview() {
   if (!PV.note || PV.busy) return;
   if (S.playing) { stopPreview(); return; }
@@ -339,7 +349,10 @@ async function requestPreview() {
     if (ARA) {                      // native は準備した PCM を EditorRenderer へ渡してから ok を返す
       const result = await araPreview('start', { path: r.path, loop: true, note, cents });
       if (tok !== PV.token) return;
-      if (!result?.ok) throw new Error(result?.reason || 'DAW の試聴出力を使えない');
+      if (!result?.ok) {
+        if (result?.reason === 'cancelled') { stopPreview(); return; }
+        throw new Error(araPreviewError(result?.reason));
+      }
       PV.host = true;
       PV.cents = cents;
       setPreviewPhase('sounding');

@@ -71,10 +71,25 @@ test('release, blur and host playback cancel an ARA preview even while native st
     stopPreview();
     expect(phases).toHaveLength(eventCount);
 
+    for (const [reason, message] of [
+      ['no-editor-renderer', 'この DAW では試聴出力を使えません'],
+      ['host-playing', 'DAW の再生中は試聴できません'],
+      ['invalid-audio', '試聴用の音を読み込めません'],
+      ['invalid-path', '試聴用の音を読み込めません'],
+      ['unexpected-code', 'DAW で試聴を開始できません'],
+    ]) {
+      startPreview('n1'); await settle();
+      pendingStart({ ok: false, reason }); await settle();
+      expect(previewState()).toMatchObject({ phase: 'error', error: message, sounding: null });
+      stopPreview();
+    }
+
+    const beforeCancel = phases.length;
     startPreview('n1'); await settle();
-    pendingStart({ ok: false, reason: 'unavailable' }); await settle();
-    expect(phases.at(-1)).toMatchObject({ phase: 'error', error: 'unavailable' });
-    stopPreview();
+    pendingStart({ ok: false, reason: 'cancelled' }); await settle();
+    expect(previewState()).toMatchObject({ phase: 'idle', error: null, sounding: null });
+    expect(phases.slice(beforeCancel).map((x) => x.phase)).toEqual(['preparing', 'idle']);
+    expect(calls.at(-1)).toBe('stop');
   } finally {
     globalThis.window = oldWindow;
     globalThis.document = oldDocument;
