@@ -15,7 +15,7 @@ import {
 } from './edits.js';
 import { G, saveGrid } from './grid.js';
 import { openTempoInput } from './tempo.js';
-import { closePop, closeTr, openPop, openTr, setTool } from './interact.js';
+import { beginSelectedAudition, closePop, closeTr, endAudition, openPop, openTr, setTool } from './interact.js';
 import { play, previewEnabled, setPreviewEnabled, stop } from './audio.js';
 import { ARA, araCompare, araFeatures, araTransport } from './ara.js';
 import { status } from './engine.js';
@@ -141,6 +141,8 @@ export const COMMANDS = [
   // つかんだノートを鳴らす（Melodyne と同じ。issue #27）。ユーザー設定（取り消しの履歴に入れない）
   ['preview-notes', 'つかんだノートを鳴らす', GR.play, [], () => setPreviewEnabled(!previewEnabled()), null,
     () => previewEnabled()],
+  ['audition-selected', '選択ノートを試聴', GR.play, ['P'], (ctx) => beginSelectedAudition({ once: ctx?.source !== 'keyboard' }),
+    () => selectedNotes().some((n) => n.kind === 'note')],
   // 原音と比べる（プラグインだけ。Melodyne の比較と同じ）: キャッシュを読まずに原音を返す
   ...(ARA ? [['ara-compare', '原音と比べる', GR.play, [], () => araCompare(!araFeatures().compare), null,
     () => araFeatures().compare]] : []),
@@ -182,6 +184,8 @@ export const COMMANDS = [
   // 再生位置に追従（Studio One のオートスクロールと同じ F。issue #40）
   ['follow', '再生位置に追従', GR.view, ['F'], toggleFollow, null, () => G.follow],
   ['guide-view', 'ガイドを重ねて表示', GR.view, [], toggleGuide, guideShown, () => S.showGuide],
+  ['phoneme-bounds', '音素境界を全高に表示', GR.view, [], () => { S.showAllBounds = !S.showAllBounds; render(); },
+    null, () => S.showAllBounds],
   ['show-all', '全体を表示', GR.view, [], showAll, hasNotes],
   ['zoom-reset', 'ズームを戻す', GR.view, [], () => host.zoomReset(), () => hasNotes() || S.tracks.length > 0],
 
@@ -279,6 +283,9 @@ let keysOpen = () => false;
 /** キー入力をコマンドへ（document の keydown）。文字を入力している欄・設定画面の中では効かない。 */
 export function installKeys({ dialogOpen } = {}) {
   keysOpen = dialogOpen || keysOpen;
+  document.addEventListener('keyup', (e) => {
+    if (commandFor(comboOf(e)) === 'audition-selected' || e.key.toLowerCase() === 'p') endAudition();
+  });
   document.addEventListener('keydown', (e) => {
     if (e.defaultPrevented || keysOpen() || typing(e.target)) return;
     const combo = comboOf(e);
@@ -294,7 +301,7 @@ export function installKeys({ dialogOpen } = {}) {
       status(`${c.label}: 今は使えない（${needs(id)}）`);
       return;
     }
-    const r = runCommand(id);
+    const r = runCommand(id, id === 'audition-selected' ? { source: 'keyboard' } : undefined);
     if (r && typeof r.catch === 'function') r.catch((err) => status(`${command(id).label} に失敗: ${err.message}`));
   });
   onKeysChanged(() => { renderToolbar(); syncAppMenu(); });
@@ -307,11 +314,11 @@ const SEP = { sep: true };
 const MENUBAR = [
   ['ファイル', ['new-project', 'open-take', { recent: true, label: '最近使ったプロジェクト' }, SEP, 'save', 'save-as', SEP,
     'add-track', 'open-guide', 'load-lyrics', 'import-lyrics', SEP, 'export', 'export-as', SEP, { role: 'quit', label: '終了' }]],
-  ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes',
+  ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'audition-selected',
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
   ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute', 'unmute',
     SEP, 'ask-ai']],
-  ['表示', ['guide-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
   // 名前・版・アイコン（main の app.setAboutPanelOptions。issue #29）
   ['ヘルプ', ['ai-connect', 'addons', SEP, 'check-updates', { role: 'about', label: 'Gliss について' }]],
 ];
@@ -319,10 +326,10 @@ const MENUBAR = [
 // プラグインの並び: ファイルは「ガイドを開く…（C++ が対応したとき）・歌詞」だけ、ヘルプはキーボードショートカットだけ
 const MENUBAR_ARA = [
   ['ファイル', ['open-guide', 'load-lyrics', 'import-lyrics']],
-  ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes',
+  ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'audition-selected',
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }]],
   MENUBAR[2],
-  ['表示', ['ara-compare', SEP, 'guide-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
   ['ヘルプ', ['keys']],
 ];
 
@@ -331,8 +338,10 @@ const MENUBAR_ARA = [
 export function undoLabels() {
   const h = S.hist || {};
   const pend = S.pending.filter((it) => !it.started && !it.canceled);
-  const u = pend.length ? pend[pend.length - 1].label : histLabel(h.undo);
-  const rd = pend.length ? null : histLabel(h.redo);
+  const edge = S.edgeDraft?.drag;
+  const cancellableEdge = edge && !edge.applying && (edge.moved || S.pendingPlan);
+  const u = cancellableEdge ? 'ノートの長さ' : pend.length ? pend[pend.length - 1].label : histLabel(h.undo);
+  const rd = cancellableEdge || pend.length ? null : histLabel(h.redo);
   return { u, rd };
 }
 

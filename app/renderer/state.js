@@ -40,6 +40,7 @@ export const S = {
   pv: null,
   view: { t0: 0, span: 0 },   // span 0 = 未設定（読み込み時に全体にする）
   showGuide: true,
+  showAllBounds: false, // 音素境界の全高表示。吸着・編集には影響しない
   sel: [],             // 選択中のノート id
   loop: null,          // [t0, t1]（編集後の時間）
   head: 0,
@@ -86,6 +87,10 @@ export const S = {
   trPreview: null,
   // 鉛筆で描いている線: { vals: Map(フレーム → MIDI), last: {i, m} }（離したら set_pitch_curve(mode=draw)）
   stroke: null,
+  strokePhase: 'idle', // drawing / pending / checking / failed / committed
+  boundHover: null,
+  edgeDraft: null, // 計画待ちの間に見せる仮の端（エンジンには未適用）
+  lastEdgeTiming: null, // 直近の端編集の plan / apply / view の実測値
   cutHover: null,      // はさみ: { id, t（編集後の秒）, src（編集前の秒） }
   // 接続の見せ方（B 案）: ポインタが近づいた境目（'a|b'）と、Alt を押しているか
   near: null,
@@ -597,7 +602,12 @@ export function fadeGain(n, t, span = null) {
   return g;
 }
 export function spanOf(n) {
-  return [warp(n.edited_start_sec, 'right'), warp(n.edited_end_sec, 'left')];
+  const a = warp(n.edited_start_sec, 'right');
+  const b = warp(n.edited_end_sec, 'left');
+  const d = S.edgeDraft;
+  if (!d || d.id !== n.id || d.trackId !== S.session?.current || (d.planId && S.plan?.data?.plan_id === d.planId)) return [a, b];
+  return d.which === 'start' ? [Math.min(a + d.want, b - LAYOUT.MIN_SEG), b]
+    : [a, Math.max(b + d.want, a + LAYOUT.MIN_SEG)];
 }
 export function boxOf(n) {
   const p = pitchOf(n);
@@ -680,6 +690,11 @@ export function aiNotesOf(edits, notes) {
 
 /** 新しい view-data を取り込む。 */
 export function adopt(vd, { keepView = true } = {}) {
+  if (S.stroke && S.stroke.trackId !== S.session?.current) {
+    S.stroke = null;
+    S.strokePhase = 'idle';
+  }
+  if (S.edgeDraft && S.edgeDraft.trackId !== S.session?.current) S.edgeDraft = null;
   S.vd = vd;
   // 曲の取り消しの履歴（セッション）の要約。セッションの無いプロジェクトはプロジェクトの changeset から
   const vh = vd.history || {};
@@ -753,6 +768,10 @@ export function clearProject() {
   S.sel = [];
   S.plan = null;
   S.stroke = null;
+  S.strokePhase = 'idle';
+  S.edgeDraft = null;
+  S.lastEdgeTiming = null;
+  S.boundHover = null;
   S.loop = null;
   S.head = 0;
   S.pv = null;

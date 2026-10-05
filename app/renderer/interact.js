@@ -27,11 +27,11 @@ import {
 } from './draw.js';
 import {
   afterQueued, applyBoundary, applyDraw, applyFade, applyPitch, applyPlan, applyTransition, enqueue, idle,
-  mergeNotes, muteNotes, requestPlan, restorePreviews, setLyrics, setNoteSyllable, splitNote, unmuteNotes, waitFor,
+  mergeNotes, muteNotes, refresh, requestPlan, restorePreviews, retryDraw, setLyrics, setNoteSyllable, splitNote, unmuteNotes, waitFor,
   wake,
 } from './edits.js';
 import { G, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
-import { startPreview, stop, stopPreview, updatePreview } from './audio.js';
+import { previewEnabled, previewState, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
 import { ARA, araLoop, araLoopHold, araSeek } from './ara.js';
 import { status } from './engine.js';
 import { closeMenu, editorMenu, menuOpen } from './menus.js';
@@ -48,11 +48,69 @@ const $ = (s) => document.querySelector(s);
 let svg = null;
 let root = null;
 let saveView = () => {};
+let auditionRestore = null;
+let auditionNote = null;
+let auditionLimit = null;
+
+function auditionText(value) {
+  const el = $('#auditionState');
+  if (el) el.textContent = value;
+}
+
+function onPreviewState(e) {
+  if (!auditionNote) return;
+  const p = e.detail || previewState();
+  if (p.phase === 'sounding') auditionText('試聴中');
+  else if (p.phase === 'preparing') auditionText('試聴を準備中');
+  else if (p.phase === 'error') {
+    auditionText('試聴できません');
+    status(`試聴できません: ${p.error || 'ホストの出力を確認してください'}`);
+  }
+}
+
+function beginAudition(id) {
+  if (!id || !S.byId.get(id)?.pitch_editable) return;
+  if (auditionNote === id) return;
+  endAudition();
+  auditionNote = id;
+  auditionRestore = previewEnabled();
+  if (!auditionRestore) setPreviewEnabled(true, { save: false });
+  auditionText('試聴を準備中');
+  startPreview(id);
+  onPreviewState({ detail: previewState() });
+}
+
+function scheduleNoteHold(dr, id) {
+  dr.holdTimer = setTimeout(() => {
+    if (S.drag === dr && !dr.moved && dr.trackId === S.session?.current) beginAudition(id);
+  }, 450);
+}
+
+export function beginSelectedAudition({ once = false } = {}) {
+  const id = S.sel.find((n) => S.byId.get(n)?.pitch_editable);
+  if (!id) { status('試聴するノートを選んでください'); return; }
+  beginAudition(id);
+  if (once) {
+    clearTimeout(auditionLimit);
+    auditionLimit = setTimeout(endAudition, 2500);
+  }
+}
+
+export function endAudition() {
+  clearTimeout(auditionLimit);
+  auditionLimit = null;
+  stopPreview();
+  if (auditionRestore === false) setPreviewEnabled(false, { save: false });
+  auditionRestore = null;
+  auditionNote = null;
+  auditionText('');
+}
 
 export function install(svgEl, rootEl, onViewChanged) {
   svg = svgEl;
   root = rootEl;
   saveView = onViewChanged || (() => {});
+  window.addEventListener('gliss-preview-state', onPreviewState);
   svg.addEventListener('pointerdown', onDown);
   svg.addEventListener('pointerleave', () => {
     lastHover = null;
@@ -60,12 +118,13 @@ export function install(svgEl, rootEl, onViewChanged) {
     if (S.cutHover) { S.cutHover = null; dirty = true; }
     if (S.near && !S.drag) { S.near = null; dirty = true; }
     if (S.edgeHover && !S.drag) { S.edgeHover = null; dirty = true; }
+    if (S.boundHover && !S.drag) { S.boundHover = null; dirty = true; }
     if ((S.noteHover || S.fadeHover) && !S.drag) { S.noteHover = null; S.fadeHover = null; dirty = true; }
     if (dirty) render();
   });
   // Alt を押したまま別のウィンドウへ移ると keyup が来ない: 予告を残さない
   window.addEventListener('blur', () => { if (S.alt) { S.alt = false; render(); } });
-  window.addEventListener('blur', stopPreview);     // ほかのウィンドウへ移った（離したことが届かないことがある）
+  window.addEventListener('blur', endAudition);     // ほかのウィンドウへ移った（離したことが届かないことがある）
   svg.addEventListener('pointermove', onMove);
   svg.addEventListener('pointerup', endDrag);
   svg.addEventListener('pointercancel', endDrag);
@@ -130,13 +189,14 @@ function onDown(e) {
     if (e.shiftKey) S.sel = isSel(n.id) ? S.sel.filter((id) => id !== n.id) : [...S.sel, n.id];
     else S.sel = [n.id];
     if (d.nopEdge !== undefined) {
-      const dr = { type: 'edge', id: n.id, which: d.nopEdge, x0: e.clientX, moved: false, alt: e.altKey, want: 0, nop: true };
+      const dr = { type: 'edge', id: n.id, which: d.nopEdge, x0: e.clientX, moved: false, alt: e.altKey, want: 0, nop: true,
+        trackId: S.session?.current, startedAt: performance.now() };
       if (e.altKey) window.api.consumeAlt?.();
       planFor(dr, { op: 'edge', note_id: n.id, side: d.nopEdge, detach: e.altKey });
       S.drag = dr;
     } else {
       S.drag = { type: 'note', ids: [n.id], x0: e.clientX, y0: e.clientY, moved: false, anchor: n, axis: null,
-        want: 0, nop: true, shift0: e.shiftKey };
+        want: 0, nop: true, shift0: e.shiftKey, trackId: S.session?.current };
     }
     svg.setPointerCapture(e.pointerId);
     render();
@@ -145,12 +205,12 @@ function onDown(e) {
   if (d.edge !== undefined) {
     // 端のドラッグ。計画はエンジンに作らせる（Alt = 接続を切って自分だけ動く）
     const dr = { type: 'edge', id: d.note, which: d.edge, x0: e.clientX, moved: false,
-      alt: e.altKey, want: 0 };
+      alt: e.altKey, want: 0, trackId: S.session?.current, startedAt: performance.now() };
     if (e.altKey) window.api.consumeAlt?.();
     planFor(dr, { op: 'edge', note_id: d.note, side: d.edge, detach: e.altKey });
     S.drag = dr;
     svg.setPointerCapture(e.pointerId);
-    startPreview(d.note);
+    if (!ARA) startPreview(d.note);
     render();
     return;
   }
@@ -166,9 +226,10 @@ function onDown(e) {
     if (!ids.length) ids = [id];
     ids = ids.filter((x) => S.byId.get(x)?.pitch_editable);
     S.drag = { type: 'note', ids, x0: e.clientX, y0: e.clientY, moved: false, anchor: n,
-      axis: null, want: 0 };
+      axis: null, want: 0, trackId: S.session?.current };
     svg.setPointerCapture(e.pointerId);
-    startPreview(id);                        // つかんだノートを鳴らす（複数選んでいても、つかんだものだけ）
+    if (ARA) scheduleNoteHold(S.drag, id);
+    else startPreview(id);                   // 単体版のつかんだノートの試聴は従来どおり
     render();
     return;
   }
@@ -211,14 +272,26 @@ function pxToSec(dxPx) {
 /** 端・移動のドラッグの計画を頼む。**前に離した操作が当たり終わってから**頼む
  * （計画は当たった後の状態から作る。前の確定の途中で頼むと、前の計画のプレビューを奪い合う）。 */
 function planFor(dr, args) {
+  if (dr.type === 'edge') {
+    S.edgeDraft = { id: dr.id, which: dr.which, want: 0, trackId: dr.trackId, drag: dr, planId: null };
+  }
+  const started = performance.now();
+  dr.planTimer = setTimeout(() => {
+    if (!dr.canceled && S.edgeDraft?.drag === dr) status('ノートの端を準備中…');
+  }, 450);
   dr.planReq = afterQueued()
-    .then(() => requestPlan(args))
+    .then(() => dr.canceled || dr.trackId !== S.session?.current ? null : requestPlan(args))
     .then((data) => {
+      clearTimeout(dr.planTimer);
       if (!data) return null;
-      if (S.drag === dr) { dr.planId = data.plan_id; setPlan(data); dragX(dr); render(); }
+      if (dr.canceled || dr.trackId !== S.session?.current) return null;
+      dr.planId = data.plan_id;
+      if (S.edgeDraft?.drag === dr) S.edgeDraft.planId = data.plan_id;
+      if (S.drag === dr) { setPlan(data); dragX(dr); render(); }
+      dr.planMs = performance.now() - started;
       return data;
     })
-    .catch((err) => { status(`計画を作れなかった: ${err.message}`); return null; });
+    .catch((err) => { clearTimeout(dr.planTimer); status(`計画を作れなかった: ${err.message}`); return null; });
 }
 
 /** 端・移動のドラッグで動かす時刻（編集後の秒。計画を当てる前）: 端ならその端、移動ならつかんだノートの頭。 */
@@ -285,7 +358,9 @@ function onMove(e) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_PX) return;
       // 子音・息は横だけ（音程が無い。issue #35）
       dr.axis = dr.nop || Math.abs(dx) > Math.abs(dy) ? 'time' : 'pitch';
+      clearTimeout(dr.holdTimer);
       if (dr.axis === 'time') planFor(dr, { op: 'move', note_ids: dr.ids });
+      else if (ARA) beginAudition(dr.anchor?.id);
     }
     dr.moved = true;
     if (dr.axis === 'time') {
@@ -329,6 +404,7 @@ function onMove(e) {
     const dxPx = e.clientX - dr.x0;
     if (Math.abs(dxPx) >= 2) dr.moved = true;
     dr.want = pxToSec(dxPx);
+    if (S.edgeDraft?.drag === dr) S.edgeDraft.want = dr.want;
     dragX(dr);
     render();
   } else if (dr.type === 'box') {
@@ -365,10 +441,12 @@ function releaseLost() {
 }
 
 function endDrag(e) {
-  stopPreview();
+  endAudition();
   const dr = S.drag;
   if (!dr) return;
+  clearTimeout(dr.holdTimer);
   S.drag = null;
+  dr.releasedAt = performance.now();
   if (dr.type === 'stroke') { finishStroke(); return; }
   if (dr.type === 'fade') { finishFade(dr); return; }
   if (dr.type === 'mute') { finishMute(dr); return; }
@@ -448,29 +526,55 @@ const queuedPitch = new Map();
 /** 端・移動のドラッグを離した: 前に離した操作と計画を待ってから、同じ計画を同じ x で確定。 */
 let plansPending = 0;
 async function finishPlanDrag(dr) {
+  if (!dr.moved) {
+    dr.canceled = true;
+    clearTimeout(dr.planTimer);
+    if (S.edgeDraft?.drag === dr) S.edgeDraft = null;
+    if (dr.planId && S.plan?.data.plan_id === dr.planId) setPlan(null);
+    render();
+    return;
+  }
   // 確定し終わるまでは「計画の確定待ち」（はさみの結合はこの間受け付けない。テストもこれを待つ）
   plansPending += 1;
   S.pendingPlan = true;
   const cancel = () => {
     dr.canceled = true;
+    clearTimeout(dr.planTimer);
+    if (S.edgeDraft?.drag === dr) S.edgeDraft = null;
     if (dr.planId && S.plan?.data.plan_id === dr.planId) setPlan(null);
   };
   try {
     await enqueue(async () => {
       const data = await dr.planReq;
-      if (!data) { render(); return; }
+      if (!data || dr.canceled || dr.trackId !== S.session?.current) { cancel(); render(); return; }
       if (!S.plan || S.plan.data.plan_id !== data.plan_id) setPlan(data);
       dr.planId = data.plan_id;
       const x = dragX(dr);
       if (!dr.moved || Math.abs(x) < 1e-6) {
+        if (S.edgeDraft?.drag === dr) S.edgeDraft = null;
         if (S.plan?.data.plan_id === data.plan_id) setPlan(null);
         render();
         return;
       }
       await waitFor(() => !S.busy);        // 計画を待つ間に Ctrl+Z などが走り出していた
-      await applyPlan({ planId: data.plan_id, x });
+      if (dr.canceled || dr.trackId !== S.session?.current) { cancel(); render(); return; }
+      dr.applying = true;
+      if (S.edgeDraft?.drag === dr) S.edgeDraft = null;
+      const timing = {};
+      const result = await applyPlan({ planId: data.plan_id, x, onTiming: (v) => Object.assign(timing, v) });
+      if (S.plan?.data.plan_id === data.plan_id) {
+        if (result.ok) await refresh().catch(() => {}); // 先の再取得が新しい世代に負けた場合
+        if (S.plan?.data.plan_id === data.plan_id) setPlan(null);
+        render();
+      }
+      if (dr.type === 'edge') S.lastEdgeTiming = {
+        planMs: dr.planMs, pointerMs: dr.releasedAt - dr.startedAt,
+        queueMs: performance.now() - dr.releasedAt - (timing.applyMs || 0) - (timing.viewMs || 0),
+        ...timing, totalMs: performance.now() - dr.startedAt,
+      };
     }, { label: dr.type === 'edge' ? 'ノートの長さ' : 'ノートの移動', cancel });
   } finally {
+    if (S.edgeDraft?.drag === dr) S.edgeDraft = null;
     plansPending -= 1;
     S.pendingPlan = plansPending > 0;
     wake();
@@ -483,14 +587,17 @@ function connHover(e) {
   const d = e.target.dataset || {};
   const eh = d.edge !== undefined ? { id: d.note, which: d.edge }
     : d.nopEdge !== undefined ? { id: d.nop, which: d.nopEdge } : null;
+  const bh = d.bound !== undefined ? d.bound : null;
   const sameEdge = (!eh && !S.edgeHover)
     || (eh && S.edgeHover && eh.id === S.edgeHover.id && eh.which === S.edgeHover.which);
   // ノートに乗っている間は帯の上の角にフェードのつまみを出す（音程の無い区間・鍵盤の上は出さない）
   const nh = (S.tool === 'main' || S.tool === 'mute') && d.note !== undefined && S.byId.get(d.note)?.kind === 'note' ? d.note : null;
   const fh = nh && d.fade !== undefined ? `${nh}|${d.fade}` : null;
   // Alt はポインタのイベントの値も見る（フォーカスが外にあって keydown を取りこぼしたとき）
-  if (near === S.near && e.altKey === S.alt && sameEdge && nh === S.noteHover && fh === S.fadeHover) return;
+  if (near === S.near && e.altKey === S.alt && sameEdge && nh === S.noteHover && fh === S.fadeHover
+    && bh === S.boundHover) return;
   S.near = near;
+  S.boundHover = bh;
   S.alt = e.altKey;
   S.edgeHover = eh;
   S.noteHover = nh;
@@ -503,7 +610,12 @@ function connHover(e) {
 function startStroke(e) {
   const x = px(e); const y = py(e);
   if (x <= KEYS_W || y <= rollTop() || y >= rollBottom() || !S.vd) return false;
-  S.stroke = { vals: new Map(), last: null };
+  if (S.stroke && S.strokePhase !== 'drawing') {
+    status('前の描線を確定または取り消してから描いてください');
+    return true;
+  }
+  S.stroke = { vals: new Map(), last: null, trackId: S.session?.current, phase: 'drawing' };
+  S.strokePhase = 'drawing';
   strokeTo(toSource(T(x)), clamp(M(y), ...pitchWorld()));
   S.drag = { type: 'stroke', moved: false };
   svg.setPointerCapture(e.pointerId);
@@ -513,10 +625,26 @@ function startStroke(e) {
 
 /** 離した: 描いた線をエンジンへ。無声だけ・短すぎる線は捨てる（描いても効かない）。 */
 function finishStroke() {
-  const sd = strokeData();
-  if (!sd || sd.pts.length < 2) { S.stroke = null; render(); return; }
+  let sd = strokeData();
+  if (!sd) { S.stroke = null; S.strokePhase = 'idle'; render(); return; }
+  if (sd.pts.length === 1 && sd.v0 >= 0) {
+    // 同じ解析フレーム内の短い一筆も、隣の有声フレームまでを最小の描線にする。
+    const k = sd.lo;
+    const tm = S.vd.f0.take_midi;
+    const other = k + 1 < tm.length && tm[k + 1] != null ? k + 1 : k - 1;
+    if (other >= 0 && tm[other] != null) {
+      S.stroke.vals.set(other, sd.pts[0][1]);
+      sd = strokeData();
+    }
+  }
+  if (sd.pts.length < 2) {
+    S.stroke = null; S.strokePhase = 'idle';
+    status('この区間は短すぎて描けません（有声の区間を少し長くなぞってください）');
+    render(); return;
+  }
   if (sd.v0 < 0) {
     S.stroke = null;
+    S.strokePhase = 'idle';
     status('無声のところには描けない（音程が無いので効かない）');
     render();
     return;
@@ -524,10 +652,14 @@ function finishStroke() {
   // 描いている間に前の編集（Ctrl+Z・タイミングの確定）が走っていても捨てない。線を出したまま
   // 前のが終わるのを待って当てる（描いた線は編集前の秒と MIDI なので、前の編集の後でも同じ意味）
   const st = S.stroke;
+  st.projectDir = S.projectDir;
   const pts = sd.pts.map(([t, m]) => [+t.toFixed(6), +m.toFixed(4)]);
+  st.points = pts;
+  st.phase = S.strokePhase = 'pending';
   enqueue(() => applyDraw(pts, st), {
-    label: '鉛筆', cancel: () => { if (S.stroke === st) S.stroke = null; },
+    label: '鉛筆', cancel: () => { if (S.stroke === st) { S.stroke = null; S.strokePhase = 'idle'; } },
   });
+  render();
 }
 
 // ---------------------------------------------------------------- はさみ
@@ -881,6 +1013,28 @@ function releaseTr() {
 }
 
 function installMenus() {
+  const auditionButton = $('#bAudition');
+  auditionButton.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    auditionButton.setPointerCapture(e.pointerId);
+    beginSelectedAudition();
+  });
+  auditionButton.addEventListener('pointerup', endAudition);
+  auditionButton.addEventListener('pointercancel', endAudition);
+  auditionButton.addEventListener('lostpointercapture', endAudition);
+  auditionButton.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    if (!e.repeat) beginSelectedAudition();
+  });
+  auditionButton.addEventListener('keyup', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); endAudition(); }
+  });
+  $('#strokeRetry').addEventListener('click', () => { retryDraw().finally(render); });
+  $('#strokeCancel').addEventListener('click', () => {
+    S.stroke = null; S.strokePhase = 'idle'; status('描線を取り消しました'); render();
+  });
   popTr = $('#popTr');
   $('#popTrV').addEventListener('pointerdown', () => { trPointer = true; });
   $('#popTrV').addEventListener('input', previewTr);

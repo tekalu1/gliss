@@ -13,13 +13,19 @@ import { adoptSession } from './session.js';
 
 const AUTHOR = 'human';
 
+let refreshGeneration = 0;
 export async function refresh({ keepView = true, beforeRender = null } = {}) {
   if (awaiting()) { render(); return; }    // 準備を待つのをやめた: 終わるまで空のまま（描画データを頼むと待たされる）
+  const generation = ++refreshGeneration;
+  const trackId = S.session?.current;
+  const projectDir = S.projectDir;
   const vd = await viewData();
+  if (generation !== refreshGeneration || trackId !== S.session?.current || projectDir !== S.projectDir) return null;
   adopt(vd, { keepView });
   restorePreviews();
   beforeRender?.();
   render();
+  return vd;
 }
 
 // 取り消し・やり直しの結果（編集対象の切り替え・トラックの読み直し）は tracks.js が画面に反映する。
@@ -201,7 +207,8 @@ export const idle = () => !S.busy && !S.pendingPlan && S.queued === 0;
 
 /** 編集を 1 つ当てる。fn は当たった呼び出しの数を数える関数（done）を受け取る。複数の呼び出しでできた操作は
  * 呼び出しが当たるたびに done() を呼ぶ（途中で失敗したら「一部だけ当たった可能性がある」と伝える）。 */
-async function run(fn, label, beforeRender = null) {
+async function run(fn, label, beforeRender = null,
+  { failureBeforeRender = beforeRender, onError = null, onTiming = null } = {}) {
   if (S.busy) return null;
   if (await refuseWhileAwaiting()) return null;
   S.busy = true;
@@ -210,17 +217,21 @@ async function run(fn, label, beforeRender = null) {
   const line = beginBusy({ label: `${label || '編集'}を反映している…` });
   let applied = 0;
   try {
+    const startedAt = performance.now();
     const r = await fn(() => { applied += 1; });
+    const appliedAt = performance.now();
     invalidate();
     // 計画のプレビューは、新しい view data と**同じ描画で**差し替える（ちらつかせない）
     await refresh({ beforeRender });
+    onTiming?.({ applyMs: appliedAt - startedAt, viewMs: performance.now() - appliedAt });
     status('');
     return r;
   } catch (err) {
+    onError?.(err);
     const partial = applied > 0;
     if (!await handleEngineError(err, { partial })) {
       status(`${label || '編集'}に失敗: ${err.message}${partial ? PARTIAL_SUFFIX : ''}`);
-      await refresh({ beforeRender }).catch(() => {});
+      await refresh({ beforeRender: failureBeforeRender }).catch(() => {});
     }
     return null;
   } finally {
@@ -352,7 +363,8 @@ export async function requestPlan(args) {
  * ポップアップ（ガイドに合わせる）は `replaces` に前回の changeset を渡す。エンジンが
  * それを取り消してから**同じ計画**を当てるので、プレビューと確定が同じ基準になる
  * （取り消しの履歴でも前回の項目と入れ替わる = ポップアップ 1 回 = 取り消し 1 回）。 */
-export async function applyPlan({ planId, x = null, pitch = null, replaces = null, drag = true, label = null }) {
+export async function applyPlan({ planId, x = null, pitch = null, replaces = null, drag = true, label = null,
+  onTiming = null }) {
   let ok = false;
   const after = () => {
     // ドラッグは成功しても失敗してもプレビューを外す。ただし**この計画のときだけ**
@@ -378,7 +390,7 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
     if (r.snapped) status('接続した');
     else if (r.clamped) status('隣にぶつかる手前で止めた');
     return r.changeset || null;
-  }, drag ? 'タイミングの編集' : 'ガイドに合わせる', after);
+  }, drag ? 'タイミングの編集' : 'ガイドに合わせる', after, { onTiming });
   return { ok, changeset: cs };
 }
 
@@ -386,11 +398,97 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
  *
  * 範囲はエンジンが有声のフレームに切り詰める（無声には音程が無いので描いても効かない）。
  * 確定後の view data で描き直すまで、描いた線（S.stroke）のプレビューを残す（ちらつかせない）。 */
-export function applyDraw(points, stroke = S.stroke) {
-  return run(async () => {
+export async function applyDraw(points, stroke = S.stroke) {
+  if (!stroke || stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir) {
+    if (S.stroke === stroke) { S.stroke = null; S.strokePhase = 'idle'; render(); }
+    status('編集対象が変わったため描線を送信しませんでした');
+    return null;
+  }
+  const baseline = stroke.baselineIds || new Set((S.vd?.edits || []).map((e) => e.id));
+  stroke.baselineIds = baseline;
+  stroke.phase = S.strokePhase = 'pending';
+  let failure = null;
+  const r = await run(async () => {
     const r = await call('set_pitch_curve', { points, mode: 'draw', author: AUTHOR });
     return r;
-  }, 'ピッチを描く', () => { if (S.stroke === stroke) S.stroke = null; });   // 待っている間に描き始めた線は消さない
+  }, 'ピッチを描く', null, { failureBeforeRender: null, onError: (err) => { failure = err; } });
+  if (r) {
+    if (stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir) {
+      if (S.stroke === stroke) { S.stroke = null; S.strokePhase = 'idle'; render(); }
+      return r;
+    }
+    let vd = S.vd;
+    if (!drawObserved(vd, stroke, points)) {
+      try { vd = await refresh(); } catch { vd = null; }
+    }
+    if (vd && drawObserved(vd, stroke, points)) {
+      if (S.stroke === stroke) S.stroke = null;
+      S.strokePhase = 'committed';
+      status('手描きピッチを確定しました');
+      render();
+      return r;
+    }
+    stroke.phase = S.strokePhase = 'checking';
+    status('編集は受け付けられました。表示を確認中です');
+    render();
+    return r;
+  }
+  // 応答だけが失われた可能性がある。編集 ID と描線の重なる区間を照合してから再試行可能にする。
+  stroke.phase = S.strokePhase = 'checking';
+  let vd = null;
+  try { vd = await refresh(); } catch { /* 状態を読めない間は再送しない */ }
+  if (vd && drawObserved(vd, stroke, points)) {
+    if (S.stroke === stroke) S.stroke = null;
+    S.strokePhase = 'committed';
+    status('手描きピッチを確定しました');
+    return { ok: true, reconciled: true };
+  }
+  // ツールが明示的に拒否した場合だけ再送できる。通信断など結果不明の呼び出しは
+  // 遅れて適用される可能性があるため、表示を読み直しても再送しない。
+  stroke.phase = S.strokePhase = failure instanceof EngineError && !failure.conflict ? 'failed' : 'checking';
+  status(S.strokePhase === 'failed' ? '手描きピッチを確定できませんでした。描線を保持しています'
+    : '適用状態が不明です。描線を保持し、再送を保留しています');
+  render();
+  return null;
+}
+
+function drawObserved(vd, stroke, points) {
+  if (!vd) return false;
+  if (stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir) return false;
+  const a = points[0][0]; const b = points[points.length - 1][0];
+  const at = (t) => {
+    let i = 0;
+    while (i + 1 < points.length && points[i + 1][0] < t) i++;
+    const [ta, ma] = points[i]; const [tb, mb] = points[Math.min(i + 1, points.length - 1)];
+    return tb === ta ? ma : ma + (mb - ma) * (t - ta) / (tb - ta);
+  };
+  return (vd.edits || []).some((e) => {
+    if (e.kind !== 'pitch_draw' || stroke.baselineIds.has(e.id) || e.author && e.author !== AUTHOR) return false;
+    const ep = e.params?.points;
+    if (!Array.isArray(ep) || ep.length < 2) return false;
+    if (e.target?.start_sec < a - 0.002 || e.target?.end_sec > b + 0.002) return false;
+    return ep.every(([t, m]) => t >= a - 0.002 && t <= b + 0.002 && Math.abs(at(t) - m) < 0.002);
+  });
+}
+
+export async function retryDraw(stroke = S.stroke) {
+  if (!stroke || !stroke.points || !['failed', 'checking'].includes(stroke.phase)) return null;
+  let vd;
+  try { vd = await refresh(); } catch { status('適用状態を確認できません。再試行は保留しています'); return null; }
+  if (!vd) return null;
+  if (drawObserved(vd, stroke, stroke.points)) {
+    if (S.stroke === stroke) S.stroke = null;
+    S.strokePhase = 'committed';
+    status('手描きピッチは既に確定しています');
+    render();
+    return { ok: true, reconciled: true };
+  }
+  if (stroke.phase === 'checking') {
+    status('適用状態が不明です。二重適用を避けるため再送を保留しています');
+    render();
+    return null;
+  }
+  return applyDraw(stroke.points, stroke);
 }
 
 /** はさみ: sec（編集前の秒）でノートを分ける。吸着は画面側で済ませた時刻を渡す。 */
@@ -564,6 +662,17 @@ export function resetOriginal(ids) {
 /** Ctrl+Z: **まだ当たっていない操作があれば列から外すだけ**（画面からすぐ消える。エンジンは呼ばない）。
  * 無ければエンジンの履歴の最後の操作を取り消す（順番待ちに入れる。確定中の操作を追い越さない）。 */
 export function undo() {
+  const dr = S.edgeDraft?.drag;
+  if (dr && !dr.applying && (dr.moved || S.pendingPlan)) {
+    dr.canceled = true;
+    clearTimeout(dr.planTimer);
+    S.edgeDraft = null;
+    if (S.drag === dr) S.drag = null;
+    if (dr.planId && S.plan?.data.plan_id === dr.planId) setPlan(null);
+    status('元に戻した: ノートの長さ（未確定）');
+    render();
+    return Promise.resolve();
+  }
   const it = lastPending();
   if (it) {
     it.canceled = true;

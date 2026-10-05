@@ -308,11 +308,11 @@ function guideBlobPts(g, hmax) {
 }
 
 // ---------------------------------------------------------------- 端のつかみ（v3 §3）
-// 帯の端から内側 8 px・外側 4 px（短いノートは内側を幅の 1/3 まで）、縦は帯の太さによらず中心から ±10 px。
+// 帯の端から内側 12 px・外側 4 px（短いノートは内側を幅の 1/3 まで）、縦は帯の太さによらず中心から ±14 px。
 // 外側は隣のノートとの隙間の半分まで（隣の端・本体のつかみと重ねない。接していれば外側は無い）。
-const EDGE_IN = 8;
+const EDGE_IN = 12;
 const EDGE_OUT = 4;
-const EDGE_Y = 10;
+const EDGE_Y = 14;
 
 /** S.pitched[k] の端のつかみの横の範囲 [左, 右]（px）。 */
 function edgeGrab(k, which, x0, x1, yc) {
@@ -819,15 +819,19 @@ export function render() {
     }
   }
 
-  // ---- 音素境界（ごく薄く常時。ノート境界とずれるときは音素境界を優先する）
+  // ---- 音素境界。通常は下の音素レーンだけに置き、編集対象の境界だけ延長する。
   let tipStr = '';
   if (S.bounds.length) {
+    const selectedSpans = S.sel.map((id) => S.byId.get(id)).filter(Boolean).map(spanOf);
     for (const b of S.bounds) {
       const x = X(boundSec(b));
       if (x < KEYS_W || x > W) continue;
-      const strong = b.kind === 'onset' || b.kind === 'offset';
-      s += `<line x1="${f1(x)}" y1="${ROLL_T}" x2="${f1(x)}" y2="${ROLL_B}" stroke="${SEL}"`
-        + ` stroke-opacity="${strong ? 0.13 : 0.08}" pointer-events="none"/>`;
+      const t = boundSec(b);
+      const active = S.drag?.type === 'bound' && S.drag.id === b.id || S.boundHover === b.id
+        || selectedSpans.some(([start, end]) => t >= start - 0.002 && t <= end + 0.002);
+      if (!S.showAllBounds && !active) continue;
+      s += `<line data-bound-line="${b.id}" x1="${f1(x)}" y1="${ROLL_T}" x2="${f1(x)}" y2="${ROLL_B}" stroke="${SEL}"`
+        + ` stroke-opacity="${active ? 0.55 : 0.16}" pointer-events="none"/>`;
     }
   }
 
@@ -868,7 +872,7 @@ export function render() {
       const cx = X(dr.which === 'start' ? s0 : s1);
       const p = dr.which === 'start' ? first : last;
       s += noPitchGlyph(n, dr.which, cx, p.y);
-      if (dr.moved) tipStr += tip(cx, p.y - Math.max(8, p.h) - 14, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
+      if (dr.moved) tipStr += tip(cx, p.y - Math.max(8, p.h) - 14, `${sign(Math.round((S.plan?.x ?? dr.want ?? 0) * 1000))} ms`, 'middle');
     }
     if (grabbed && dr.type === 'note' && dr.axis === 'time' && dr.moved) {
       tipStr += tip((X(s0) + X(s1)) / 2, Math.min(first.y, last.y) - 22, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
@@ -962,7 +966,7 @@ export function render() {
     }
     if (dr && dr.moved && dr.type === 'edge' && dr.id === n.id) {
       const cx = dr.which === 'start' ? x0 : x1;
-      tipStr += tip(cx, y0 - 14, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
+      tipStr += tip(cx, y0 - 14, `${sign(Math.round((S.plan?.x ?? dr.want ?? 0) * 1000))} ms`, 'middle');
     }
     if (dr && dr.moved && dr.type === 'note' && dr.axis === 'time' && dr.anchor?.id === n.id) {
       tipStr += tip((x0 + x1) / 2, y0 - 14, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
@@ -971,6 +975,17 @@ export function render() {
   }
 
   s += fadeSvg;
+  if (S.edgeDraft && S.edgeDraft.trackId === S.session?.current
+    && !(S.edgeDraft.planId && S.plan?.data?.plan_id === S.edgeDraft.planId)) {
+    const d = S.edgeDraft;
+    const n = S.byId.get(d.id);
+    if (n) {
+      const [a, b] = spanOf(n);
+      const x = X(d.which === 'start' ? a : b);
+      s += `<line data-edge-draft="${d.id}" x1="${f1(x)}" y1="${ROLL_T}" x2="${f1(x)}" y2="${ROLL_B}" stroke="${SEL}" stroke-width="1.5" stroke-dasharray="4 4" pointer-events="none"/>`;
+      tipStr += tip(x, ROLL_T + 18, '仮の端 · 計画待ち', 'middle');
+    }
+  }
   s += corrLines() + corrMarks();         // 帯の上・テイクの曲線の下
 
   // ---- はさみ: 接して並ぶノートの境目（ダブルクリックで結合）と、切る位置の線
@@ -1199,6 +1214,16 @@ export function renderToolbar() {
   const tip = (b, t) => { if (b && b.title !== t) { b.title = t; b.setAttribute('aria-label', t); } };
   tip(bu, withKey(u ? `元に戻す: ${u}` : '元に戻す', 'undo'));
   tip(br, withKey(rd ? `やり直す: ${rd}` : 'やり直す', 'redo'));
+  const historyLabel = q('#undoLabel');
+  if (historyLabel) historyLabel.textContent = u ? `元に戻す: ${u}` : '元に戻す: なし';
+  const strokeActions = q('#strokeActions');
+  if (strokeActions) {
+    const phase = S.strokePhase;
+    strokeActions.hidden = !['failed', 'checking'].includes(phase);
+    const msg = q('#strokeMessage');
+    if (msg) msg.textContent = phase === 'checking' ? '適用状態を確認中 · 描線を保持' : '描線を確定できませんでした';
+    q('#strokeRetry').disabled = phase === 'checking';
+  }
   tip(q('#bPlay'), withKey('再生／停止', 'play'));
   tip(q('#bToolMain'), withKey('メインツール', 'tool-main'));
   tip(q('#bToolDraw'), `${withKey('鉛筆', 'tool-draw')}: ピッチを描く`);
