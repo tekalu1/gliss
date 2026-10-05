@@ -27,6 +27,13 @@ public:
         int fadeFrame = 0;
         bool released = false;
     };
+    struct RenderStats
+    {
+        int frames = 0, nonZeroFrames = 0;
+        double energy = 0.0;
+        std::uint64_t transition = 0;
+        bool active = false, release = false;
+    };
 
     bool publish (std::unique_ptr<Clip> clip, std::uint64_t expectedEpoch = std::numeric_limits<std::uint64_t>::max());
     static void fadeEdges (Clip& clip) noexcept;
@@ -38,12 +45,12 @@ public:
         activeRendererId.store (0);
     }
     std::uint64_t getCancellationEpoch() const noexcept { return cancelState.load() >> 1; }
-    void render (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor) noexcept;
+    void render (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor, RenderStats* stats = nullptr) noexcept;
     std::uint64_t addRenderer() noexcept { renderers.fetch_add (1); return nextRendererId.fetch_add (1); }
     void removeRenderer (std::uint64_t id) noexcept;
     bool hasRenderer() const noexcept { return renderers.load() > 0; }
     bool renderForRenderer (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor,
-                            std::uint64_t rendererId, std::uint32_t nowMs) noexcept;
+                            std::uint64_t rendererId, std::uint32_t nowMs, RenderStats* stats = nullptr) noexcept;
 
 private:
     void collect();

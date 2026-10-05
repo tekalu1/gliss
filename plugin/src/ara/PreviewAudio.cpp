@@ -62,7 +62,7 @@ void PreviewAudio::removeRenderer (std::uint64_t id) noexcept
 }
 
 bool PreviewAudio::renderForRenderer (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor,
-                                      std::uint64_t rendererId, std::uint32_t nowMs) noexcept
+                                      std::uint64_t rendererId, std::uint32_t nowMs, RenderStats* stats) noexcept
 {
     if (rendererId == 0 || renderGate.test_and_set (std::memory_order_acquire)) return false;
     auto owner = activeRendererId.load();
@@ -81,13 +81,14 @@ bool PreviewAudio::renderForRenderer (juce::AudioBuffer<float>& output, double o
         cursor.released = true;
     }
     ownerStampMs.store (nowMs);
-    render (output, outputRate, cursor);
+    render (output, outputRate, cursor, stats);
     renderGate.clear (std::memory_order_release);
     return true;
 }
 
-void PreviewAudio::render (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor) noexcept
+void PreviewAudio::render (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor, RenderStats* stats) noexcept
 {
+    if (stats != nullptr) stats->frames = output.getNumSamples();
     if ((cancelState.load() & 1) != 0) { cursor.released = true; return; }
     readers.fetch_add (1);
     const Clip* clip = nullptr;
@@ -111,11 +112,18 @@ void PreviewAudio::render (juce::AudioBuffer<float>& output, double outputRate, 
             cursor.released = false;
         }
         else if (cursor.released) old = nullptr;
+        if (stats != nullptr)
+        {
+            stats->transition = version;
+            stats->active = clip != nullptr;
+            stats->release = clip == nullptr && old != nullptr;
+        }
         const auto channels = output.getNumChannels();
         const auto fadeFrames = juce::jmax (1, (int) (outputRate * 0.006));
         for (int i = 0; i < output.getNumSamples(); ++i)
         {
             const auto gain = juce::jlimit (0.0f, 1.0f, (float) cursor.fadeFrame / (float) fadeFrames);
+            bool nonZero = false;
             for (int ch = 0; ch < channels; ++ch)
             {
                 const auto sample = [] (const Clip* c, int channel, double sec) noexcept -> float
@@ -127,9 +135,16 @@ void PreviewAudio::render (juce::AudioBuffer<float>& output, double outputRate, 
                     const auto& pcm = c->channels[(size_t) juce::jmin (channel, (int) c->channels.size() - 1)];
                     return pcm[(size_t) a] + (pcm[(size_t) b] - pcm[(size_t) a]) * (float) (frame - a);
                 };
-                output.getWritePointer (ch)[i] += sample (old, ch, cursor.phaseSec) * (1.0f - gain)
-                                               + sample (clip, ch, cursor.phaseSec) * gain;
+                const auto added = sample (old, ch, cursor.phaseSec) * (1.0f - gain)
+                                 + sample (clip, ch, cursor.phaseSec) * gain;
+                output.getWritePointer (ch)[i] += added;
+                if (stats != nullptr)
+                {
+                    nonZero |= added != 0.0f;
+                    stats->energy += (double) added * added;
+                }
             }
+            if (stats != nullptr && nonZero) ++stats->nonZeroFrames;
             cursor.phaseSec += 1.0 / outputRate;
             if (cursor.fadeFrame < fadeFrames) ++cursor.fadeFrame;
         }

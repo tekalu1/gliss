@@ -416,10 +416,10 @@ public:
             return clip;
         };
         juce::AudioBuffer<float> buffer (2, 480);
-        const auto render = [&]
+        const auto render = [&] (PreviewAudio::RenderStats* stats = nullptr)
         {
             buffer.clear();
-            audio.render (buffer, 48000.0, cursor);
+            audio.render (buffer, 48000.0, cursor, stats);
         };
 
         beginTest ("start makes actual samples and fades in");
@@ -459,6 +459,24 @@ public:
         expectWithinAbsoluteError (buffer.getSample (0, 400), 0.0f, 1.0e-6f);
         render();
         expectWithinAbsoluteError (buffer.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+
+        beginTest ("trace statistics measure contributed samples and silence after release");
+        audio.publish (makeClip (0.4f));
+        PreviewAudio::RenderStats sounded;
+        render (&sounded);
+        expect (sounded.frames == 480 && sounded.nonZeroFrames > 0 && sounded.energy > 0.0 && sounded.active);
+        audio.stop();
+        PreviewAudio::RenderStats fading;
+        render (&fading);
+        expect (fading.release && fading.nonZeroFrames > 0 && fading.energy > 0.0);
+        PreviewAudio::RenderStats silent;
+        render (&silent);
+        expect (silent.frames == 480 && silent.nonZeroFrames == 0 && silent.energy == 0.0 && ! silent.active);
+        buffer.setSample (0, 0, 0.25f);
+        PreviewAudio::RenderStats mixed;
+        audio.render (buffer, 48000.0, cursor, &mixed);
+        expect (mixed.nonZeroFrames == 0 && mixed.energy == 0.0);
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.25f, 1.0e-6f);
 
         beginTest ("a new note during the release crossfades from the releasing clip");
         audio.publish (makeClip (0.4f));

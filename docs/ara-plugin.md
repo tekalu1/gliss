@@ -220,7 +220,7 @@ AI からの手順:
 
 | 名前 | 意味 |
 |---|---|
-| `GLISS_ARA_TRACE_DIR` | 指すフォルダの `gliss-ara-<プロセス ID>.log` に、プラグインの出来事（アーカイブの保存・復元、レンダラーの準備・解放と集計、エディタの `ui-ready`・案内を出したこと）と、再生の記録（`trace` の行。ブロックごとの総和・二乗和）を書く。オーディオスレッドからは書かず、レンダラーの解放のときにまとめて書く |
+| `GLISS_ARA_TRACE_DIR` | 指すフォルダの `gliss-ara-<プロセス ID>.log` に、プラグインの出来事、通常再生の `trace`、EditorRenderer 試聴の `preview-trace` と `preview: release` を書く。試聴の各ブロックでは加算したサンプルのフレーム数・非ゼロフレーム数・二乗和を音声スレッドで数えるだけで、ログ出力はレンダラー解放時に行う |
 | `GLISS_ARA_READ_TIMEOUT_MS` | リアルタイムの描画でも先読みの完了をこの ms だけ待つ。検証ホスト（TestHost は CPU の速さで取りに来る）で欠けなく比べるため。普段は使わない |
 | `GLISS_ARA_SYNC_WAIT_MS` | リアルタイムの描画でも、同期（エンジン・差分の再合成）の完了をこの ms だけ待つ（prepareToPlay ごとの持ち時間。既定はバウンスのときだけ 10 秒）。検証ホストで編集の当たった音を描かせるため |
 | `GLISS_TEST_EDIT` | 試験用の編集。エンジンにつないで最初の修飾を解析した後に 1 回だけ当てる。`{"tool": "shift_pitch", "args": {...}}`・`shift_pitch` の引数そのもの（`{"cents": 100, "start_sec": 0, "end_sec": 5}`）・`shift_pitch:<note_id>:<cents>` |
@@ -231,6 +231,8 @@ AI からの手順:
 | `GLISS_PLUGIN_WEB_DIR` | 既にあるフォルダ（`<repo>\app\renderer`）を指すと、エディタは画面の資源（`index.html`・`*.js`・`ara-bridge.js`）を埋め込みでなくそのフォルダから要求のたびに読む（ビルドし直さずに画面を直せる）。`ara-bridge.js` は user script なのでエディタを開き直したときに読み直す。このときは F5・Ctrl+R をブラウザの再読み込みに残す（DAW へ渡さない） |
 
 エンジンの起動の設定（`GLISS_ENGINE_PYTHON`・`GLISS_ENGINE_CWD`）は下の「配布版のプラグインがエンジンを見つける順」、エンジン側の環境変数（`VOCAL_ENGINE_WORK_DIR`・`GLISS_F0_ESTIMATOR` など）は AGENTS.md。試験では `VOCAL_ENGINE_WORK_DIR`・`VOCAL_ENGINE_LOG_DIR` を一時フォルダに向ける。
+
+実 DAW の試聴音を確認するときは、DAW 起動前に `GLISS_ARA_TRACE_DIR` を試験用フォルダへ向ける。ホスト再生を止め、ノートを長押ししてから離し、停止後も 1 秒ほどエディタを開いたままにして音声コールバックを通す。EditorRenderer の `releaseResources` または破棄時に `gliss-ara-<プロセス ID>.log` へ記録が確定する。エディタを閉じても DAW が renderer を保持すれば、プラグインを外すか DAW を閉じるまで記録は出ない。`preview-trace` の `mode=r active=1 nonzero>0 energy>0` は EditorRenderer が実際に PCM を出力へ加えた証拠で、UI の `sounding` 表示には依存しない。離した後は `release=1` の短いフェードに続き、`mode=r active=0 release=0 nonzero=0 energy=0` のブロックと、集計行 `preview: release ... frames>0 nonzero>0 energy>0 stopZeroBlocks>0` を確認する。`mode=h` は DAW 再生中、`mode=o` はオフライン、`mode=x` は別の EditorRenderer が出力を担当したブロックで、これらのゼロは試聴停止の根拠に使わない。記録は直近 65536 ブロックを保持するため、試聴後に renderer を解放して読む。二乗和は発音と停止を示すが、実機でのピッチ値そのものは示さない。
 
 ## ビルド
 
