@@ -64,6 +64,7 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 - ドキュメントの編集中（`willBeginEditing`〜`didEndEditing`）は、オーディオスレッドが待たずに（`ScopedTryReadLock`）そのブロックを無音にする。
 - DAW の再生位置は `GlissProcessor::processBlock` が `PlayheadState` に書く。再生中は一つの processor を位置の正本に選び、停止中に別の再生中 processor が現れた場合や更新が途切れた場合だけ切り替える。複数の値は連番の前後一致で同じブロックから読み、エディタへ `song_sec`・`stamp_ms`・`sequence` として 30 Hz で送る（ループの PPQ はその位置の BPM で秒に直す）。画面は通知時刻との差から配送の揺れを補正し、補間を 55 ms に制限する。ソングの秒は上段・時計の正本、リージョンに写したソースの秒は下段の表示だけに使う。
 - `EditorRenderer` はエンジンの `render_audition` が作った補正後の WAV を作業スレッドで読み、DAW の音声出力へ足す。音声コールバックは準備済み PCM を読むだけでロック・IO・確保をしない。ループ端、開始、ピッチ差し替え、離したときは 6 ms でフェードし、DAW の通常再生中とオフライン描画には足さない。離す・フォーカス喪失・ホストの再生開始・文書破棄・native editor の破棄では準備中のリクエストも世代番号で取り消す。短いホスト再生が画面への通知の間に終わっても、音声コールバックの取消印で古い試聴を再開させない。同一ドキュメントの複数 EditorRenderer は最初に出力処理した 1 つだけが試聴を加算し、所有者が消えるか 250 ms 更新しなければ別の renderer に渡す。`bootstrap.preview` は EditorRenderer がある場合に保存した設定（未設定ならオン）を返す。`preview('start')` は PCM を公開してから `{ok:true}`、利用できないときは `{ok:false,reason}` を返す。
+- 画面の `previewState()` は `phase`（`idle`・`preparing`・`sounding`・`error`）、`error`、`sounding` を返す。`phase` が変わると `gliss-preview-state` を送り、`detail` はその時点の `previewState()`。遅れて返った取り消し済みの開始結果からは通知しない。
 - ARA に結び付かない（普通の VST3 として読み込まれた）ときは、入力をそのまま通す。
 
 ### エンジンとの同期（`plugin/src/ara/DocumentSync.*`）

@@ -3,9 +3,14 @@ import { test, expect } from '@playwright/test';
 test('release, blur and host playback cancel an ARA preview even while native start is pending', async () => {
   const oldWindow = globalThis.window;
   const oldDocument = globalThis.document;
+  const oldCustomEvent = globalThis.CustomEvent;
   const listeners = new Map();
   const calls = [];
+  const phases = [];
   let pendingStart = null;
+  globalThis.CustomEvent = class {
+    constructor(type, init) { this.type = type; this.detail = init.detail; }
+  };
   globalThis.window = {
     api: {
       mode: 'ara',
@@ -17,6 +22,7 @@ test('release, blur and host playback cancel an ARA preview even while native st
       },
     },
     addEventListener: (name, fn) => listeners.set(name, fn),
+    dispatchEvent: (event) => { if (event.type === 'gliss-preview-state') phases.push(event.detail); },
   };
   globalThis.document = {
     documentElement: { dataset: {} }, hidden: false,
@@ -33,10 +39,13 @@ test('release, blur and host playback cancel an ARA preview even while native st
     startPreview('n1'); await settle();
     expect(calls).toContain('start');
     expect(previewState().phase).toBe('preparing');
+    expect(phases.map((x) => x.phase)).toEqual(['preparing']);
     stopPreview();
     expect(calls.at(-1)).toBe('stop');
+    expect(phases.at(-1).phase).toBe('idle');
     pendingStart({ ok: true }); await settle();
     expect(previewState().sounding).toBeNull();
+    expect(phases.at(-1).phase).toBe('idle');
 
     startPreview('n1'); await settle();
     listeners.get('blur')();
@@ -52,8 +61,23 @@ test('release, blur and host playback cancel an ARA preview even while native st
     expect(previewState().sounding).toBeNull();
     S.playing = false;
     expect(previewState().sounding).toBeNull();
+
+    startPreview('n1'); await settle();
+    pendingStart({ ok: true }); await settle();
+    expect(phases.at(-1)).toMatchObject({ phase: 'sounding', sounding: { cents: 0 } });
+    stopPreview();
+    expect(phases.at(-1)).toMatchObject({ phase: 'idle', sounding: null });
+    const eventCount = phases.length;
+    stopPreview();
+    expect(phases).toHaveLength(eventCount);
+
+    startPreview('n1'); await settle();
+    pendingStart({ ok: false, reason: 'unavailable' }); await settle();
+    expect(phases.at(-1)).toMatchObject({ phase: 'error', error: 'unavailable' });
+    stopPreview();
   } finally {
     globalThis.window = oldWindow;
     globalThis.document = oldDocument;
+    globalThis.CustomEvent = oldCustomEvent;
   }
 });

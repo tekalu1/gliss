@@ -265,6 +265,15 @@ const PV = { token: 0, note: null, range: null, want: 0, busy: 0, timer: 0, last
   src: null, gain: null, t0: 0, dur: 0, cents: null, host: false, phase: 'idle', error: null };
 const previewLog = [];        // 鳴らそうとしたもの（テスト用。音は出さずにこれで確かめる）
 
+function setPreviewPhase(phase, error = null) {
+  const changed = PV.phase !== phase;
+  PV.phase = phase;
+  PV.error = error;
+  if (changed && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('gliss-preview-state', { detail: previewState() }));
+  }
+}
+
 export function previewEnabled() { return previewOn; }
 /** つかんだノートを鳴らす（設定）。save: ユーザー設定に残す（起動時に読むときは残さない）。 */
 export function setPreviewEnabled(on, { save = true } = {}) {
@@ -294,7 +303,7 @@ export function startPreview(noteId) {
   PV.note = noteId;
   PV.range = [+a.toFixed(6), +b.toFixed(6)];
   PV.want = wantCents(noteId);
-  PV.phase = 'preparing'; PV.error = null;
+  setPreviewPhase('preparing');
   requestPreview();
 }
 
@@ -323,6 +332,7 @@ async function requestPreview() {
   PV.busy = tok || -1;
   PV.lastAt = performance.now();
   previewLog.push({ note, cents, range: [a, b], at: Date.now() });
+  setPreviewPhase('preparing');
   try {
     const r = await call('render_audition', { note_id: note, cents, start_sec: a, end_sec: b });
     if (tok !== PV.token) return;
@@ -331,7 +341,8 @@ async function requestPreview() {
       if (tok !== PV.token) return;
       if (!result?.ok) throw new Error(result?.reason || 'DAW の試聴出力を使えない');
       PV.host = true;
-      PV.phase = 'sounding'; PV.error = null; PV.cents = cents;
+      PV.cents = cents;
+      setPreviewPhase('sounding');
       return;
     }
     const bytes = await window.api.readFile(r.path);
@@ -339,10 +350,10 @@ async function requestPreview() {
     const buf = await audioCtx().decodeAudioData(bytes);
     if (tok !== PV.token || S.playing) return;
     swapPreview(buf, cents);
-    PV.phase = 'sounding'; PV.error = null;
+    setPreviewPhase('sounding');
   } catch (err) {
     if (tok === PV.token) {
-      PV.phase = 'error'; PV.error = err.message;
+      setPreviewPhase('error', err.message);
       status(`プレビューの音を作れなかった: ${err.message}`);
     }
   } finally {
@@ -408,11 +419,11 @@ export function stopPreview() {
   PV.busy = 0;
   PV.note = null;
   PV.range = null;
-  PV.phase = 'idle'; PV.error = null;
   PV.host = false;
   if (ARA && hadPreview) araPreview('stop');
   releaseVoice(PV.src, PV.gain);
   PV.src = null; PV.gain = null; PV.dur = 0; PV.cents = null;
+  setPreviewPhase('idle');
 }
 
 /** テスト用: いま鳴らしているもの（鳴っていなければ null）と、鳴らそうとしたものの記録。 */
