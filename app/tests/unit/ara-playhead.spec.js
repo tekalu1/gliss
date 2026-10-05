@@ -57,7 +57,8 @@ test('ARA position uses host timestamps, keeps song/output axes separate, and sn
     S.bounds = [{ index: 0, edited_sec: 2 }, { index: 1, edited_sec: 3 }];
     S.local.btime.set(0, 2.2); S.local.btime.set(1, 3.2);
     invalidateWarp();
-    expect(araEditorHead() - S.off).toBeCloseTo(2.255, 6);
+    // 未確定の境界ドラッグはノートの仮形だけを動かし、実 PCM の再生位置は動かさない。
+    expect(araEditorHead() - S.off).toBeCloseTo(2.055, 6);
     S.head = 9; // song gap: no lower playhead or follow target
     expect(araEditorHead()).toBeNull();
     S.local.btime.clear(); S.bounds = []; invalidateWarp();
