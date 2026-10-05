@@ -246,6 +246,8 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 `rmvpe` になったのに重みが無ければ `gliss`。RMVPE の重みを後から取った・消したときや既定を替えたときも、前に解析・編集した曲は前の方式のまま（音符の区切りと、付けた編集の当たり方を変えない）。
 **`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator(scope="current")` は選択中のトラックだけの方式を明示し、Undo で戻せる。`scope="all"` は全体の方式へ戻す。DAW のプラグインのエンジンで `scope` を省くと `default` となり、トラックの方式も前に解析した方式も変えない（§3-4）。
 
+Gliss の F0 はモデルの版も解析キャッシュとアーカイブの `f0_estimator_version` に記録する。第 2 版で解析した既存プロジェクトはその解析とノート ID を使い続ける。第 2 版の ARA アーカイブは版の記録が無いため、`f0_estimator="gliss"` で版が無いものは同梱の第 2 版モデルで復元する。新規解析は第 3 版を使い、利用者が `analyze_take(force=true, estimator="gliss")` を明示したときだけ既存プロジェクトも第 3 版で解析し直す。
+
 | `estimator` | 中身 |
 |---|---|
 | `rmvpe` | 既定・正。RMVPE（ONNX）。重みは同梱せず、利用者が取得する（初回の画面で任意。`%LOCALAPPDATA%\Gliss\models\rmvpe.onnx`） |

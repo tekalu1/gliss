@@ -324,31 +324,45 @@ def recorded_estimator(analysis):
     return ta.get("estimator") or "rmvpe"
 
 
-_recorded_cache = {}                # project.json のパス -> (署名, 方式)
+_recorded_cache = {}                # project.json のパス -> (署名, 方式, Gliss F0 の版)
 _recorded_lock = Lock()
 
 
-def recorded_estimator_in(pdir):
-    """ディレクトリの project.json に記録された F0 の方式（`recorded_estimator`）。裏の準備の署名
-    （`prep.track_sig`）が、開いていないトラックについても曲ごとの方式を知るため。project.json が変わったときだけ読む。"""
+def _recorded_f0_in(pdir):
+    """裏の準備の署名に使う保存済み方式とモデル版。変更時だけ project.json を読む。"""
     path = os.path.join(pdir, "project.json")
     sig = _src_sig(path)
     if sig is None:
-        return None
+        return None, None
     key = sig[0]
     with _recorded_lock:
         hit = _recorded_cache.get(key)
     if hit is not None and hit[0] == sig:
-        return hit[1]
+        return hit[1], hit[2]
     try:
-        est = recorded_estimator(read_json(path).get("analysis"))
+        doc = read_json(path)
+        analysis = doc.get("analysis") or {}
+        est = recorded_estimator(analysis)
+        take = analysis.get("take") or {}
+        version = doc.get("f0_model_version") or (
+            take.get("estimator_version") if take.get("estimator") == "gliss" else None)
     except (OSError, ValueError, AttributeError):
-        return None
+        return None, None
     with _recorded_lock:
         if len(_recorded_cache) > 256:
             _recorded_cache.clear()
-        _recorded_cache[key] = (sig, est)
-    return est
+        _recorded_cache[key] = (sig, est, version)
+    return est, version
+
+
+def recorded_estimator_in(pdir):
+    """ディレクトリの project.json に記録された F0 の方式。"""
+    return _recorded_f0_in(pdir)[0]
+
+
+def recorded_gliss_version_in(pdir):
+    """旧モデルで解析した曲の裏の準備に、元の版を使う。"""
+    return _recorded_f0_in(pdir)[1]
 
 
 def _src_sig(path):
@@ -479,10 +493,12 @@ class Project:
         # analyze の commit で、読み直した最新の内容に合わせて書く
         self.background = False
         self.estimator_pref = None       # このトラックで明示した F0 の方式（None なら選んでいる方式。session.py のトラックの estimator）
+        self.f0_model_version = None     # 古い ARA アーカイブの Gliss F0 をキャッシュ無しで復元するための版
         self._auto_proposed = []    # 最後の歌詞の自動推定で足した区間
         self._disk_sig = None      # project.json の (mtime_ns, size, file ID)
         self._base_edit_state = None
         self._base_analysis = {}
+        self._base_f0_model_version = None
         # メモリの解析結果を読んだ・書いたファイルの署名（take / guide / alignment / ph_take / ph_guide）。
         # 同じファイルなら読み直さない・描画データの鍵（`view_key`）に入れる（issue #63）
         self._srcs = {}
@@ -503,6 +519,21 @@ class Project:
         if estimator is None:
             estimator = self.estimator_pref
         return f0mod.resolve_estimator(estimator, recorded=recorded_estimator(self.analysis))
+
+    def _gliss_version_for(self, estimator, force=False):
+        if estimator != "gliss" or force:
+            return None
+        take = self.analysis.get("take") or {}
+        version = self.f0_model_version or (take.get("estimator_version") if take.get("estimator") == "gliss" else None)
+        if version not in (None, f0mod.GLISS_F0_V2_VERSION, f0mod.estimator_version("gliss")):
+            raise f0mod.ModelMissingError("保存された Gliss F0 モデルの版を復元できない: %s" % version)
+        return version if version == f0mod.GLISS_F0_V2_VERSION else None
+
+    def _same_take_estimator(self, result_estimator, result_version, wanted, force=False):
+        old = self._gliss_version_for(wanted, force)
+        if old is not None:
+            return result_estimator == "gliss" and result_version == old
+        return f0mod.same_estimator(result_estimator, result_version, wanted)
 
     def sub(self, name):
         p = os.path.join(self.dir, name)
@@ -685,6 +716,7 @@ class Project:
             "edits": [e.to_json() for e in self.edits],
             "changesets": [c.to_json() if copy else c.to_json_shallow() for c in self.changesets],
             "analysis": self.analysis,
+            "f0_model_version": self.f0_model_version,
         }
 
     def save(self):
@@ -708,6 +740,8 @@ class Project:
                             else:
                                 merged.pop(key, None)
                     self.analysis = merged
+                    if self.f0_model_version == self._base_f0_model_version:
+                        self.f0_model_version = latest.f0_model_version
                     self._disk_sig = latest._disk_sig
                 else:
                     self.load()
@@ -725,6 +759,7 @@ class Project:
             self._disk_sig = self._json_sig()
             self._base_edit_state = _edit_state(doc)
             self._base_analysis = json.loads(json.dumps(self.analysis))
+            self._base_f0_model_version = self.f0_model_version
             if not self.background and PREP_SAVED is not None:
                 PREP_SAVED(self)
         return self.json_path
@@ -779,9 +814,15 @@ class Project:
         self._seq = d.get("seq", {"edit": 0, "changeset": 0})
         self.changesets = [Changeset.from_json(c) for c in d.get("changesets", [])]
         self.analysis = d.get("analysis", {})
+        self.f0_model_version = d.get("f0_model_version")
+        if self.f0_model_version is None and (self.analysis.get("take") or {}).get("estimator") == "gliss":
+            version = self.analysis["take"].get("estimator_version")
+            if version == f0mod.GLISS_F0_V2_VERSION:
+                self.f0_model_version = version
         self._disk_sig = sig
         self._base_edit_state = _edit_state(d)
         self._base_analysis = json.loads(json.dumps(self.analysis))
+        self._base_f0_model_version = self.f0_model_version
         if old_g is not None and not M.same_clip(old_g, self.guide):
             # 外部（別のプロセス）がガイドを差し替えた・ずらした: 前のガイドの解析と対応付けを使わない
             self._forget_guide_state()
@@ -801,6 +842,12 @@ class Project:
         画面の状態（表示範囲・選択・ツール。画面は userData の `state.json` に別に持つ）、ログ、時刻の更新日。
         JSON にそのまま書ける（数値・文字列・真偽・None・配列・dict だけ）。
         """
+        estimator = self.estimator_pref or recorded_estimator(self.analysis)
+        recorded = self.analysis.get("take") or {}
+        version = (self.f0_model_version or
+                   (recorded.get("estimator_version") if recorded.get("estimator") == "gliss" else None) or
+                   f0mod.estimator_version("gliss")) if estimator == "gliss" else None
+
         def ref(m):
             if not m:
                 return None
@@ -818,7 +865,8 @@ class Project:
             "lyrics": {k: [dict(e) for e in v] for k, v in self.lyrics.items()},
             "auto_lyrics_attempted": "auto_lyrics" in self.analysis,
             "align_method": self.align_method,
-            "f0_estimator": self.estimator_pref or recorded_estimator(self.analysis),
+            "f0_estimator": estimator,
+            "f0_estimator_version": version,
             "seq": dict(self._seq),
             "changesets": [c.to_json() for c in self.changesets],
         }
@@ -907,6 +955,11 @@ class Project:
         est = archive.get("f0_estimator")
         if est in f0mod.ESTIMATORS and (est != "rmvpe" or f0mod.rmvpe_available()):
             p.estimator_pref = est                   # 補正を作った方式で解析する（使えない方式は選んでいる方式に任せる）
+        if est == "gliss":
+            # v2 の archive は方式名のみ。v3 以降は版を記録する。
+            p.f0_model_version = archive.get("f0_estimator_version") or f0mod.GLISS_F0_V2_VERSION
+        else:
+            p.f0_model_version = None
         p._seq = dict(archive.get("seq") or {"edit": 0, "changeset": 0})
         p.changesets = [Changeset.from_json(c) for c in archive.get("changesets", [])]
         p._phonemes = {"take": None, "guide": None}
@@ -1025,8 +1078,9 @@ class Project:
         """F0・音符・発音の頭はガイドの切り出しと解析設定だけに依存する。"""
         key = [1, self._clip_cache_identity(self.guide), estimator, bool(sweep),
                RMVPE_THRESHOLD, ENERGY_FLOOR_DB]
-        if f0mod.estimator_version(estimator) is not None:
-            key.append(f0mod.estimator_version(estimator))   # 方式の中身を変えたら作り直す（RMVPE は前と同じ鍵）
+        version = self._gliss_version_for(estimator) or f0mod.estimator_version(estimator)
+        if version is not None:
+            key.append(version)   # 方式の中身を変えたら作り直す（RMVPE は前と同じ鍵）
         return self._guide_cache_dir("analysis", key)
 
     def _alignment_cache_dir(self):
@@ -1069,7 +1123,7 @@ class Project:
                 result = F0Result.from_json(json.load(f)["f0"])
         except (OSError, ValueError, KeyError, TypeError):
             return None
-        same_estimator = f0mod.same_estimator(result.estimator, result.meta.get("version"), estimator)
+        same_estimator = self._same_take_estimator(result.estimator, result.meta.get("version"), estimator)
         vuv_rule = "%s f0>0 AND rms > %.1f dBFS" % (result.estimator, ENERGY_FLOOR_DB)
         if not same_estimator or bool(result.meta.get("sweep")) != bool(sweep) or \
                 result.meta.get("threshold") != RMVPE_THRESHOLD or \
@@ -1200,12 +1254,16 @@ class Project:
             if self._take_f0 is None or self._srcs.get("take") != _src_sig(take_cache):
                 self._load_take_analysis(take_cache)     # 同じファイルをもう読んでいれば読み直さない
             # 方式を替えた（画面の「ピッチ検出の方式」・MCP の estimator）: 解析し直す
-            reuse = f0mod.same_estimator(self._take_f0.estimator, self._take_f0.meta.get("version"),
-                                         estimator)
+            reuse = self._same_take_estimator(self._take_f0.estimator,
+                                              self._take_f0.meta.get("version"), estimator, force)
         if not reuse:
             enter("take_f0")
             x, sr = self.audio("take")
-            f0r = estimate_f0(x=x, sr=sr, estimator=estimator, sweep=sweep)
+            kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
+            old_version = self._gliss_version_for(estimator, force)
+            if old_version:
+                kwargs["gliss_version"] = old_version
+            f0r = estimate_f0(**kwargs)
             notes = segment_notes(f0r, source="take")
             self._take_f0, self._take_notes = f0r, notes
             tmp = _tmp_name(take_cache)
@@ -1216,6 +1274,11 @@ class Project:
             self._srcs["take"] = _src_sig(take_cache)
             log.get().info("テイクを解析: %d フレーム / %d ノート（%.2f s）",
                            f0r.n_frames, len(notes), f0r.elapsed_sec)
+        if estimator == "gliss":
+            self.f0_model_version = (self._take_f0.meta.get("version")
+                                     if self._take_f0.meta.get("version") == f0mod.GLISS_F0_V2_VERSION else None)
+        else:
+            self.f0_model_version = None
 
         self.analysis["take"] = {
             "analyzed_at": t0, "estimator": self._take_f0.estimator,
@@ -1255,7 +1318,11 @@ class Project:
                 gf0 = self._guide_f0_from_track(estimator, sweep)
                 if gf0 is None:
                     gx, gsr = self.audio("guide")
-                    gf0 = estimate_f0(x=gx, sr=gsr, estimator=estimator, sweep=sweep)
+                    kwargs = {"x": gx, "sr": gsr, "estimator": estimator, "sweep": sweep}
+                    old_version = self._gliss_version_for(estimator, force)
+                    if old_version:
+                        kwargs["gliss_version"] = old_version
+                    gf0 = estimate_f0(**kwargs)
                 gnotes = segment_notes(gf0, source="guide", id_prefix="g")
                 self._guide_f0, self._guide_notes = gf0, gnotes
                 tmp = _tmp_name(keyed_guide)
@@ -1420,7 +1487,7 @@ class Project:
         if not os.path.exists(take_cache):
             return False
         ta = self.analysis.get("take") or {}
-        if ta.get("estimator") is not None and not f0mod.same_estimator(
+        if ta.get("estimator") is not None and not self._same_take_estimator(
                 ta["estimator"], ta.get("estimator_version"), estimator):
             return False                                 # 方式を替えた: テイクから解析し直す
         if "auto_lyrics" not in self.analysis and os.environ.get("VOCAL_ENGINE_AUTO_LYRICS", "1") != "0":

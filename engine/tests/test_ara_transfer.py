@@ -390,6 +390,34 @@ def test_estimator_is_saved_in_the_archive_and_used_when_reopened(tr, tmp_path, 
     assert _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]["f0_estimator"] == "praat"
 
 
+def test_v2_ara_archive_without_cache_preserves_note_target_on_restore(tr, tmp_path):
+    m, a, md, R = tr
+    from vocal_engine.analysis import f0 as F
+    from vocal_engine.project import Project
+    from vocal_engine.project.model import Target
+
+    src = _wav(tmp_path / "media" / "synthetic.wav", _voice())
+    p = Project.open(src, project_dir=str(tmp_path / "old-project"))
+    p.f0_model_version = F.GLISS_F0_V2_VERSION
+    p.analyze(estimator="gliss", auto_lyrics=False)
+    note = next(n for n in p.take_notes if n.kind == "note")
+    p.apply_edits([{"kind": "pitch_shift", "target": Target.note(note.id), "params": {"cents": 80}}])
+    old_f0 = p.take_f0.f0.copy()
+    archive = p.to_archive()
+    archive.pop("f0_estimator_version")   # v2 の ARA 保存形式は方式名だけ
+    assert archive["f0_estimator"] == "gliss"
+
+    _daw_doc(a, tmp_path, src)
+    r = _ok(a.ara_restore("mod-1", archive))
+    assert r["mismatch"] is False
+    q = m._state["project"]
+    q.ensure_analyzed()                       # 新しい作業場所には解析キャッシュがない
+    assert q.take_f0.meta["version"] == F.GLISS_F0_V2_VERSION
+    assert np.array_equal(q.take_f0.f0, old_f0)
+    assert q._missing_note_targets() == []
+    assert q.to_archive()["f0_estimator_version"] == F.GLISS_F0_V2_VERSION
+
+
 def test_archive_without_a_recorded_estimator_keeps_the_analysed_one(tr, tmp_path):
     """to_archive は、明示した方式が無ければ前に解析した方式を持つ（未解析なら None）。"""
     m, a, md, R = tr

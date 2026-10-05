@@ -185,7 +185,8 @@ def track_sig(s, t):
     pref = s.estimator_of(t)
     est = F0.resolve_estimator(pref, recorded=None if pref else _store.recorded_estimator_in(s.project_dir_of(t)))
     if est != "rmvpe":
-        d.append([est, F0.estimator_version(est)])   # ピッチ検出の方式（RMVPE は前と同じ署名のまま）
+        version = (_store.recorded_gliss_version_in(s.project_dir_of(t)) if est == "gliss" else None)
+        d.append([est, version or F0.estimator_version(est)])   # 旧解析は旧版の署名を維持する
     return hashlib.sha1(json.dumps(d, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
