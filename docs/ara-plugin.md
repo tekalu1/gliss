@@ -220,7 +220,7 @@ AI からの手順:
 
 | 名前 | 意味 |
 |---|---|
-| `GLISS_ARA_TRACE_DIR` | 指すフォルダの `gliss-ara-<プロセス ID>.log` に、プラグインの出来事、通常再生の `trace`、EditorRenderer 試聴の `preview-trace` と `preview: release` を書く。試聴の各ブロックでは加算したサンプルのフレーム数・非ゼロフレーム数・二乗和を音声スレッドで数えるだけで、ログ出力はレンダラー解放時に行う |
+| `GLISS_ARA_TRACE_DIR` | 指すフォルダの `gliss-ara-<プロセス ID>.log` に、プラグインの出来事、通常再生の `trace`、EditorRenderer 試聴の `preview-trace` と `preview: release` を書く。試聴の各ブロックは加算したサンプルのフレーム数・非ゼロフレーム数・二乗和を数えて atomic で公開し、ログは message thread のタイマーから書く。未設定なら計測しない |
 | `GLISS_ARA_READ_TIMEOUT_MS` | リアルタイムの描画でも先読みの完了をこの ms だけ待つ。検証ホスト（TestHost は CPU の速さで取りに来る）で欠けなく比べるため。普段は使わない |
 | `GLISS_ARA_SYNC_WAIT_MS` | リアルタイムの描画でも、同期（エンジン・差分の再合成）の完了をこの ms だけ待つ（prepareToPlay ごとの持ち時間。既定はバウンスのときだけ 10 秒）。検証ホストで編集の当たった音を描かせるため |
 | `GLISS_TEST_EDIT` | 試験用の編集。エンジンにつないで最初の修飾を解析した後に 1 回だけ当てる。`{"tool": "shift_pitch", "args": {...}}`・`shift_pitch` の引数そのもの（`{"cents": 100, "start_sec": 0, "end_sec": 5}`）・`shift_pitch:<note_id>:<cents>` |
@@ -232,7 +232,7 @@ AI からの手順:
 
 エンジンの起動の設定（`GLISS_ENGINE_PYTHON`・`GLISS_ENGINE_CWD`）は下の「配布版のプラグインがエンジンを見つける順」、エンジン側の環境変数（`VOCAL_ENGINE_WORK_DIR`・`GLISS_F0_ESTIMATOR` など）は AGENTS.md。試験では `VOCAL_ENGINE_WORK_DIR`・`VOCAL_ENGINE_LOG_DIR` を一時フォルダに向ける。
 
-実 DAW の試聴音を確認するときは、DAW 起動前に `GLISS_ARA_TRACE_DIR` を試験用フォルダへ向ける。ホスト再生を止め、ノートを長押ししてから離し、停止後も 1 秒ほどエディタを開いたままにして音声コールバックを通す。EditorRenderer の `releaseResources` または破棄時に `gliss-ara-<プロセス ID>.log` へ記録が確定する。エディタを閉じても DAW が renderer を保持すれば、プラグインを外すか DAW を閉じるまで記録は出ない。`preview-trace` の `mode=r active=1 nonzero>0 energy>0` は EditorRenderer が実際に PCM を出力へ加えた証拠で、UI の `sounding` 表示には依存しない。離した後は `release=1` の短いフェードに続き、`mode=r active=0 release=0 nonzero=0 energy=0` のブロックと、集計行 `preview: release ... frames>0 nonzero>0 energy>0 stopZeroBlocks>0` を確認する。`mode=h` は DAW 再生中、`mode=o` はオフライン、`mode=x` は別の EditorRenderer が出力を担当したブロックで、これらのゼロは試聴停止の根拠に使わない。記録は直近 65536 ブロックを保持するため、試聴後に renderer を解放して読む。二乗和は発音と停止を示すが、実機でのピッチ値そのものは示さない。
+実 DAW の試聴音を確認するときは、DAW 起動前に `GLISS_ARA_TRACE_DIR` を試験用フォルダへ向ける。ホスト再生を止め、ノートを長押ししてから離し、停止後も 1 秒ほどエディタを開いたままにして音声コールバックを通す。ログは message thread が約 100 ms ごとに書く。`preview-trace` の `mode=r active=1 nonzero>0 energy>0` は EditorRenderer が実際に PCM を出力へ加えた証拠で、UI の `sounding` 表示には依存しない。離した後は `release=1` の短いフェードに続き、`mode=r active=0 release=0 nonzero=0 energy=0` のブロックを時系列で確認する。EditorRenderer の解放時には集計行 `preview: release ... frames>0 nonzero>0 energy>0 stopZeroBlocks>0 dropped=0` も出る。`mode=h` は DAW 再生中、`mode=o` はオフライン、`mode=x` は別の EditorRenderer が出力を担当したブロックで、これらのゼロは試聴停止の根拠に使わない。message thread が長く塞がれて `dropped>0` なら、その区間は確認できない。二乗和は発音と停止を示すが、実機でのピッチ値そのものは示さない。
 
 ## ビルド
 

@@ -10,7 +10,7 @@ namespace gliss
 {
 
 /** 補正後の試聴 PCM を DAW の出力に足す。通常再生中とオフライン描画では足さない。 */
-class GlissEditorRenderer final : public juce::ARAEditorRenderer
+class GlissEditorRenderer final : public juce::ARAEditorRenderer, private juce::Timer
 {
 public:
     GlissEditorRenderer (ARA::PlugIn::DocumentController* controller, std::shared_ptr<PreviewAudio> preview);
@@ -31,21 +31,33 @@ private:
     struct TraceEntry
     {
         size_t block = 0;
+        std::uint32_t ms = 0;
         int frames = 0, nonZeroFrames = 0;
         double energy = 0.0;
         std::uint64_t transition = 0;
         bool active = false, release = false;
         char mode = 'r'; // r: renderer, h: host playback, o: offline, x: another renderer owns the preview
     };
-    void dumpTrace();
+    struct TraceState
+    {
+        explicit TraceState (std::uint64_t id) : rendererId (id), entries (8192) {}
+        void drain(); // message thread only
+        void finish(); // message thread only
+        std::uint64_t rendererId;
+        std::vector<TraceEntry> entries;
+        std::atomic<size_t> written { 0 }, read { 0 }, dropped { 0 };
+        size_t frames = 0, nonZero = 0, stopZeroBlocks = 0;
+        double energy = 0.0;
+        bool sawRelease = false;
+    };
+    void timerCallback() override;
+    void closeTrace();
     std::shared_ptr<PreviewAudio> previewAudio;
     double outputRate = 0.0;
     PreviewAudio::Cursor cursor;
     bool hostPlaying = false;
     std::uint64_t rendererId = 0;
-    bool prepared = false, tracing = false;
-    std::vector<TraceEntry> trace;
-    std::atomic<size_t> traceCount { 0 };
+    std::shared_ptr<TraceState> traceState;
 };
 
 } // namespace gliss

@@ -12,7 +12,7 @@ GlissEditorRenderer::GlissEditorRenderer (ARA::PlugIn::DocumentController* contr
 
 GlissEditorRenderer::~GlissEditorRenderer()
 {
-    if (prepared) dumpTrace();
+    closeTrace();
     previewAudio->removeRenderer (rendererId);
 }
 
@@ -24,19 +24,34 @@ void GlissEditorRenderer::prepareToPlay (double sampleRate, int maximumSamplesPe
     outputRate = sampleRate;
     cursor = {};
     hostPlaying = false;
-    tracing = diag::traceEnabled();
-    traceCount = 0;
-    if (tracing) trace.assign (1 << 16, {});
-    prepared = true;
+    closeTrace();
+    if (diag::traceEnabled())
+    {
+        traceState = std::make_shared<TraceState> (rendererId);
+        startTimer (100);
+    }
 }
 
 void GlissEditorRenderer::releaseResources()
 {
-    if (prepared) dumpTrace();
-    trace.clear();
-    trace.shrink_to_fit();
-    prepared = false;
+    closeTrace();
     ARAEditorRenderer::releaseResources();
+}
+
+void GlissEditorRenderer::closeTrace()
+{
+    stopTimer();
+    auto state = std::move (traceState);
+    if (state == nullptr) return;
+    const auto flush = [state] { state->drain(); state->finish(); };
+    auto* messages = juce::MessageManager::getInstanceWithoutCreating();
+    if (messages != nullptr && messages->isThisTheMessageThread()) flush();
+    else if (messages != nullptr) juce::MessageManager::callAsync (flush);
+}
+
+void GlissEditorRenderer::timerCallback()
+{
+    if (traceState != nullptr) traceState->drain();
 }
 
 bool GlissEditorRenderer::processBlock (juce::AudioBuffer<float>& buffer,
@@ -45,6 +60,7 @@ bool GlissEditorRenderer::processBlock (juce::AudioBuffer<float>& buffer,
 {
     PreviewAudio::RenderStats stats;
     char mode = 'r';
+    std::uint32_t nowMs = 0;
     if (position.getIsPlaying())
     {
         if (! hostPlaying) previewAudio->cancelFromAudioThread();
@@ -55,8 +71,9 @@ bool GlissEditorRenderer::processBlock (juce::AudioBuffer<float>& buffer,
     else if (realtime == juce::AudioProcessor::Realtime::yes)
     {
         hostPlaying = false;
+        nowMs = juce::Time::getMillisecondCounter();
         if (! previewAudio->renderForRenderer (buffer, outputRate, cursor, rendererId,
-                                               juce::Time::getMillisecondCounter(), tracing ? &stats : nullptr))
+                                               nowMs, traceState != nullptr ? &stats : nullptr))
             mode = 'x';
     }
     else
@@ -65,28 +82,29 @@ bool GlissEditorRenderer::processBlock (juce::AudioBuffer<float>& buffer,
         cursor.released = true;
         mode = 'o';
     }
-    if (tracing)
+    if (auto* state = traceState.get())
     {
-        const auto index = traceCount.fetch_add (1, std::memory_order_relaxed);
-        auto& entry = trace[index % trace.size()];
-        entry = { index, buffer.getNumSamples(), stats.nonZeroFrames, stats.energy,
+        if (mode == 'h' || mode == 'o') nowMs = juce::Time::getMillisecondCounter();
+        const auto write = state->written.load (std::memory_order_relaxed);
+        if (write - state->read.load (std::memory_order_acquire) < state->entries.size())
+        {
+            state->entries[write % state->entries.size()] =
+                { write, nowMs, buffer.getNumSamples(), stats.nonZeroFrames, stats.energy,
                   stats.transition, stats.active, stats.release, mode };
+            state->written.store (write + 1, std::memory_order_release);
+        }
+        else state->dropped.fetch_add (1, std::memory_order_relaxed);
     }
     return true;
 }
 
-void GlissEditorRenderer::dumpTrace()
+void GlissEditorRenderer::TraceState::drain()
 {
-    if (! tracing) return;
-    const auto count = traceCount.load();
-    const auto first = count > trace.size() ? count - trace.size() : 0;
-    size_t frames = 0, nonZero = 0, stopZeroBlocks = 0;
-    double energy = 0.0;
-    bool sawRelease = false;
-    for (size_t i = first; i < count; ++i)
+    const auto end = written.load (std::memory_order_acquire);
+    auto first = read.load (std::memory_order_relaxed);
+    for (auto i = first; i < end; ++i)
     {
-        const auto& t = trace[i % trace.size()];
-        if (t.block != i) continue;
+        const auto& t = entries[i % entries.size()];
         if (t.mode == 'r') frames += (size_t) t.frames;
         nonZero += (size_t) t.nonZeroFrames;
         energy += t.energy;
@@ -94,13 +112,20 @@ void GlissEditorRenderer::dumpTrace()
         if (sawRelease && t.mode == 'r' && ! t.active && ! t.release && t.nonZeroFrames == 0)
             ++stopZeroBlocks;
         diag::log ("preview-trace renderer=" + juce::String ((juce::int64) rendererId)
-                   + " block=" + juce::String ((juce::int64) i) + " mode=" + juce::String::charToString (t.mode)
+                   + " block=" + juce::String ((juce::int64) i) + " ms=" + juce::String (t.ms)
+                   + " mode=" + juce::String::charToString (t.mode)
                    + " frames=" + juce::String (t.frames) + " nonzero=" + juce::String (t.nonZeroFrames)
                    + " energy=" + juce::String (t.energy, 9) + " transition=" + juce::String ((juce::int64) t.transition)
                    + " active=" + juce::String (t.active ? 1 : 0) + " release=" + juce::String (t.release ? 1 : 0));
     }
+    read.store (end, std::memory_order_release);
+}
+
+void GlissEditorRenderer::TraceState::finish()
+{
     diag::log ("preview: release renderer=" + juce::String ((juce::int64) rendererId)
-               + " blocks=" + juce::String ((juce::int64) count) + " logged=" + juce::String ((juce::int64) (count - first))
+               + " blocks=" + juce::String ((juce::int64) written.load())
+               + " dropped=" + juce::String ((juce::int64) dropped.load())
                + " frames=" + juce::String ((juce::int64) frames) + " nonzero=" + juce::String ((juce::int64) nonZero)
                + " energy=" + juce::String (energy, 9)
                + " stopZeroBlocks=" + juce::String ((juce::int64) stopZeroBlocks));
