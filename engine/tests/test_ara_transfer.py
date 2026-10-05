@@ -126,9 +126,9 @@ def test_export_import_renders_the_same_sound_as_the_standalone_export(tr, tmp_p
     ch = _ok(m.list_changes(include_undone=True))["changesets"]
     assert len(ch) == 5 and {c_["author"] for c_ in ch} == {"human", "ai"}
     assert sum(1 for c_ in ch if c_["undone"]) == 1
-    # 取り込んだ編集は Ctrl+Z の列に入らない
+    # 明示的な取り込みは 1 回で元へ戻せる
     from vocal_engine import mcp_tracks as mt
-    assert mt.history_summary()["can_undo"] is False
+    assert mt.history_summary()["undo"]["kind"] == "archive"
     # 保存用の写しにも入る（DAW のソングに保存される）
     saved = _ok(a.ara_archive())["archives"]["mod-1"]["archive"]
     assert saved["changesets"] == arc["changesets"] and saved["f0_estimator"] == "praat"
@@ -205,6 +205,56 @@ def test_existing_edits_need_replace(tr, tmp_path):
     # 同じ編集をもう一度入れるのは replace が要らない（何も失わない）
     r = _ok(a.import_edits(archive=arc))
     assert r["imported"] and r["replaced"] is None and r["edits"] == n_edits
+
+
+def test_explicit_import_replaces_and_restores_prior_edits_in_one_step(tr, tmp_path):
+    m, a, md, R = tr
+    gl, src, ref, n_edits, tid = _standalone(m, md, tmp_path)
+    arc = _ok(a.export_edits(gl, estimator="praat"))["archive"]
+    daw_src, _ = _daw_doc(a, tmp_path, src)
+    _ok(m.analyze_take(background=False))
+    note = _ok(m.list_notes(kind="note"))["notes"][1]["id"]
+    _ok(m.shift_pitch(70, note_id=note, author="human"))
+    old = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    old_audio = _sync_all(a, "mod-1", daw_src).buf.copy()
+    _ok(a.import_edits(archive=arc, replace=True))
+    new_audio = _sync_all(a, "mod-1", daw_src).buf.copy()
+    assert not np.array_equal(old_audio, new_audio)
+    assert _ok(m.undo())["undone"]["kind"] == "archive"
+    restored = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    assert restored["changesets"] == old["changesets"]
+    assert restored["f0_estimator"] == old["f0_estimator"]
+    assert np.array_equal(_sync_all(a, "mod-1", daw_src).buf, old_audio)
+    assert _ok(m.redo())["redone"]["kind"] == "archive"
+    assert np.array_equal(_sync_all(a, "mod-1", daw_src).buf, new_audio)
+
+
+def test_import_analysis_failure_still_has_undo(tr, tmp_path, monkeypatch):
+    m, a, md, R = tr
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.project import Project
+
+    gl, src, _, _, tid = _standalone(m, md, tmp_path)
+    arc = _ok(a.export_edits(gl, estimator="praat"))["archive"]
+    _daw_doc(a, tmp_path, src)
+    _ok(m.analyze_take(background=False))
+    nid = _ok(m.list_notes(kind="note"))["notes"][1]["id"]
+    _ok(m.shift_pitch(70, note_id=nid, author="human"))
+    old = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    real = Project.analyze
+
+    def fail_gliss(self, *args, **kwargs):
+        if kwargs.get("estimator") == "gliss":
+            raise RuntimeError("synthetic analysis failure")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Project, "analyze", fail_gliss)
+    r = _ok(a.import_edits(archive=arc, replace=True, estimator="gliss"))
+    assert any("synthetic analysis failure" in w for w in r["warnings"])
+    assert mt.history_summary()["undo"]["kind"] == "archive"
+    assert _ok(m.undo())["undone"]["kind"] == "archive"
+    restored = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    assert restored["changesets"] == old["changesets"]
 
 
 def test_export_edits_errors_and_empty_track(tr, tmp_path):
@@ -429,6 +479,115 @@ def test_set_f0_estimator_scope(tr, tmp_path, monkeypatch):
     monkeypatch.setenv("GLISS_CLIENT", "app")                         # 画面のエンジン: 既定は "all"
     _ok(m.set_f0_estimator("praat"))
     assert F.chosen_estimator() == "praat"
+
+
+def test_standalone_estimator_undo_restores_analysis_and_note_edits(tr, tmp_path):
+    m, a, md, R = tr
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.analysis import f0 as F
+
+    src = _wav(tmp_path / "source" / "synthetic.wav", _voice())
+    _ok(md.new_project())
+    tid = _ok(mt.add_track(src, select=True))["track"]
+    _ok(m.analyze_take(estimator="praat", background=False))
+    nid = _ok(m.list_notes(kind="note"))["notes"][1]["id"]
+    _ok(m.shift_pitch(90, note_id=nid, author="human"))
+    before = m._state["project"].analysis["take"]["estimator"]
+    assert before == "praat"
+    _ok(m.set_f0_estimator("gliss", scope="all"))
+    _ok(m.analyze_take(background=False))
+    assert m._state["project"].analysis["take"]["estimator"] == "gliss"
+    assert _ok(m.undo())["undone"]["kind"] == "estimator"
+    p = m._state["project"]
+    assert p.analysis["take"]["estimator"] == "praat"
+    assert p._missing_note_targets() == []
+    assert len(p.edits) == 1 and F.chosen_estimator() == "praat"
+    assert _ok(m.redo())["redone"]["kind"] == "estimator"
+    assert m._state["project"].analysis["take"]["estimator"] == "gliss"
+
+
+def test_estimator_undo_failure_restores_two_tracks_and_history(tr, tmp_path, monkeypatch):
+    m, a, md, R = tr
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.analysis import f0 as F
+    from vocal_engine.project import Project
+
+    _ok(md.new_project())
+    ids = []
+    for i in range(2):
+        src = _wav(tmp_path / "source" / ("track-%d.wav" % i), _voice(transpose=i))
+        tid = _ok(mt.add_track(src, select=True))["track"]
+        ids.append(tid)
+        _ok(m.analyze_take(estimator="praat", background=False))
+    _ok(m.set_f0_estimator("gliss", scope="all"))
+    for tid in ids:
+        _ok(mt.select_track(tid))
+        _ok(m.analyze_take(background=False))
+    s = m._state["session"]
+    second_dir = s.project_dir_of(s.track(ids[1]))
+    real = Project.analyze
+
+    def fail_second(self, *args, **kwargs):
+        if self.dir == second_dir and kwargs.get("estimator") == "praat":
+            raise RuntimeError("synthetic second track failure")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Project, "analyze", fail_second)
+    result = m.undo()
+    assert result["ok"] is False and "synthetic second track failure" in result["error"]
+    assert mt.history_summary()["undo"]["kind"] == "estimator"
+    assert F.chosen_estimator() == "gliss"
+    for tid in ids:
+        p = Project(s.project_dir_of(s.track(tid))).load()
+        assert p.analysis["take"]["estimator"] == "gliss"
+    monkeypatch.setattr(Project, "analyze", real)
+    assert _ok(m.undo())["undone"]["kind"] == "estimator"
+    for tid in ids:
+        p = Project(s.project_dir_of(s.track(tid))).load()
+        assert p.analysis["take"]["estimator"] == "praat"
+
+
+def test_merge_keeps_both_draws_timing_and_lyrics(tr, tmp_path):
+    m, a, md, R = tr
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.project import Project
+    from vocal_engine.project.model import Target
+    from vocal_engine.project.timing import current_map
+
+    src = _wav(tmp_path / "source" / "merge.wav", _voice())
+    _ok(md.new_project())
+    _ok(mt.add_track(src, select=True))
+    _ok(m.analyze_take(estimator="praat", background=False))
+    note = _ok(m.list_notes(kind="note"))["notes"][1]
+    mid = round((note["start_sec"] + note["end_sec"]) / 2, 3)
+    split = _ok(m.split_note(mid, note_id=note["id"], author="human"))
+    left, right = split["left"], split["right"]
+    p = m._state["project"]
+    for s, midi in ((mid - 0.2, 64.0), (mid + 0.03, 67.0)):
+        _ok(m.set_pitch_curve([[s, midi], [s + 0.13, midi + 0.4]],
+                              mode="draw", author="human"))
+    _ok(m.set_lyrics(entries=[{"start_sec": note["start_sec"], "end_sec": mid, "text": "あ"},
+                               {"start_sec": mid, "end_sec": note["end_sec"], "text": "い"}],
+                     reanalyze=False, author="human"))
+    p.apply_edits([{"kind": "silence", "target": Target.range(mid, mid),
+                    "params": {"sec": 0.03}}], author="human")
+    before_draws = [e.to_json() for e in p.edits if e.kind == "pitch_draw"]
+    before_lyrics = copy.deepcopy(p.lyrics_entries("take"))
+    before_time = [current_map(p).at(mid + d, "right") for d in (-0.08, 0, 0.08)]
+    merged = _ok(m.merge_notes(left, right, author="human"))
+    assert merged["removed_silence"] is False
+    assert [e.to_json() for e in p.edits if e.kind == "pitch_draw"] == before_draws
+    assert p.lyrics_entries("take") == before_lyrics
+    assert [current_map(p).at(mid + d, "right") for d in (-0.08, 0, 0.08)] == before_time
+    assert any(e.kind == "silence" and abs(e.target.start_sec - mid) < 1e-4 for e in p.edits)
+    assert any(e.kind == "transition" and e.params["value"] == 0.0 for e in p.edits)
+    assert _ok(m.undo())["undone"]["label"] == "結合"
+    assert p.note(right).id == right
+    assert _ok(m.redo())["redone"]["label"] == "結合"
+    q = Project(p.dir).load()
+    q.analyze(estimator="praat")
+    assert [e.to_json() for e in q.edits if e.kind == "pitch_draw"] == before_draws
+    assert q.lyrics_entries("take") == before_lyrics
 
 
 # ================================================================ 方式の合っていないアーカイブを救う

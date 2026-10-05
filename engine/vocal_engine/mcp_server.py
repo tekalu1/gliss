@@ -14,6 +14,7 @@ MCP クライアント側の制約に合わせてある:
 起動: `python -m vocal_engine.mcp`
 """
 import contextlib
+import copy
 import functools
 import inspect
 import os
@@ -2328,15 +2329,36 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
         return p.f0_estimator() if p is not None else f0mod.resolve_estimator()
 
     before, chosen = now(), f0mod.chosen_estimator()
-    if scope == "default":
-        f0mod.set_default_estimator(estimator)
-        cleared = False
-    else:
-        f0mod.set_preferred_estimator(estimator)
-        cleared = _mcp_tracks.forget_track_estimators()  # analyze_take(estimator=…) で明示した方式は、選び直しで全体の方式に戻る
-    effective = now()
-    if effective != before or f0mod.chosen_estimator() != chosen or cleared:
-        _mcp_tracks.reschedule_prep()            # 裏の準備の組み合わせ（方式を含む）を入れ直す
+    s = _mcp_tracks._session(required=False) if scope == "all" else None
+    history_before = _mcp_tracks.estimator_snapshot(s) if s is not None and not s.ara else None
+    old_tracks = copy.deepcopy(s.tracks) if history_before is not None else None
+    old_history = copy.deepcopy(s.history) if history_before is not None else None
+    old_marks = dict(s.history_marks) if history_before is not None else None
+    try:
+        if scope == "default":
+            f0mod.set_default_estimator(estimator)
+            cleared = False
+        else:
+            f0mod.set_preferred_estimator(estimator)
+            cleared = _mcp_tracks.forget_track_estimators()  # 明示した方式は全体の方式に戻る
+        effective = now()
+        if effective != before or f0mod.chosen_estimator() != chosen or cleared:
+            _mcp_tracks.reschedule_prep()
+            if history_before is not None:
+                history_after = _mcp_tracks.estimator_snapshot(s)
+                _, dropped = s.record_estimator(_mcp_tracks.current_track_id(),
+                                                history_before, history_after)
+                _mcp_tracks._discard_dropped(s, dropped)
+                s.save()
+    except BaseException:
+        if history_before is not None:
+            f0mod.set_preferred_estimator(chosen)
+            s.tracks, s.history, s.history_marks = old_tracks, old_history, old_marks
+            if p is not None:
+                tid = _mcp_tracks.current_track_id()
+                p.estimator_pref = s.track(tid).get("estimator") if tid else None
+            s.save()
+        raise
     return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
                estimators=list(f0mod.ESTIMATORS),
                rmvpe_model_found=f0mod.rmvpe_available(),

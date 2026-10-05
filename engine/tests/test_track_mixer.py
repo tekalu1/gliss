@@ -79,32 +79,37 @@ def test_defaults_and_clamping(tmp_path, mcp):
     assert {t["id"]: t["gain_db"] for t in r["session"]["tracks"]}[t1] == 2.0
 
 
-def test_not_undoable_and_kept_by_undo(tmp_path, mcp):
+def test_mix_is_undoable_and_kept_by_other_undo(tmp_path, mcp):
     m, mt = mcp
     d, (t1, t2) = _open(m, tmp_path)
     _ok(mt.set_track(t2, name="guide vox", author="human"))
     _ok(mt.set_track(t2, gain_db=-6, pan=0.5, author="human"))
     _ok(mt.set_track(t2, offset_sec=0.2, author="human"))
     labels = [e["label"] for e in _session_json(d)["history"]]
-    assert labels == ["トラックの名前", "トラックの位置"]        # 音量・パンは履歴に入らない
-    # 位置・名前を戻しても音量・パンは今のまま
-    _ok(m.undo())
+    assert labels == ["トラックの名前", "トラックの音量・トラックのパン", "トラックの位置"]
+    # 位置だけ戻してもミキサー値は今のまま
     _ok(m.undo())
     t = _tracks(mt)[t2]
-    assert t["offset_sec"] == 0.0 and t["name"] == "guide"
+    assert t["offset_sec"] == 0.0 and t["name"] == "guide vox"
     assert t["gain_db"] == -6.0 and t["pan"] == 0.5
-    # 戻した後に別の値にして、やり直しても今の値
-    _ok(mt.set_track(t2, gain_db=1.5, pan=-0.25))
+    # ミキサーの履歴まで戻すと値が戻る
+    _ok(m.undo())
+    t = _tracks(mt)[t2]
+    assert t["gain_db"] == 0.0 and t["pan"] == 0.0
+    _ok(m.undo())
+    assert _tracks(mt)[t2]["name"] == "guide"
+    _ok(m.redo())
     _ok(m.redo())
     _ok(m.redo())
     t = _tracks(mt)[t2]
     assert t["offset_sec"] == 0.2 and t["name"] == "guide vox"
-    assert t["gain_db"] == 1.5 and t["pan"] == -0.25
-    # 取り消しの対象かどうかの比べ方（structure）にも入らない
+    assert t["gain_db"] == -6.0 and t["pan"] == 0.5
+    # 通常の操作はミキサー値を比較しないが、ミキサー操作では比較する
     from vocal_engine.project.session import Session
     snap = m._state["session"].snapshot()
     for k in ("gain_db", "pan", "mute", "solo"):
         assert all(k not in x for x in Session.structure(snap)["tracks"])
+        assert all(k in x for x in Session.structure(snap, include_mixer=True)["tracks"])
 
 
 def test_saved_in_session_and_old_session_loads_defaults(tmp_path, mcp):

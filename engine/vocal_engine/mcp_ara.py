@@ -272,7 +272,7 @@ def _mismatch(t, archive):
     return "音の中身が違う（DAW の音が変わったので編集を当てない）"
 
 
-def _restore_into(s, t, archive):
+def _restore_into(s, t, archive, forget_history=True):
     """アーカイブをトラックのプロジェクトに戻す（素材は照合済み）。戻した Project。"""
     pdir = s.project_dir_of(t)
     arc = copy.deepcopy(archive)
@@ -282,7 +282,8 @@ def _restore_into(s, t, archive):
                   source_id=t.get("source_id"))
     with dir_lock(pdir):
         p = Project.from_archive(arc, take=clip, project_dir=pdir, overwrite=True)
-    _forget_history(s, t["id"])
+    if forget_history:
+        _forget_history(s, t["id"])
     _mark_all(s, t["id"], p)
     return p
 
@@ -1010,9 +1011,8 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
       補正を作った方式と違うと再合成の音が変わり、ノートの ID に頼る編集は当たらなくなる。方式の記録が無い archive は
       estimator を指定するか、`analyze_take(estimator=…)` で方式を決め、missing_note_targets が 0 になる方式にする。
       この PC で使えない方式（rmvpe の重みが無い）は当てず warnings に出す。
-    取り込んだ編集は**取り消しの履歴（Ctrl+Z）に入らない**（`ara_restore` と同じ。DAW の読み込みを Ctrl+Z で戻させない）。
-    author は archive のまま（human / ai が保たれる）。戻すには `undo(changeset_id)`・`reset_to_original(whole_track=true)`、
-    または元の編集を `replace = true` で入れ直す。
+    明示的な取り込みは、置換前の補正とともに Ctrl+Z / Ctrl+Y の 1 操作にする。
+    ホストの初期読込 `ara_restore` は履歴に加えない。補正内の author は archive のまま保つ。
     当てた後は外部の編集と同じ道で再合成・DAW への反映（ara_revs の版・プラグインへの通知）に乗る。
     返り値: mismatch・imported・track・ara_id・edits・changesets・authors・estimator・estimator_applied・analysis
     （estimator・ran）・missing_note_targets（{count, ids}。解析が済んでいなければ null）・replaced・
@@ -1033,6 +1033,10 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
         return _ok(track=t["id"], ara_id=t["ara_id"], mismatch=True, imported=False, reason=why)
     pdir = s.project_dir_of(t)
     replaced = None
+    before_archive = _archive_of(t, pdir)
+    before_estimator = t.get("estimator")
+    s.ensure_history()
+    mark_before = int(s.history_marks.get(t["id"]) or 0)
     if os.path.exists(os.path.join(pdir, "project.json")):
         q = Project(pdir).load()
         if q.changesets:
@@ -1045,10 +1049,25 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
                 st = _tr.edit_stats(q.to_archive())
                 replaced = {"edits": st["edits"], "changesets": st["changesets"], "authors": st["authors"]}
     warnings = list((info or {}).get("warnings") or [])
-    est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
+    old_track = copy.deepcopy(t)
+    old_history = copy.deepcopy(s.history)
+    old_marks = dict(s.history_marks)
+    try:
+        with _mt._recover_projects([pdir]):
+            est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
+            p = _restore_into(s, t, archive, forget_history=False)
+    except BaseException:
+        t.clear()
+        t.update(old_track)
+        s.history = old_history
+        s.history_marks = old_marks
+        cur = _srv._state.get("project")
+        if cur is not None and _norm(cur.dir) == _norm(pdir):
+            cur.load()
+            cur._forget_analysis()
+        raise
     if note:
         warnings.append(note)
-    p = _restore_into(s, t, archive)
     pref = s.estimator_of(t)
     p.estimator_pref = pref
     s.save()
@@ -1071,6 +1090,17 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
     if ran and cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
         cur.load()
         cur._forget_analysis()
+    after_archive = _archive_of(t, pdir)
+    if before_archive is None:
+        before_archive = copy.deepcopy(after_archive)
+        before_archive.update(changesets=[], seq={"edit": 0, "changeset": 0},
+                              lyrics={}, auto_lyrics_attempted=False,
+                              f0_estimator=before_estimator)
+    if not _json_equal(before_archive, after_archive) or before_estimator != t.get("estimator"):
+        entry, dropped = s.record_archive(t["id"], before_archive, after_archive,
+                                          before_estimator, t.get("estimator"), mark_before)
+        _mt._discard_dropped(s, dropped)
+        s.save()
     _srv._invalidate_renderer()
     _drop_render(t["ara_id"])
     missing = None

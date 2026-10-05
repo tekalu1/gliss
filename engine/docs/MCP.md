@@ -497,10 +497,11 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 {"note": "n004", "at_sec": 1.23, "transition": {"value": 0.8, "auto": false, ...}}
 ```
 
-結合（`merge_notes`）は、境目にあった無音の挿入（切り離して縮めた隙間の `silence`）も外す。外したぶんは結合した
-ノート全体を伸ばして埋め、頭と尻の編集後の位置は変えない（後ろはずらさない）。返り値の `removed_silence`。
+結合（`merge_notes`）は、境目にあった無音の挿入（切り離して縮めた隙間の `silence`）を保持する。結合した
+ノートの両側の手動タイミングは変えず、境界を自動で平滑化しない。
 
-`set_pitch_curve(mode="offset")`・`shift_pitch` を範囲で別々に当てた**境目の段差**にも、自動のなだらかさ（最大 250 ms、
+同一ソースの分割片を結合した境目には、新しい自動のなだらかさを付けない。手動のつなぎ設定は保持する。
+それ以外で `set_pitch_curve(mode="offset")`・`shift_pitch` を範囲で別々に当てた**境目の段差**には、自動のなだらかさ（最大 250 ms、
 ノートの長さの半分まで。`set_transition`）が掛かる。隣り合う範囲に大きく違う量を入れると、短い方の量が長い方へにじむ。
 1 本の曲線の中で値をなだらかにつないで渡せば段差にならない（`correct_to_guide(pitch_mode="contour")` はそうしている）。
 
@@ -751,11 +752,12 @@ move_boundary）は、範囲の端をまたぐ組があれば、時間の対応�
 
 | 取り消せる | 取り消せない（履歴に入らない） |
 |---|---|
-| ノートのピッチ・長さ・移動・分割・結合・接続／切り離し・なだらかさ・鉛筆・ガイドに合わせる・オリジナルに戻す・音素の境界・**歌詞**・トラックの追加・外す・位置・名前・種類（伴奏／ボーカル）・ガイドの指定 | ミュート／ソロ・音量・パン（聴き比べの操作。DAW と同じ）・表示・選択・編集対象の切り替え（`select_track`）・書き出し |
+| ノートのピッチ・長さ・移動・分割・結合・接続／切り離し・なだらかさ・鉛筆・ガイドに合わせる・オリジナルに戻す・音素の境界・**歌詞**・トラックの追加・外す・位置・名前・種類（伴奏／ボーカル）・ガイドの指定・単体版のミュート／ソロ／音量／パンと F0 方式・明示的な `import_edits` | ARA で DAW が所有するミキサー・ホスト起動時の `ara_restore`・表示・選択・編集対象の切り替え（`select_track`）・書き出し |
 
 - `undo()`（引数なし）: 履歴の最後の操作を取り消す。**別のトラックの操作なら、そのトラックを編集対象にしてから戻す**
   （返り値の `switched_to`。切り替わったら `analyze_take` を呼ぶ）。トラックの操作は前の状態（並び・位置・名前・種類・ガイド）に戻す
-  （ミュート／ソロ・音量・パンは今のまま）。外したトラックは同じ id・同じ並びで戻り、そのトラックの編集もそのまま
+  （単体版のミキサー操作は値も戻す）。外したトラックは同じ id・同じ並びで戻り、そのトラックの編集もそのまま
+- F0 方式の Undo／Redo は各トラックの解析方式も戻す。現在の解析と方式が違えば再解析し、編集が参照するノートとの対応を復元する。解析に失敗した場合は履歴の位置と変更前のプロジェクトを保つ
 - `redo()`: 直近に取り消した操作をやり直す。新しい操作を入れると、やり直しの列は捨てる
 - `shift_pitch(group=…)`: 同じ group の続けての呼び出しは 1 回の取り消しにまとめる（画面の複数ノートのピッチのドラッグ）
 - `shift_pitch(label=…)` / `apply_plan(label=…)`: 取り消しの履歴に出す名前（既定「ピッチ」「ノートの長さ」など。画面の「半音に合わせる」（Q）・右クリックの「つなぐ」が使う）
@@ -1001,7 +1003,7 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
 | `select_track(track_id)` | 編集対象を切り替える（返り値は `open_project` と同じ形）。伴奏は選べない |
 | `add_track(path, kind?, name?, offset_sec?, guide?, select?, author?)` | ファイルをトラックとして足す。`kind` 省略時はファイル名から推す（inst・karaoke・オケ・伴奏 など → `inst`）。`guide=true` でガイドに指定（もうあるファイルなら指定だけ）、`select=true` で編集対象に |
 | `remove_track(track_id, author?)` | セッションから外す（ファイルと、そのトラックの編集＝プロジェクトは消さない）。編集対象を外したら残りの最初のボーカルへ。ボーカルが 0 本になる外し方はできない。**同じファイルを `add_track` で足し直すと、前の id・前の編集のまま戻る**（最初のテイクも。issue #32） |
-| `set_track(track_id, name?, kind?, mute?, solo?, offset_sec?, index?, gain_db?, pan?, author?)` | 渡したものだけ変える。`gain_db` = 音量（dB。既定 0、−60〜+6 に丸め、−60 以下は無音 = −∞）、`pan` = 左右（−1〜+1、既定 0）。どちらも**再生（画面）だけ**に効き、書き出し（`export_wav`）・`render_tracks` の音のファイルには入らない。取り消しの対象外で、session（`.gliss`）には保存する。`offset_sec` で位置をずらす（負も可）。編集対象かガイドの位置が変わると開き直す（`reopened: true` → `analyze_take`）。`index` でトラックの並びの何番目に置くか（0 が一番上。範囲の外は端に丸める。issue #38。並びは見た目だけで、音・編集・ガイドとの対応は変わらない。取り消しの名前は「トラックの順番」） |
+| `set_track(track_id, name?, kind?, mute?, solo?, offset_sec?, index?, gain_db?, pan?, author?)` | 渡したものだけ変える。`gain_db` = 音量（dB。既定 0、−60〜+6 に丸め、−60 以下は無音 = −∞）、`pan` = 左右（−1〜+1、既定 0）。どちらも**再生（画面）だけ**に効き、書き出し（`export_wav`）・`render_tracks` の音のファイルには入らない。単体版ではミュート／ソロ・音量・パンも 1 回の変更として取り消せ、session（`.gliss`）に保存する。ARA の DAW ミキサーは対象外。`offset_sec` で位置をずらす（負も可）。編集対象かガイドの位置が変わると開き直す（`reopened: true` → `analyze_take`）。`index` でトラックの並びの何番目に置くか（0 が一番上。範囲の外は端に丸める。issue #38。並びは見た目だけで、音・編集・ガイドとの対応は変わらない。取り消しの名前は「トラックの順番」） |
 | `set_guide_track(track_id?, author?)` | ガイドを指定（null で外す）。変わったら `analyze_take` |
 | `make_score_guide(path, track?, bpm?, start_sec?, use?, name?, author?)` | **譜面（MIDI / SVP）からガイドを作る**（下の「譜面ガイド」）。合成音の WAV のトラックを足し、`use=true`（既定）ならガイドに指定。変わったら `analyze_take` |
 | `split_track(track_id, sec, author?)` | クリップを 1 か所で分ける（切れ目を足す。`cuts`）。`sec` は**トラックの頭が 0 の秒**（タイムラインの秒 − `offset_sec`）。両端から 20 ms より内側だけ・もう切れている所は不可。音は変わらない。取り消しの名前は「クリップを分ける」 |
@@ -1027,7 +1029,7 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
   WAV を別のファイルで上書きした（長さが違う）ときは印を使わない。
 - 譜面に無い所（ラップ・せりふ）は対応が付かない（直らない）。`fit` が 0.3 未満なら `warnings`（トラック・テンポ・頭を確かめる）。
 
-トラックの追加・外す・位置・名前・種類・並び順・ガイドの指定・テンポ・クリップの分割・部分のミュートは**取り消せる**（§2-9。ミュート／ソロ・音量・パンは取り消しの対象外）。
+トラックの追加・外す・位置・名前・種類・並び順・ガイドの指定・テンポ・クリップの分割・部分のミュートは**取り消せる**（§2-9。単体版のミュート／ソロ・音量・パンも対象）。
 
 **クリップを分ける・部分を消す**（トラックビューのはさみ・ミュートツール）: トラックの `cuts`（切れ目の秒の列）と `mutes`
 （消した区間 `[[始め, 終わり]…]`）。どちらも**トラックの頭（クリップなら頭）が 0 の秒**で持つので、`offset_sec` を動かすと
@@ -1185,7 +1187,7 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 | `ara_restore` | `ara_id`, `archive` | `{track, mismatch, reason?, edits, changesets, reopened, estimator_applied, estimator_note, session}`。編集を戻す（履歴に入れず、戻した changeset も Ctrl+Z の列に入れない）。素材の長さ・音の中身が違えば**戻さずに** `mismatch: true`（`ok` は true。プラグインはアーカイブを持ち続ける）。編集対象なら開き直す。`archive.f0_estimator`（補正を作った F0 の方式）があれば、その修飾の方式にする（`estimator_applied`。選んでいる方式・プラグインの既定の方式より優先し、裏の準備も追従する。後から届く `set_f0_estimator` でも外れない）。この PC で使えない方式（`rmvpe` の重みが無い・知らない名前）は当てず `estimator_note` に理由を返す。方式の記録が無い・合っていないアーカイブは、`ara_render_dirty` が直す（下） |
 | `ara_notes` | `ara_ids?`（省けば全部） | `{notes: {ara_id: {track, rev, state, edited, notes, source_notes}}, errors, missing}`。DAW に返すノート（ARA の content reader の `kARAContentTypeNotes`）。`state`: `ready`（解析が済んだ）/ `pending`（解析がまだ）/ `empty`（プロジェクトがまだ無い）。`ready` のときだけ `notes`（編集を当てた後。無音にしたノートは除く）と `source_notes`（解析だけ）が入る。どちらもソースの秒・頭の順・音程のあるノートだけで `[{id, start_sec, end_sec, hz, midi, volume}]`（位置・音程は `export_view_data` の `edited_start_sec`・`edited_end_sec`・`edited_pitch_midi` と同じ定義、`hz` はその Hz、`volume` はノートの音量の山を -60 dB → 0・0 dB → 1）。`edited` = 編集リストが空でない（プラグインは DAW に adjusted と出す）。`rev` は `ara_revs` と同じ。解析は待たない・始めない（裏の準備が済むと版が変わる）。編集対象は変えない |
 | `export_edits` | `gliss_path`（`.gliss`）, `track?`（id か名前。省けばボーカルが 1 本ならそれ）, `estimator?`（方式を決め打ちする）, `include_archive?`（既定 true） | `{archive, track: {id, name, sr, channels, source_frames, duration_sec, gliss}, material: {name, path, frames, sr, channels, sha256, clip_audio_sha256}, estimator, stats: {edits, changesets, undone, authors: {human, ai}, kinds, note_targets, changeset_authors}, not_transferred, warnings}`。**読むだけ**（許可なし）。`.gliss` のトラックの `take`・歌詞・`changesets`（author・取り消しの履歴ごと）を ARA のアーカイブ（`Project.to_archive()` の形）にする。`material` が素材の識別（`clip_audio_sha256` = 音の中身のハッシュ。ARA 側が照らす）。`estimator` = `estimator` 引数 → トラックに明示した方式（記録の無い `.gliss` は `null` で、`warnings` に出す）。`stats.note_targets` = ノートの ID に頼る編集の数（`target` が note・`connection`・`transition`・`merge`）。`not_transferred` = 移らないもの（`mutes`・`cuts`・ミキサー・ガイドの指定。`.gliss` のセッションの項目）。クリップ（素材の一部）のトラック・音声が無いトラック・編集がまだ無い（開いたことが無い）トラックはエラー。AI のエンジンが DAW の文書を選んでいる間も転送しない（ファイルを読むのは AI のエンジン） |
-| `import_edits` | `archive?` または `gliss_path?` + `track?`（どちらか 1 つ）, `replace?`（既定 false）, `estimator?`, `analyze?`（既定 true） | `{mismatch, imported, track, ara_id, edits, changesets, authors, estimator, estimator_applied, analysis: {estimator, ran}, missing_note_targets: {count, ids} \| null, replaced, not_transferred, warnings, next}`。**選んでいる修飾**（外部の AI は `ara_attach` で選ぶ）へ編集を当てる。許可は**編集**（`EDIT_TOOLS`。外部の AI は `ara_` で始まらない名前なので中継を通る。`GLISS_ARA_AI=read` は `permission: "edit"` で断る）。素材の長さ・音の中身が違えば**何も変えずに** `mismatch: true` と `reason`（`ok` は true）。修飾に別の編集があれば `replace: true` が要る（無ければエラー。`replaced` に消えた編集の数と author の内訳。同じ編集の入れ直しは要らない）。`estimator`（省けば `archive.f0_estimator`）はその修飾の方式にして（`ara_restore` と同じ）、解析がその方式でなければここで解析する（`analysis.ran`。`analyze: false` で省く）。ノートの ID に頼る編集の対象のノートが解析に無ければ `missing_note_targets`（解析が済んでいなければ `null`）と `warnings`。`author` は archive のまま保たれる（中継が `author` を `"ai"` に上書きするのは引数に `author` のあるツールだけで、このツールは取らない）。取り込んだ編集は `ara_restore` と同じく**取り消しの履歴（Ctrl+Z）に入らない**（1 つの undo にまとめる仕組みは無い。戻すには `undo(changeset_id)`・`reset_to_original(whole_track=true)`・元の編集の `replace: true`）。当てた後は外部の編集と同じ道で再合成・`ara_revs` の版・プラグインへの通知に乗る |
+| `import_edits` | `archive?` または `gliss_path?` + `track?`（どちらか 1 つ）, `replace?`（既定 false）, `estimator?`, `analyze?`（既定 true） | `{mismatch, imported, track, ara_id, edits, changesets, authors, estimator, estimator_applied, analysis: {estimator, ran}, missing_note_targets: {count, ids} \| null, replaced, not_transferred, warnings, next}`。**選んでいる修飾**（外部の AI は `ara_attach` で選ぶ）へ編集を当てる。許可は**編集**（`EDIT_TOOLS`。外部の AI は `ara_` で始まらない名前なので中継を通る。`GLISS_ARA_AI=read` は `permission: "edit"` で断る）。素材の長さ・音の中身が違えば**何も変えずに** `mismatch: true` と `reason`（`ok` は true）。修飾に別の編集があれば `replace: true` が要る（無ければエラー。`replaced` に消えた編集の数と author の内訳。同じ編集の入れ直しは要らない）。`estimator`（省けば `archive.f0_estimator`）はその修飾の方式にして（`ara_restore` と同じ）、解析がその方式でなければここで解析する（`analysis.ran`。`analyze: false` で省く）。ノートの ID に頼る編集の対象のノートが解析に無ければ `missing_note_targets`（解析が済んでいなければ `null`）と `warnings`。`author` は archive のまま保たれる（中継が `author` を `"ai"` に上書きするのは引数に `author` のあるツールだけで、このツールは取らない）。明示的な取り込みは置換前の補正を含めて **1 回の Ctrl+Z / Redo** で戻せる。ホスト起動時の `ara_restore` は履歴に入れない。当てた後は外部の編集と同じ道で再合成・`ara_revs` の版・プラグインへの通知に乗る |
 
 **差分の再合成**（`ara_render_dirty`。`render/region.py` の `EditCache` をファイルで渡すもの）:
 

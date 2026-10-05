@@ -29,9 +29,11 @@
 | kind | 中身 | 取り消し |
 |---|---|---|
 | `edit` | トラックのプロジェクトの changeset（1 つ以上。複数ノートのピッチのドラッグは 1 つにまとめる） | そのトラックを編集対象にして、changeset を後ろから undo |
-| `session` | トラックの追加・外す・位置・名前・種類・ガイドの指定。前後のスナップショット（トラックの並びとガイド） | 前のスナップショットに戻す（**ミュート／ソロ・ガイドの歌詞の控えは今のまま**） |
+| `session` | トラックの操作と前後のスナップショット | 前のスナップショットへ。単体版のミキサー操作ではミュート／ソロ・音量・パンも戻す |
+| `archive` | 明示的な ARA 補正インポートの前後 | 補正全体と解析方式を一操作で戻す。ホストの初期復元は履歴外 |
+| `estimator` | 単体版の F0 方式と各トラックの解析方式 | 方式を戻し、必要な解析を復元する |
 
-- 取り消せないもの: ミュート／ソロ・表示・選択・編集対象の切り替え（DAW と同じ線引き。`proposal/v3.html` §1）
+- 取り消せないもの: 表示・選択・編集対象の切り替え、ARA で DAW が所有するミキサー操作
 - 新しい操作を入れると、やり直しの列（末尾の取り消し済み）は捨てる
 - テンポ（`tempo`。issue #18）も `session` の項目に入る（スナップショットに含める）。ドラッグ・続けたホイールの変更は
   group で 1 つの項目にまとめる（`record_session(group=…)`）
@@ -758,14 +760,14 @@ class Session:
                 "tempo": copy.deepcopy(self.tempo)}
 
     @staticmethod
-    def structure(snap):
-        """スナップショットのうち、取り消しの対象になるところ（ミュート／ソロ・音量・パン・ガイドの歌詞の控えを除く）。"""
-        drop = ("mute", "solo", "gain_db", "pan", "guide_lyrics")
+    def structure(snap, include_mixer=False):
+        """スナップショットのうち、取り消しの対象になるところ。"""
+        drop = ("guide_lyrics",) if include_mixer else ("mute", "solo", "gain_db", "pan", "guide_lyrics")
         return {"tracks": [{k: v for k, v in t.items() if k not in drop} for t in snap["tracks"]],
                 "guide": snap.get("guide"), "tempo": snap.get("tempo")}
 
-    def restore(self, snap):
-        """スナップショットに戻す。ミュート／ソロ・音量・パン・ガイドの歌詞の控えは今のまま（取り消しの対象外）。
+    def restore(self, snap, include_mixer=False):
+        """スナップショットに戻す。通常の履歴ではミキサー値を保つ。単体版のミキサー操作だけ値を戻す。
 
         DAW（ARA）のセッションでは、ARA のトラック（有無・位置・名前・素材）と DAW のテンポ（source = "daw"）は
         今のまま（DAW が決めたもの）。戻すのはガイドの指定・画面で変えたテンポと、ARA でないトラック。"""
@@ -778,8 +780,9 @@ class Session:
             c = cur.get(t["id"])
             if c is None:
                 continue
-            t["mute"], t["solo"] = c.get("mute", False), c.get("solo", False)
-            t["gain_db"], t["pan"] = c.get("gain_db", 0.0), c.get("pan", 0.0)
+            if not include_mixer or self.ara:
+                t["mute"], t["solo"] = c.get("mute", False), c.get("solo", False)
+                t["gain_db"], t["pan"] = c.get("gain_db", 0.0), c.get("pan", 0.0)
             if c.get("guide_lyrics") is not None:
                 t["guide_lyrics"] = copy.deepcopy(c["guide_lyrics"])
             else:
@@ -871,8 +874,31 @@ class Session:
         self._trim()
         return e, dropped
 
+    def record_archive(self, track_id, before, after, estimator_before, estimator_after,
+                       mark_before, label="補正を取り込む", author="ai"):
+        """明示的な補正インポートを、置換前の補正も含む一操作にする。"""
+        self.ensure_history()
+        dropped = self._drop_redo_tail()
+        e = self._append({"kind": "archive", "track": track_id, "label": label,
+                          "author": author, "at": _now(), "before": before, "after": after,
+                          "estimator_before": estimator_before,
+                          "estimator_after": estimator_after,
+                          "mark_before": mark_before,
+                          "mark_after": int(self.history_marks.get(track_id) or 0)})
+        self._trim()
+        return e, dropped
+
+    def record_estimator(self, track_id, before, after):
+        """単体版の F0 方式を、トラックごとの明示方式と解析の復元情報ごと記録する。"""
+        self.ensure_history()
+        dropped = self._drop_redo_tail()
+        e = self._append({"kind": "estimator", "track": track_id, "label": "ピッチ検出の方式",
+                          "author": "human", "at": _now(), "before": before, "after": after})
+        self._trim()
+        return e, dropped
+
     def record_session(self, label, track_id, before, after, current_before=None,
-                       current_after=None, author="ai", group=None):
+                       current_after=None, author="ai", group=None, include_mixer=False):
         """トラックの操作を履歴に足す（変わっていなければ足さない）。(項目 | None, 捨てたやり直しの列)
 
         group が直前の項目（取り消していない `session`）と同じなら、その項目の after を差し替えて 1 つにまとめる
@@ -880,20 +906,21 @@ class Session:
         self.ensure_history()
         last = self.history[-1] if self.history else None
         if (group and last is not None and not last.get("undone") and last.get("group") == group
-                and last.get("kind") == "session"):
+                and last.get("kind") == "session" and bool(last.get("include_mixer")) == include_mixer):
             last["after"] = after
             last["label"] = label
             last["current_after"] = current_after
-            if self.structure(last["before"]) == self.structure(after):
+            if self.structure(last["before"], include_mixer) == self.structure(after, include_mixer):
                 self.history.pop()
                 return None, []
             return last, []
-        if self.structure(before) == self.structure(after):
+        if self.structure(before, include_mixer) == self.structure(after, include_mixer):
             return None, []
         dropped = self._drop_redo_tail()
         e = self._append({"kind": "session", "track": track_id, "label": label, "author": author,
                           "at": _now(), "before": before, "after": after,
-                          "current_before": current_before, "current_after": current_after})
+                          "current_before": current_before, "current_after": current_after,
+                          "include_mixer": include_mixer})
         if group:
             e["group"] = group
         self._trim()
