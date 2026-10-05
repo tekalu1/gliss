@@ -10,7 +10,7 @@
 //  - DAW の選択に画面が追従する（`selection`: 選ばれたリージョンのトラックに切り替え、表示範囲をリージョンに寄せる）
 //  - DAW の再生位置・ループを画面に出す（`playhead` → S.head・S.playing・S.loop）／画面の操作を DAW へ（transport）
 //  - リージョンの枠・キャッシュの状態（reading・syncing…）・エンジンの状態を、トラックビューとツールバーの札に出す
-import { S, toEdited, warp } from './state.js';
+import { S, warp } from './state.js';
 
 export const ARA = typeof window !== 'undefined' && window.api?.mode === 'ara';
 if (ARA) document.documentElement.dataset.mode = 'ara';
@@ -19,7 +19,7 @@ const A = {
   transport: true,          // ホストが ARA の再生の制御を持つ（bootstrap.hostCanTransport）。持たなければ再生ボタンを隠す
   fileGuide: false,         // ファイル > ガイドを開く…（C++ が ara_add_file_guide に言い換える）を出す
   compare: false,
-  regions: new Map(),       // トラック id → [{ id, song_start, song_end, mod_start, mod_end }]（ソングの秒・修飾＝ソースの秒）
+  regions: new Map(),       // トラック id → [{ id, song_start, song_end, mod_start, mod_end }]（ソング秒・修飾の出力秒）
   cache: new Map(),         // トラック id → { state, progress, error }
   engine: { state: 'ready', error: null },
   sel: null,                // 最後の選択（{ track_id, ara_id, region }）
@@ -54,7 +54,8 @@ export function araEditorHead() {
   }
   if (!r) return null;
   const modSec = r.mod_start + (S.head - r.song_start) / araScale(r);
-  return S.off + warp(toEdited(modSec));
+  // mod は既に編集済 PCM の出力秒。toEdited を再適用するとタイミング編集が二重になる。
+  return S.off + warp(modSec);
 }
 /** トラックビュー・見出しを描き直すかの判定に足す（リージョンとキャッシュの状態）。 */
 export const araSig = () => (ARA ? JSON.stringify([[...A.regions], [...A.cache].map(([k, v]) => [k, v.state])]) : '');

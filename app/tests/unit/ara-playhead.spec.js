@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test('ARA position uses host timestamps, keeps song/source axes separate, and snaps to seek, loop and stop', async () => {
+test('ARA position uses host timestamps, keeps song/output axes separate, and snaps to seek, loop and stop', async () => {
   const original = Object.getOwnPropertyDescriptor(globalThis, 'performance');
   const oldWindow = globalThis.window;
   const oldDocument = globalThis.document;
@@ -51,13 +51,13 @@ test('ARA position uses host timestamps, keeps song/source axes separate, and sn
     expect(S.head).toBeCloseTo(10.11, 6);
     now = 300; frame();
     expect(S.head).toBeCloseTo(10.11, 6);
-    // The lower bar uses the same edited and temporary display axis as notes.
+    // ARA mod time indexes rendered output PCM; applying time_map again would double a timing edit.
     S.vd = { time_map: { src_sec: [0, 4], out_sec: [0, 8] } };
-    expect(araEditorHead() - S.off).toBeCloseTo(4.11, 6);
-    S.bounds = [{ index: 0, edited_sec: 4 }, { index: 1, edited_sec: 5 }];
-    S.local.btime.set(0, 4.2); S.local.btime.set(1, 5.2);
+    expect(araEditorHead() - S.off).toBeCloseTo(2.055, 6);
+    S.bounds = [{ index: 0, edited_sec: 2 }, { index: 1, edited_sec: 3 }];
+    S.local.btime.set(0, 2.2); S.local.btime.set(1, 3.2);
     invalidateWarp();
-    expect(araEditorHead() - S.off).toBeCloseTo(4.31, 6);
+    expect(araEditorHead() - S.off).toBeCloseTo(2.255, 6);
     S.head = 9; // song gap: no lower playhead or follow target
     expect(araEditorHead()).toBeNull();
     S.local.btime.clear(); S.bounds = []; invalidateWarp();
