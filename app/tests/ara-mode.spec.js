@@ -521,6 +521,9 @@ test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリ�
     ] }] });
     document.dispatchEvent(new Event('visibilitychange'));
   }, id);
+  await expect.poll(() => win.evaluate(() => document.querySelectorAll('#lanes [data-region]').length)).toBeGreaterThan(0);
+  const inside = await win.evaluate((trackId) => (window.__app.S.tracks.find((t) => t.id === trackId).offset_sec || 0) + 1, id);
+  await emit('playhead', { song_sec: inside, playing: false, loop: null });
   await expect.poll(() => win.evaluate(() => document.querySelector('#roll #ph')?.style.display)).not.toBe('none');
   await clearCalls();
   const r = await win.locator('#tvRuler').boundingBox();
