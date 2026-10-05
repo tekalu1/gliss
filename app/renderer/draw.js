@@ -15,6 +15,7 @@ import {
 } from './grid.js';
 import { renderTempo } from './tempo.js';
 import { bandColor, desat, lineColorer } from './corr.js';
+import { araEditorHead } from './ara.js';
 
 const { KEYS_W, SCALE_H, LANE_H, EDGE } = LAYOUT;
 const { TAKE, GUIDE, SEL, WAS, AI: AI_EDGE } = COLORS;
@@ -1112,7 +1113,7 @@ export function render() {
       + `<rect x="${f1(lx)}" y="${ROLL_B}" width="${f1(lw)}" height="${LANE_H}" fill="none" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;
   }
 
-  s += `<g id="ph" transform="translate(${f1(X(S.head - S.off))},0)" pointer-events="none">`
+  s += `<g id="ph" transform="translate(${f1(X(araEditorHead() - S.off))},0)" pointer-events="none">`
     + `<line x1="0" y1="0" x2="0" y2="${H}" stroke="${SEL}" stroke-width="1"/>`
     + `<path d="M-4,0 L4,0 L0,6 Z" fill="${SEL}"/></g>`;
 
@@ -1178,7 +1179,7 @@ function scaleSvg() {
 
 export function movePlayhead() {
   const g = svg?.querySelector('#ph');
-  if (g) g.setAttribute('transform', `translate(${f1(X(S.head - S.off))},0)`);
+  if (g) g.setAttribute('transform', `translate(${f1(X(araEditorHead() - S.off))},0)`);
   const c = document.querySelector('#clock');
   if (c) c.textContent = fmtTime(S.head);
   for (const fn of hooks.head) fn();
@@ -1188,7 +1189,7 @@ export function movePlayhead() {
  * ヘッダーの「再生位置に追従」（F。issue #40）がオフなら送らない。 */
 export function follow() {
   if (!S.vd || S.drag || !G.follow) return;
-  const t = S.head - S.off;
+  const t = araEditorHead() - S.off;
   const total = totalSec();
   if (t < 0 || t > total) return;                   // 編集中のトラックの外（他のトラックだけ鳴っている）
   const v = S.view;

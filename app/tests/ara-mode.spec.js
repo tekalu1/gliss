@@ -7,7 +7,7 @@
 //        ショートカットだけがある。キーも割り当てない
 //   (A3) セッションが来る（session-changed）→ 編集対象を解析して描く。M・S は出さない
 //   (A4) 再生ボタン・Space は DAW の再生の制御（transport('toggle')）。Web Audio では鳴らさない
-//   (A5) playhead イベント: 再生位置（そのトラックの編集の秒 → タイムライン）・再生中・ループが画面に出る
+//   (A5) playhead イベント: 上段と時計はソング秒、下段は代表位置の編集秒で描き、再生中とループを表示する
 //   (A6) クリップの位置は動かせない（下半分のドラッグ）。右クリックのメニューは「ガイド」だけ・「ここを下に表示」だけ
 //   (A7) ルーラーのクリック → seek、ドラッグ → loop（上下とも）。クリックはループを解除しない。メニューの「ループを解除」→ loop(null)
 //   (A8) selection イベント: DAW で選ばれたリージョンのトラックに切り替え、表示範囲をリージョンに寄せる。同じトラックなら表示範囲だけ
@@ -250,17 +250,16 @@ test('(A4) 再生ボタン・Space は DAW の再生の制御へ（Web Audio で
   expect(await win.evaluate(() => window.__app.playState())).toBeNull();
 });
 
-test('(A5) playhead: 再生位置・再生中・ループが画面に出る', async () => {
-  const id = await current();
-  const off = await win.evaluate(() => window.__app.S.off);
-  await emit('playhead', { song_sec: 9.9, playing: true, loop: null, mapped: { [id]: 1.25 } });
-  await expect.poll(() => win.evaluate(() => window.__app.S.head)).toBeCloseTo(off + 1.25, 6);   // 鳴っているリージョンの中の編集の秒
+test('(A5) playhead: ソング秒・再生中・ループが画面に出る', async () => {
+  await emit('playhead', { song_sec: 1.25, playing: false, loop: null });
+  expect(await win.evaluate(() => window.__app.S.head)).toBeCloseTo(1.25, 6);
+  expect(await win.evaluate(() => document.querySelector('#clock').textContent)).toBe('0:01.250');
+  await emit('playhead', { song_sec: 1.25, playing: true, loop: null });
   expect(await win.evaluate(() => window.__app.S.playing)).toBe(true);
   expect(await win.evaluate(() => ({ stop: !document.querySelector('#icStop').hasAttribute('hidden'), play: !document.querySelector('#icPlay').hasAttribute('hidden') }))).toEqual({ stop: true, play: false });
-  expect(await win.evaluate(() => document.querySelector('#clock').textContent)).toBe('0:01.250');
-  // 鳴っていない（そのトラックに対応するリージョンが無い）ときはソングの秒のまま
-  await emit('playhead', { song_sec: 2.5, playing: true, loop: null, mapped: { [id]: null } });
-  await expect.poll(() => win.evaluate(() => window.__app.S.head)).toBeCloseTo(2.5, 6);
+  // リージョンがない位置でもソング秒を保持する
+  await emit('playhead', { song_sec: 2.5, playing: false, loop: null });
+  expect(await win.evaluate(() => window.__app.S.head)).toBeCloseTo(2.5, 6);
   // ループ（タイムラインの秒のまま）
   await emit('playhead', { song_sec: 1, playing: true, loop: [0.5, 2], mapped: {} });
   await expect.poll(() => win.evaluate(() => window.__app.S.loop)).toEqual([0.5, 2]);
@@ -268,6 +267,62 @@ test('(A5) playhead: 再生位置・再生中・ループが画面に出る', as
   await expect.poll(() => win.evaluate(() => window.__app.S.loop)).toBeNull();
   expect(await win.evaluate(() => window.__app.S.playing)).toBe(false);
   expect(await win.evaluate(() => ({ stop: !document.querySelector('#icStop').hasAttribute('hidden'), play: !document.querySelector('#icPlay').hasAttribute('hidden') }))).toEqual({ stop: false, play: true });
+});
+
+test('(A5b) 複製・伸縮リージョンでも下段ヘッドと追従は代表位置を使い、時計はソング秒を保つ', async () => {
+  const id = await current();
+  const original = await win.evaluate((trackId) => {
+    const s = window.__app.S;
+    return { off: s.off, trackOff: s.tracks.find((t) => t.id === trackId).offset_sec,
+      view: { ...s.view }, follow: window.__app.grid().follow };
+  }, id);
+  try {
+    await win.evaluate((trackId) => {
+      window.__app.S.tracks.find((t) => t.id === trackId).offset_sec = 1.25;
+      window.__app.S.off = 1.25;
+      window.api.__araSetHost({ tracks: [{ track_id: trackId, regions: [
+        { id: 'representative', song_start: 2, song_end: 4, mod_start: 0.5, mod_end: 2.5 },
+        { id: 'duplicate', song_start: 8, song_end: 12, mod_start: 0.5, mod_end: 2.5 },
+      ] }] });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, id);
+    await expect.poll(() => win.evaluate(() => document.querySelectorAll('#lanes [data-region]').length)).toBeGreaterThanOrEqual(2);
+    // 8.8 秒は伸縮率 2 の複製内で、代表位置 1.25 + 0.5 + 0.8 / 2 = 2.15 秒。
+    await emit('playhead', { song_sec: 8.8, playing: false, loop: null });
+    const first = await win.evaluate(async () => {
+      const { X } = await import('../renderer/draw.js');
+      const s = window.__app.S;
+      return { song: s.head, clock: document.querySelector('#clock').textContent,
+        x: Number(/translate\(([-\d.]+)/.exec(document.querySelector('#roll #ph').getAttribute('transform'))[1]),
+        expected: X(2.15 - s.off) };
+    });
+    expect(first.song).toBeCloseTo(8.8, 6);
+    expect(first.clock).toBe('0:08.800');
+    expect(first.x).toBeCloseTo(first.expected, 1);
+    await win.evaluate(() => { window.__app.S.view.t0 = 0; window.__app.S.view.span = 0.5; window.__app.setGrid({ follow: true }); });
+    await emit('playhead', { song_sec: 8.9, playing: false, loop: null });
+    const moved = await win.evaluate(async () => {
+      const { X } = await import('../renderer/draw.js');
+      const s = window.__app.S;
+      return { t0: s.view.t0, song: s.head, clock: document.querySelector('#clock').textContent,
+        x: Number(/translate\(([-\d.]+)/.exec(document.querySelector('#roll #ph').getAttribute('transform'))[1]),
+        expected: X(1.25 + 0.5 + 0.9 / 2 - s.off) };
+    });
+    expect(moved.t0).toBeGreaterThan(0.8);
+    expect(moved.x).toBeCloseTo(moved.expected, 1);
+    expect(moved.song).toBeCloseTo(8.9, 6);
+    expect(moved.clock).toBe('0:08.900');
+  } finally {
+    await win.evaluate((data) => {
+      const s = window.__app.S;
+      s.tracks.find((t) => t.id === data.id).offset_sec = data.trackOff;
+      s.off = data.off;
+      s.view = data.view;
+      window.api.__araSetHost({ tracks: [{ track_id: data.id, regions: [] }] });
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.__app.setGrid({ follow: data.follow });
+    }, { ...original, id });
+  }
 });
 
 test('(A6) クリップの位置は動かせない・右クリックのメニューは DAW が決めないものだけ', async () => {
