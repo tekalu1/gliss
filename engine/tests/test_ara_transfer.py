@@ -578,6 +578,48 @@ def test_ara_current_estimator_is_explicit_and_undoable(tr, tmp_path, monkeypatc
     assert s.estimator_of(t) == "gliss" and F.chosen_estimator() == before
 
 
+@pytest.mark.parametrize("legacy_history", [False, True])
+def test_v2_ara_estimator_undo_restores_model_version_and_note_targets(tr, tmp_path, legacy_history):
+    m, a, md, R = tr
+    from vocal_engine.analysis import f0 as F
+    from vocal_engine.project import Project
+    from vocal_engine.project.model import Target
+
+    src = _wav(tmp_path / "media" / "synthetic.wav", _voice())
+    old = Project.open(src, project_dir=str(tmp_path / "old-project"))
+    old.f0_model_version = F.GLISS_F0_V2_VERSION
+    old.analyze(estimator="gliss", auto_lyrics=False)
+    note = next(n for n in old.take_notes if n.kind == "note")
+    old.apply_edits([{"kind": "pitch_shift", "target": Target.note(note.id), "params": {"cents": 80}}])
+    archive = old.to_archive()
+    archive.pop("f0_estimator_version")
+    old_f0 = old.take_f0.f0.copy()
+
+    _daw_doc(a, tmp_path, src)
+    _ok(a.ara_restore("mod-1", archive))
+    _ok(m.analyze_take(background=False))
+    p = m._state["project"]
+    assert p.take_f0.meta["version"] == F.GLISS_F0_V2_VERSION
+    _ok(m.set_f0_estimator("praat", scope="current"))
+    _ok(m.analyze_take(background=False))
+    s = m._state["session"]
+    entry = s.history[-1]
+    assert entry["kind"] == "estimator"
+    assert entry["before"]["tracks"][entry["track"]]["model_version"] == F.GLISS_F0_V2_VERSION
+    if legacy_history:
+        for side in ("before", "after"):
+            entry[side]["tracks"][entry["track"]].pop("model_version")
+        s.save()
+    assert _ok(m.undo())["undone"]["kind"] == "estimator"
+    assert p.take_f0.meta["version"] == F.GLISS_F0_V2_VERSION
+    assert np.array_equal(p.take_f0.f0, old_f0)
+    assert p._missing_note_targets() == []
+    reloaded = Project(s.project_dir_of(s.find_ara("mod-1"))).load()
+    assert reloaded.f0_model_version == F.GLISS_F0_V2_VERSION
+    assert _ok(m.redo())["redone"]["kind"] == "estimator"
+    assert p.analysis["take"]["estimator"] == "praat"
+
+
 def test_standalone_estimator_undo_restores_analysis_and_note_edits(tr, tmp_path):
     m, a, md, R = tr
     from vocal_engine import mcp_tracks as mt

@@ -115,8 +115,13 @@ def estimator_snapshot(s, track_ids=None):
             rows[t["id"]] = {"pref": t.get("estimator"), "effective": None, "analyzed": False}
             continue
         q.estimator_pref = t.get("estimator")
-        rows[t["id"]] = {"pref": t.get("estimator"), "effective": q.f0_estimator(),
-                         "analyzed": bool((q.analysis or {}).get("take"))}
+        effective = q.f0_estimator()
+        take = (q.analysis or {}).get("take") or {}
+        model_version = (q.f0_model_version or
+                         (take.get("estimator_version") if take.get("estimator") == "gliss" else None) or
+                         F.estimator_version("gliss")) if effective == "gliss" else None
+        rows[t["id"]] = {"pref": t.get("estimator"), "effective": effective,
+                         "analyzed": bool(take), "model_version": model_version}
     return {"chosen": F.chosen_estimator(), "tracks": rows}
 
 
@@ -169,9 +174,17 @@ def _restore_estimator_history(s, state):
                     continue
                 q.estimator_pref = pref
                 est = row.get("effective")
+                old_version = q.f0_model_version
+                if est == "gliss":
+                    # 旧履歴には版が無い。その履歴が作られたときの同梱モデルは v2。
+                    q.f0_model_version = row.get("model_version", F.GLISS_F0_V2_VERSION)
+                else:
+                    q.f0_model_version = None
                 if est and (row.get("analyzed") or (q.analysis or {}).get("take")) and not q.analysis_cached(est):
                     with prep.exclusive(q.dir):
                         q.analyze(estimator=est)
+                elif q.f0_model_version != old_version:
+                    q.save()
                 if is_cur:
                     _srv._invalidate_renderer()
     except BaseException:
