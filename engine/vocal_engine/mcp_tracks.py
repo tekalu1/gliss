@@ -18,7 +18,7 @@ import json
 import os
 import shutil
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 import numpy as np
 import soundfile as sf
@@ -27,6 +27,7 @@ from . import log
 from . import mcp_server as _srv
 from . import prep
 from .project import Project, ProjectError
+from .project.store import replace_file
 from .project.session import (CUT_EPS, CUT_MIN_EDGE, MUTE_MIN, SessionError, covered, norm_gain_db, norm_mutes,
                               norm_pan, pieces_of, subtract_range)
 
@@ -143,6 +144,17 @@ def _recover_projects(paths):
             raise
 
 
+@contextmanager
+def _estimator_exclusive(s, track_ids=None):
+    """方式の履歴とプロジェクトを保存し終えるまで、対象の裏準備を止める。"""
+    paths = [s.project_dir_of(t) for t in s.vocal_tracks()
+             if track_ids is None or t["id"] in track_ids]
+    with ExitStack() as guard:
+        for path in dict.fromkeys(paths):
+            guard.enter_context(prep.exclusive(path))
+        yield
+
+
 def _restore_estimator_history(s, state):
     """方式名を戻すだけで終わらせず、保存された方式で解析を復元する。"""
     from .analysis import f0 as F
@@ -152,49 +164,73 @@ def _restore_estimator_history(s, state):
         est = row.get("effective")
         if est == "rmvpe" and not F.rmvpe_available():
             raise ProjectError("ピッチ検出の方式を復元できない: rmvpe の重みが無い")
-    old_chosen = F.chosen_estimator()
-    old_tracks = copy.deepcopy(s.tracks)
-    cur = _srv._state.get("project")
-    paths = [s.project_dir_of(s.track(tid)) for tid in rows if any(t["id"] == tid for t in s.tracks)]
-    try:
-        with _recover_projects(paths):
-            F.set_preferred_estimator(state.get("chosen"))
-            for tid, row in rows.items():
-                try:
-                    t = s.track(tid)
-                except ProjectError:
-                    continue
-                pref = row.get("pref")
-                if pref is None:
-                    t.pop("estimator", None)
-                else:
-                    t["estimator"] = pref
-                q, is_cur = _track_project(s, t)
-                if q is None:
-                    continue
-                q.estimator_pref = pref
-                est = row.get("effective")
-                old_version = q.f0_model_version
-                if est == "gliss":
-                    # 旧履歴には版が無い。その履歴が作られたときの同梱モデルは v2。
-                    q.f0_model_version = row.get("model_version", F.GLISS_F0_V2_VERSION)
-                else:
-                    q.f0_model_version = None
-                if est and (row.get("analyzed") or (q.analysis or {}).get("take")) and not q.analysis_cached(est):
-                    with prep.exclusive(q.dir):
-                        q.analyze(estimator=est)
-                elif q.f0_model_version != old_version:
-                    q.save()
-                if is_cur:
-                    _srv._invalidate_renderer()
-    except BaseException:
-        F.set_preferred_estimator(old_chosen)
-        s.tracks = old_tracks
-        if cur is not None:
-            cur.load()
-            cur._forget_analysis()
-        raise
-    _schedule(s)
+    F.set_preferred_estimator(state.get("chosen"))
+    for tid, row in rows.items():
+        try:
+            t = s.track(tid)
+        except ProjectError:
+            continue
+        pref = row.get("pref")
+        if pref is None:
+            t.pop("estimator", None)
+        else:
+            t["estimator"] = pref
+        q, is_cur = _track_project(s, t)
+        if q is None:
+            continue
+        q.estimator_pref = pref
+        est = row.get("effective")
+        old_version = q.f0_model_version
+        if est == "gliss":
+            # 旧履歴には版が無い。その履歴が作られたときの同梱モデルは v2。
+            q.f0_model_version = row.get("model_version", F.GLISS_F0_V2_VERSION)
+        else:
+            q.f0_model_version = None
+        if est and (row.get("analyzed") or (q.analysis or {}).get("take")) and not q.analysis_cached(est):
+            q.analyze(estimator=est)
+        elif q.f0_model_version != old_version:
+            q.save()
+        if is_cur:
+            _srv._invalidate_renderer()
+
+
+def _commit_estimator_history(s, e, state, undone):
+    """解析・方式・履歴印を同時に確定し、保存失敗時はすべて戻す。"""
+    from .analysis import f0 as F
+
+    rows = state["tracks"]
+    paths = [s.project_dir_of(t) for t in s.tracks if t["id"] in rows]
+    with _estimator_exclusive(s, set(rows)):
+        old_chosen = F.chosen_estimator()
+        old_tracks = copy.deepcopy(s.tracks)
+        old_history = copy.deepcopy(s.history)
+        old_marks = dict(s.history_marks)
+        with open(s.path, "rb") as f:
+            old_session = f.read()
+        cur = _srv._state.get("project")
+        try:
+            with _recover_projects(paths):
+                _restore_estimator_history(s, state)
+                e["undone"] = undone
+                s.save()
+                _schedule(s)
+        except BaseException:
+            F.set_preferred_estimator(old_chosen)
+            s.tracks, s.history, s.history_marks = old_tracks, old_history, old_marks
+            with open(s.path, "rb") as f:
+                changed = f.read() != old_session
+            if changed:
+                with tempfile.NamedTemporaryFile(dir=s.dir, prefix="session-rollback-",
+                                                 suffix=".tmp", delete=False) as f:
+                    f.write(old_session)
+                    tmp = f.name
+                replace_file(tmp, s.path)
+            s._sig = s._stat()
+            if cur is not None:
+                cur.load()
+                cur._forget_analysis()
+            _srv._invalidate_renderer()
+            raise
 
 
 def prep_target(p):
@@ -1040,9 +1076,7 @@ def history_undo():
         raise ProjectError("取り消せる変更が無い")
     switched, reopened = None, False
     if e.get("kind") == "estimator":
-        _restore_estimator_history(s, e["before"])
-        e["undone"] = True
-        s.save()
+        _commit_estimator_history(s, e, e["before"], True)
     elif e.get("kind") == "archive":
         tid = _restore_archive_history(s, e, "before")
         e["undone"] = True
@@ -1090,9 +1124,7 @@ def history_redo():
         raise ProjectError("やり直せる変更が無い")
     switched, reopened = None, False
     if e.get("kind") == "estimator":
-        _restore_estimator_history(s, e["after"])
-        e["undone"] = False
-        s.save()
+        _commit_estimator_history(s, e, e["after"], False)
     elif e.get("kind") == "archive":
         tid = _restore_archive_history(s, e, "after")
         e["undone"] = False

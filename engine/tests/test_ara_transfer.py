@@ -207,6 +207,35 @@ def test_existing_edits_need_replace(tr, tmp_path):
     assert r["imported"] and r["replaced"] is None and r["edits"] == n_edits
 
 
+@pytest.mark.parametrize("outcome", ["pending", "failed"])
+def test_import_commits_before_prep_join_failure(tr, tmp_path, monkeypatch, outcome):
+    """取込後の準備が遅延・失敗しても、成功した取込を失敗応答にしない。"""
+    m, a, md, _ = tr
+    from vocal_engine import prep
+
+    gl, src, _, n_edits, _ = _standalone(m, md, tmp_path)
+    arc = _ok(a.export_edits(gl, estimator="praat"))["archive"]
+    _daw_doc(a, tmp_path, src)
+    monkeypatch.setattr(prep, "enabled", lambda: True)
+    monkeypatch.setattr(prep, "schedule", lambda *args, **kwargs: None)
+
+    def join(*_args, **_kwargs):
+        if outcome == "pending":
+            raise prep.PreparationPending("synthetic preparation delay")
+        return {"state": prep.FAILED, "error": "synthetic preparation failure"}
+
+    monkeypatch.setattr(prep, "join", join)
+    result = _ok(a.import_edits(archive=arc))
+    assert result["imported"] and result["edits"] == n_edits
+    assert any("編集は取り込んだ" in warning for warning in result["warnings"])
+    s = m._state["session"]
+    history_count = len(s.history)
+    assert s.history[-1]["kind"] == "archive"
+    assert _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]["changesets"] == arc["changesets"]
+    assert _ok(a.import_edits(archive=arc))["imported"]
+    assert len(s.history) == history_count
+
+
 def test_explicit_import_replaces_and_restores_prior_edits_in_one_step(tr, tmp_path):
     m, a, md, R = tr
     gl, src, ref, n_edits, tid = _standalone(m, md, tmp_path)
@@ -395,6 +424,7 @@ def test_v2_ara_archive_without_cache_preserves_note_target_on_restore(tr, tmp_p
     from vocal_engine.analysis import f0 as F
     from vocal_engine.project import Project
     from vocal_engine.project.model import Target
+    from vocal_engine.render.region import RegionRenderer, render_region
 
     src = _wav(tmp_path / "media" / "synthetic.wav", _voice())
     p = Project.open(src, project_dir=str(tmp_path / "old-project"))
@@ -413,9 +443,14 @@ def test_v2_ara_archive_without_cache_preserves_note_target_on_restore(tr, tmp_p
     q = m._state["project"]
     q.ensure_analyzed()                       # 新しい作業場所には解析キャッシュがない
     assert q.take_f0.meta["version"] == F.GLISS_F0_V2_VERSION
-    assert np.array_equal(q.take_f0.f0, old_f0)
+    # キャッシュの F0 は JSON に小数4桁で保存する。裏準備から読んだ値もその精度で比べる。
+    assert np.array_equal(np.round(q.take_f0.f0, 4), np.round(old_f0, 4))
     assert q._missing_note_targets() == []
     assert q.to_archive()["f0_estimator_version"] == F.GLISS_F0_V2_VERSION
+    expected, _ = render_region(p, renderer=RegionRenderer.for_project(p, channels="all"))
+    actual, _ = render_region(q, renderer=RegionRenderer.for_project(q, channels="all"))
+    diff = np.asarray(actual, dtype="float64") - np.asarray(expected, dtype="float64")
+    assert np.max(np.abs(diff)) < 0.001
 
 
 def test_archive_without_a_recorded_estimator_keeps_the_analysed_one(tr, tmp_path):
@@ -570,12 +605,84 @@ def test_ara_current_estimator_is_explicit_and_undoable(tr, tmp_path, monkeypatc
     r = _ok(m.set_f0_estimator("gliss", scope="current"))
     assert r["effective"] == "gliss" and r["changed"] is True
     assert s.estimator_of(t) == "gliss" and F.chosen_estimator() == before
+    pending_archive = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    assert pending_archive["f0_estimator"] == "gliss"
+    assert pending_archive["f0_estimator_version"] == F.estimator_version("gliss")
     _ok(m.analyze_take(background=False))
     assert m._state["project"].analysis["take"]["estimator"] == "gliss"
     assert _ok(m.undo())["undone"]["kind"] == "estimator"
     assert s.estimator_of(t) == "praat" and m._state["project"].analysis["take"]["estimator"] == "praat"
     assert _ok(m.redo())["redone"]["kind"] == "estimator"
     assert s.estimator_of(t) == "gliss" and F.chosen_estimator() == before
+
+
+def test_ara_estimator_undo_restores_drawn_audio_and_archive(tr, tmp_path, monkeypatch):
+    """方式を往復しても、鉛筆を当てた音と保存用方式を元に戻す。"""
+    m, a, _, _ = tr
+    from vocal_engine.analysis import f0 as F
+    from vocal_engine import prep
+    from vocal_engine.project.session import Session
+
+    F.set_preferred_estimator(None)
+    F.set_default_estimator("gliss")
+    src = _wav(tmp_path / "media" / "synthetic.wav", _voice())
+    daw_src, _ = _daw_doc(a, tmp_path, src)
+    _ok(m.analyze_take(background=False))
+    notes = _ok(m.list_notes(kind="note"))["notes"]
+    s0 = round(notes[0]["start_sec"] + 0.12, 3)
+    _ok(m.set_pitch_curve([[s0, 60.0], [s0 + 0.06, 61.2]],
+                          mode="draw", author="human"))
+    _ok(m.stretch(1.12, note_id=notes[1]["id"], author="human"))
+    _ok(m.undo())
+    mid = round((notes[2]["start_sec"] + notes[2]["end_sec"]) / 2, 3)
+    split = _ok(m.split_note(mid, note_id=notes[2]["id"], author="human"))
+    _ok(m.merge_notes(split["left"], split["right"], author="human"))
+    before = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    cache = Cache(daw_src)
+    cache.sync(a, "mod-1")
+    before_pcm = cache.buf.copy()
+    before_notes = [n.id for n in m._state["project"].take_notes]
+    assert before["f0_estimator"] == "gliss"
+    assert any(e["kind"] == "pitch_draw" for c in before["changesets"]
+               for op in c["ops"] if (e := op.get("edit")))
+    assert not np.array_equal(before_pcm, Cache(daw_src).buf)
+
+    scheduled = []
+    schedule = prep.schedule
+
+    def observe_schedule(session, current=Ellipsis):
+        disk = Session.load(session.dir)
+        scheduled.append((session.estimator_of(session.find_ara("mod-1")),
+                          disk.estimator_of(disk.find_ara("mod-1"))))
+        return schedule(session, current=current)
+
+    monkeypatch.setattr(prep, "schedule", observe_schedule)
+    _ok(m.set_f0_estimator("praat", scope="current"))
+    _ok(m.analyze_take(background=False))
+    cache.sync(a, "mod-1")
+    assert not np.array_equal(cache.buf, before_pcm)
+    assert _ok(m.undo())["undone"]["kind"] == "estimator"
+    cache.sync(a, "mod-1")
+    assert _ok(m.redo())["redone"]["kind"] == "estimator"
+    cache.sync(a, "mod-1")
+    assert _ok(m.undo())["undone"]["kind"] == "estimator"
+    session = m._state["session"]
+    if prep.enabled():
+        prep.join(session.dir, session.find_ara("mod-1")["id"])
+
+    restored = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    final_sync = cache.sync(a, "mod-1")
+    restored_pcm = cache.buf.copy()
+    assert restored == before
+    assert np.array_equal(restored_pcm, before_pcm)
+    assert [n.id for n in m._state["project"].take_notes] == before_notes
+    assert final_sync["rev"] != cache.calls[-2]["rev"]
+    assert scheduled and all(memory == disk for memory, disk in scheduled), scheduled
+
+    reopened_src, _ = _daw_doc(a, tmp_path, src, key="reopened", ara_id="mod-reopened")
+    _ok(a.ara_restore("mod-reopened", restored))
+    _ok(m.analyze_take(background=False))
+    assert np.array_equal(_sync_all(a, "mod-reopened", reopened_src).buf, before_pcm)
 
 
 @pytest.mark.parametrize("legacy_history", [False, True])
@@ -686,6 +793,47 @@ def test_estimator_undo_failure_restores_two_tracks_and_history(tr, tmp_path, mo
     for tid in ids:
         p = Project(s.project_dir_of(s.track(tid))).load()
         assert p.analysis["take"]["estimator"] == "praat"
+
+
+def test_estimator_undo_save_failure_restores_project_and_session(tr, tmp_path, monkeypatch):
+    """解析復元後に session の保存が失敗しても、音と履歴印を元へ戻す。"""
+    m, a, _, _ = tr
+    from vocal_engine.project.session import Session
+
+    src = _wav(tmp_path / "media" / "synthetic.wav", _voice())
+    daw_src, _ = _daw_doc(a, tmp_path, src)
+    _ok(m.set_f0_estimator("gliss", scope="current"))
+    _ok(m.analyze_take(background=False))
+    _ok(m.set_f0_estimator("praat", scope="current"))
+    _ok(m.analyze_take(background=False))
+    before = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    before_pcm = _sync_all(a, "mod-1", daw_src).buf.copy()
+    s = m._state["session"]
+    with open(s.path, "rb") as f:
+        before_session = f.read()
+    real_save = s.save
+    failed = False
+
+    def fail_after_write():
+        nonlocal failed
+        result = real_save()
+        if not failed and s.history[-1]["undone"]:
+            failed = True
+            raise RuntimeError("synthetic session save failure")
+        return result
+
+    monkeypatch.setattr(s, "save", fail_after_write)
+    result = m.undo()
+    assert result["ok"] is False and "synthetic session save failure" in result["error"]
+    assert failed
+    with open(s.path, "rb") as f:
+        assert f.read() == before_session
+    assert Session.load(s.dir).history[-1]["undone"] is False
+    assert s.history[-1]["undone"] is False
+    assert _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"] == before
+    assert np.array_equal(_sync_all(a, "mod-1", daw_src).buf, before_pcm)
+    monkeypatch.setattr(s, "save", real_save)
+    assert _ok(m.undo())["undone"]["kind"] == "estimator"
 
 
 def test_merge_keeps_both_draws_timing_and_lyrics(tr, tmp_path):

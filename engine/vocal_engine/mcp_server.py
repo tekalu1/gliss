@@ -2329,51 +2329,58 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
     def now():
         return p.f0_estimator() if p is not None else f0mod.resolve_estimator()
 
-    before, chosen = now(), f0mod.chosen_estimator()
     s = _mcp_tracks._session(required=scope == "current") if scope != "default" else None
     tid = _mcp_tracks.current_track_id() if scope == "current" else None
-    if scope == "current" and (tid is None or s.track(tid)["kind"] != "vocal"):
-        raise ProjectError("方式を変更するボーカルトラックが選ばれていない")
     track_ids = {tid} if tid else None
-    history_before = (_mcp_tracks.estimator_snapshot(s, track_ids) if s is not None and
-                      (scope == "current" or not s.ara) else None)
-    old_tracks = copy.deepcopy(s.tracks) if history_before is not None else None
-    old_history = copy.deepcopy(s.history) if history_before is not None else None
-    old_marks = dict(s.history_marks) if history_before is not None else None
-    try:
-        if scope == "default":
-            f0mod.set_default_estimator(estimator)
-            cleared = False
-        elif scope == "all":
-            f0mod.set_preferred_estimator(estimator)
-            cleared = _mcp_tracks.forget_track_estimators()  # 明示した方式は全体の方式に戻る
-        else:
-            if estimator not in f0mod.ESTIMATORS:
-                raise ProjectError("estimator は %s のどれか（%r は知らない）" %
-                                   (" / ".join(f0mod.ESTIMATORS), estimator))
-            t = s.track(tid)
-            t["estimator"] = estimator
-            if p is not None:
-                p.estimator_pref = estimator
-            cleared = old_tracks != s.tracks
-        effective = now()
-        if effective != before or f0mod.chosen_estimator() != chosen or cleared:
-            _mcp_tracks.reschedule_prep()
+    guard = (_mcp_tracks._estimator_exclusive(s, track_ids) if s is not None
+             else contextlib.nullcontext())
+    with guard:
+        # 実行中だった旧方式の準備が離れてから、解析・方式の snapshot を読む。
+        if p is not None:
+            p.reload_if_changed()
+        if scope == "current" and (tid is None or s.track(tid)["kind"] != "vocal"):
+            raise ProjectError("方式を変更するボーカルトラックが選ばれていない")
+        before, chosen = now(), f0mod.chosen_estimator()
+        history_before = (_mcp_tracks.estimator_snapshot(s, track_ids) if s is not None and
+                          (scope == "current" or not s.ara) else None)
+        old_tracks = copy.deepcopy(s.tracks) if history_before is not None else None
+        old_history = copy.deepcopy(s.history) if history_before is not None else None
+        old_marks = dict(s.history_marks) if history_before is not None else None
+        try:
+            if scope == "default":
+                f0mod.set_default_estimator(estimator)
+                cleared = False
+            elif scope == "all":
+                f0mod.set_preferred_estimator(estimator)
+                cleared = _mcp_tracks.forget_track_estimators()  # 明示した方式は全体の方式に戻る
+            else:
+                if estimator not in f0mod.ESTIMATORS:
+                    raise ProjectError("estimator は %s のどれか（%r は知らない）" %
+                                       (" / ".join(f0mod.ESTIMATORS), estimator))
+                t = s.track(tid)
+                t["estimator"] = estimator
+                if p is not None:
+                    p.estimator_pref = estimator
+                cleared = old_tracks != s.tracks
+            effective = now()
+            if effective != before or f0mod.chosen_estimator() != chosen or cleared:
+                if history_before is not None:
+                    history_after = _mcp_tracks.estimator_snapshot(s, track_ids)
+                    _, dropped = s.record_estimator(_mcp_tracks.current_track_id(),
+                                                    history_before, history_after)
+                    _mcp_tracks._discard_dropped(s, dropped)
+                    s.save()
+                # 裏の準備は session.json を読み直す。保存した方式で入れ直す。
+                _mcp_tracks.reschedule_prep()
+        except BaseException:
             if history_before is not None:
-                history_after = _mcp_tracks.estimator_snapshot(s, track_ids)
-                _, dropped = s.record_estimator(_mcp_tracks.current_track_id(),
-                                                history_before, history_after)
-                _mcp_tracks._discard_dropped(s, dropped)
+                f0mod.set_preferred_estimator(chosen)
+                s.tracks, s.history, s.history_marks = old_tracks, old_history, old_marks
+                if p is not None:
+                    tid = _mcp_tracks.current_track_id()
+                    p.estimator_pref = s.track(tid).get("estimator") if tid else None
                 s.save()
-    except BaseException:
-        if history_before is not None:
-            f0mod.set_preferred_estimator(chosen)
-            s.tracks, s.history, s.history_marks = old_tracks, old_history, old_marks
-            if p is not None:
-                tid = _mcp_tracks.current_track_id()
-                p.estimator_pref = s.track(tid).get("estimator") if tid else None
-            s.save()
-        raise
+            raise
     return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
                estimators=list(f0mod.ESTIMATORS),
                rmvpe_model_found=f0mod.rmvpe_available(),

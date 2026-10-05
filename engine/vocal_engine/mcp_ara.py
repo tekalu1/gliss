@@ -247,12 +247,14 @@ def _archive_of(t, pdir):
     q = Project(pdir).load()
     take = q.take
     q.take = q.guide = None
+    # 明示方式を先に反映し、方式名とモデル版を同じ解析先から作る。
+    # 後から方式名だけ上書きすると、解析待ちの保存で Gliss 版が null になる。
+    q.estimator_pref = t.get("estimator")
     arc = q.to_archive()
     known = t.get("ara_audio_sha") if take and take.get("sha256") == t.get("sha256") else None
     arc["take"] = _ref(take, known)
     arc["guide"] = None
     (arc.get("lyrics") or {}).pop("guide", None)
-    arc["f0_estimator"] = t.get("estimator") or arc.get("f0_estimator")     # トラックで明示した方式 → 前に解析した方式
     return arc
 
 
@@ -1033,7 +1035,6 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
         return _ok(track=t["id"], ara_id=t["ara_id"], mismatch=True, imported=False, reason=why)
     pdir = s.project_dir_of(t)
     replaced = None
-    before_archive = _archive_of(t, pdir)
     before_estimator = t.get("estimator")
     s.ensure_history()
     mark_before = int(s.history_marks.get(t["id"]) or 0)
@@ -1053,22 +1054,36 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
     old_history = copy.deepcopy(s.history)
     old_marks = dict(s.history_marks)
     dropped = []
+    ran, analysis_error = False, None
     try:
-        with _mt._recover_projects([pdir]):
-            est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
-            p = _restore_into(s, t, archive, forget_history=False)
-            pref = s.estimator_of(t)
-            p.estimator_pref = pref
-            after_archive = _archive_of(t, pdir)
-            if before_archive is None:
-                before_archive = copy.deepcopy(after_archive)
-                before_archive.update(changesets=[], seq={"edit": 0, "changeset": 0},
-                                      lyrics={}, auto_lyrics_attempted=False,
-                                      f0_estimator=before_estimator)
-            if not _json_equal(before_archive, after_archive) or before_estimator != t.get("estimator"):
-                entry, dropped = s.record_archive(t["id"], before_archive, after_archive,
-                                                  before_estimator, t.get("estimator"), mark_before)
-            s.save()
+        # 裏準備が一時キャッシュを書き終えるまで待ってから、復元前の控えを作る。
+        with prep.exclusive(pdir):
+            before_archive = _archive_of(t, pdir)
+            with _mt._recover_projects([pdir]):
+                est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
+                p = _restore_into(s, t, archive, forget_history=False)
+                pref = s.estimator_of(t)
+                p.estimator_pref = pref
+                after_archive = _archive_of(t, pdir)
+                if before_archive is None:
+                    before_archive = copy.deepcopy(after_archive)
+                    before_archive.update(changesets=[], seq={"edit": 0, "changeset": 0},
+                                          lyrics={}, auto_lyrics_attempted=False,
+                                          f0_estimator=before_estimator)
+                if not _json_equal(before_archive, after_archive) or before_estimator != t.get("estimator"):
+                    entry, dropped = s.record_archive(t["id"], before_archive, after_archive,
+                                                      before_estimator, t.get("estimator"), mark_before)
+                s.save()
+                if analyze and est:
+                    try:
+                        if not p.analysis_cached(est):
+                            p.analyze(estimator=est)
+                            ran = True
+                    except Exception as e:       # noqa: BLE001  編集は取り込んだ。解析は analyze_take で
+                        analysis_error = str(e)
+                        log.get().warning("取り込んだ後の解析に失敗: %s", e)
+                        warnings.append("解析に失敗した（analyze_take(estimator=%r) でやり直す）: %s" % (est, e))
+                _mt._schedule(s)
     except BaseException:
         t.clear()
         t.update(old_track)
@@ -1079,6 +1094,16 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
             cur.load()
             cur._forget_analysis()
         raise
+    if analyze and analysis_error is None and prep.enabled():
+        try:
+            prepared = prep.join(s.dir, t["id"])
+            if prepared and prepared.get("state") == prep.FAILED:
+                raise ProjectError(prepared.get("error") or "裏の準備に失敗した")
+            p.reload_if_changed()
+        except Exception as e:                   # noqa: BLE001  取り込みと履歴の保存は既に完了した
+            analysis_error = str(e)
+            log.get().warning("取り込み後の準備が未完了: %s", e)
+            warnings.append("編集は取り込んだ。準備は未完了（後で解析をやり直す）: %s" % e)
     _mt._discard_dropped(s, dropped)
     if note:
         warnings.append(note)
@@ -1087,17 +1112,6 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
         cur.load()                               # 画面の編集対象が古い Project のまま（同じトラック）: 読み直す
         cur._forget_analysis()
         cur.estimator_pref = pref
-    ran, analysis_error = False, None
-    if analyze and est:
-        try:
-            if not p.analysis_cached(est):
-                with prep.exclusive(p.dir):
-                    p.analyze(estimator=est)
-                ran = True
-        except Exception as e:                   # noqa: BLE001  編集は取り込んだ。解析は analyze_take で
-            analysis_error = str(e)
-            log.get().warning("取り込んだ後の解析に失敗: %s", e)
-            warnings.append("解析に失敗した（analyze_take(estimator=%r) でやり直す）: %s" % (est, e))
     if ran and cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
         cur.load()
         cur._forget_analysis()
@@ -1111,7 +1125,6 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
         if ids:
             warnings.append("ノートの ID に頼る編集 %d 件の対象のノートが無い（解析の方式が補正を作った方式と違う）。"
                             "estimator を合わせる" % len(ids))
-    _mt._schedule(s)
     st = _tr.edit_stats(archive)
     ta = (p.analysis or {}).get("take") or {}
     return _ok(track=t["id"], ara_id=t["ara_id"], mismatch=False, imported=True, edits=len(p.edits),
