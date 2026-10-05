@@ -1052,10 +1052,23 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
     old_track = copy.deepcopy(t)
     old_history = copy.deepcopy(s.history)
     old_marks = dict(s.history_marks)
+    dropped = []
     try:
         with _mt._recover_projects([pdir]):
             est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
             p = _restore_into(s, t, archive, forget_history=False)
+            pref = s.estimator_of(t)
+            p.estimator_pref = pref
+            after_archive = _archive_of(t, pdir)
+            if before_archive is None:
+                before_archive = copy.deepcopy(after_archive)
+                before_archive.update(changesets=[], seq={"edit": 0, "changeset": 0},
+                                      lyrics={}, auto_lyrics_attempted=False,
+                                      f0_estimator=before_estimator)
+            if not _json_equal(before_archive, after_archive) or before_estimator != t.get("estimator"):
+                entry, dropped = s.record_archive(t["id"], before_archive, after_archive,
+                                                  before_estimator, t.get("estimator"), mark_before)
+            s.save()
     except BaseException:
         t.clear()
         t.update(old_track)
@@ -1066,11 +1079,9 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
             cur.load()
             cur._forget_analysis()
         raise
+    _mt._discard_dropped(s, dropped)
     if note:
         warnings.append(note)
-    pref = s.estimator_of(t)
-    p.estimator_pref = pref
-    s.save()
     cur = _srv._state.get("project")
     if cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
         cur.load()                               # 画面の編集対象が古い Project のまま（同じトラック）: 読み直す
@@ -1090,17 +1101,6 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
     if ran and cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
         cur.load()
         cur._forget_analysis()
-    after_archive = _archive_of(t, pdir)
-    if before_archive is None:
-        before_archive = copy.deepcopy(after_archive)
-        before_archive.update(changesets=[], seq={"edit": 0, "changeset": 0},
-                              lyrics={}, auto_lyrics_attempted=False,
-                              f0_estimator=before_estimator)
-    if not _json_equal(before_archive, after_archive) or before_estimator != t.get("estimator"):
-        entry, dropped = s.record_archive(t["id"], before_archive, after_archive,
-                                          before_estimator, t.get("estimator"), mark_before)
-        _mt._discard_dropped(s, dropped)
-        s.save()
     _srv._invalidate_renderer()
     _drop_render(t["ara_id"])
     missing = None

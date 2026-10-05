@@ -2309,10 +2309,11 @@ def engine_info(reload_addons: bool = False) -> dict:
 
 @_tool
 def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict:
-    """ピッチ（F0）検出の方式を選ぶ（このエンジン全体。画面の「ピッチ検出の方式」）。曲は変えない。
+    """ピッチ（F0）検出の方式を選ぶ。変更範囲は scope で指定する。
 
     estimator: "rmvpe"（既定。重みは別に取得）/ "gliss"（Gliss の F0 モデル。同梱）/ "praat"。
-    scope: "all"（画面のエンジンの既定）= この後の analyze_take・裏の準備がこの方式で解析する
+    scope: "current" = 選択中のトラック（ARA では現在の修飾）だけに方式を明示する。履歴で戻せる。
+      "all"（画面のエンジンの既定）= この後の analyze_take・裏の準備がこの方式で解析する
       （前に別の方式で解析した曲も、トラックで明示した方式も、この方式で解析し直す）。選ぶまでは、曲ごとに前に解析した
       方式（まだ解析していない曲は既定の "rmvpe"）で解析する。
       "default"（DAW のプラグインのエンジンの既定）= 方式の決まっていない新しい修飾だけの既定にする。前に解析した方式・
@@ -2322,15 +2323,20 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
     """
     p = _project(required=False)
     scope = scope or ("default" if bridge.is_ara() else "all")
-    if scope not in ("all", "default"):
-        raise ProjectError("scope は all か default（%r は知らない）" % scope)
+    if scope not in ("all", "default", "current"):
+        raise ProjectError("scope は all、default、current のいずれか（%r は知らない）" % scope)
 
     def now():
         return p.f0_estimator() if p is not None else f0mod.resolve_estimator()
 
     before, chosen = now(), f0mod.chosen_estimator()
-    s = _mcp_tracks._session(required=False) if scope == "all" else None
-    history_before = _mcp_tracks.estimator_snapshot(s) if s is not None and not s.ara else None
+    s = _mcp_tracks._session(required=scope == "current") if scope != "default" else None
+    tid = _mcp_tracks.current_track_id() if scope == "current" else None
+    if scope == "current" and (tid is None or s.track(tid)["kind"] != "vocal"):
+        raise ProjectError("方式を変更するボーカルトラックが選ばれていない")
+    track_ids = {tid} if tid else None
+    history_before = (_mcp_tracks.estimator_snapshot(s, track_ids) if s is not None and
+                      (scope == "current" or not s.ara) else None)
     old_tracks = copy.deepcopy(s.tracks) if history_before is not None else None
     old_history = copy.deepcopy(s.history) if history_before is not None else None
     old_marks = dict(s.history_marks) if history_before is not None else None
@@ -2338,14 +2344,23 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
         if scope == "default":
             f0mod.set_default_estimator(estimator)
             cleared = False
-        else:
+        elif scope == "all":
             f0mod.set_preferred_estimator(estimator)
             cleared = _mcp_tracks.forget_track_estimators()  # 明示した方式は全体の方式に戻る
+        else:
+            if estimator not in f0mod.ESTIMATORS:
+                raise ProjectError("estimator は %s のどれか（%r は知らない）" %
+                                   (" / ".join(f0mod.ESTIMATORS), estimator))
+            t = s.track(tid)
+            t["estimator"] = estimator
+            if p is not None:
+                p.estimator_pref = estimator
+            cleared = old_tracks != s.tracks
         effective = now()
         if effective != before or f0mod.chosen_estimator() != chosen or cleared:
             _mcp_tracks.reschedule_prep()
             if history_before is not None:
-                history_after = _mcp_tracks.estimator_snapshot(s)
+                history_after = _mcp_tracks.estimator_snapshot(s, track_ids)
                 _, dropped = s.record_estimator(_mcp_tracks.current_track_id(),
                                                 history_before, history_after)
                 _mcp_tracks._discard_dropped(s, dropped)

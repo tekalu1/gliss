@@ -244,7 +244,7 @@ F0（10 ms ホップ）→ 音符のかたまり →（ガイドがあれば）D
 そのトラックで明示した方式 → 選んだ方式（画面の 編集 > ピッチ検出の方式・`set_f0_estimator`。画面は起動時に環境変数 `GLISS_F0_ESTIMATOR` で渡す）→
 その曲を前に解析した方式（`project.json` の `analysis.take.estimator`。記録の無い古い解析は `rmvpe`）→ 既定の `rmvpe`。
 `rmvpe` になったのに重みが無ければ `gliss`。RMVPE の重みを後から取った・消したときや既定を替えたときも、前に解析・編集した曲は前の方式のまま（音符の区切りと、付けた編集の当たり方を変えない）。
-**`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator` で選び直すと、全体の方式に戻る（DAW のプラグインのエンジンでは、`set_f0_estimator` は「方式の決まっていない曲の既定」で、トラックの方式も前に解析した方式も変えない。§3-4）。
+**`estimator` を渡して解析した方式は、そのトラックの方式として覚える**（session に保存。以後 `estimator` を省いた `analyze_take` も裏の準備もその方式で、既定の方式で解析し直して差し替えない）。`set_f0_estimator(scope="current")` は選択中のトラックだけの方式を明示し、Undo で戻せる。`scope="all"` は全体の方式へ戻す。DAW のプラグインのエンジンで `scope` を省くと `default` となり、トラックの方式も前に解析した方式も変えない（§3-4）。
 
 | `estimator` | 中身 |
 |---|---|
@@ -840,7 +840,7 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `prep_status()` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない |
 | `pause_prep(paused?)` | 裏の準備を一時停止／再開（走っている段は最後まで進み、次の段の前で止まる。合流して待っているトラックは止めない） |
 | `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝これから解析する曲の方式（選んだ方式か既定）、`f0_estimator_chosen`＝選んだ方式（選んでいなければ null）、`f0_estimator_effective`＝開いている曲で実際に使う方式、`f0_estimator_default`、`f0_estimators`、`gliss_f0_model_found`） |
-| `set_f0_estimator(estimator?, scope?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`。曲は変えない）。`scope`: `all`（画面のエンジンの既定）= そのエンジン全体の方式にする。この後の `analyze_take`・裏の準備がその方式で解析する（前に別の方式で解析した曲も解析し直す。`analyze_take(estimator=…)` でトラックごとに明示した方式は、ここで選び直すと外れる）。`default`（DAW のプラグインのエンジン（`GLISS_CLIENT=ara`）の既定）= 方式の決まっていない曲（まだ解析しておらず、方式も明示していない修飾）だけの既定にする。前に解析した方式・トラックで明示した方式（`ara_restore`・`import_edits`・`analyze_take(estimator=…)` で決まったもの）は変えない（プラグインは起動のたびに設定の方式を渡す。それで開き直した曲の補正の解析が変わらないように）。返り値の `effective` が開いている曲で実際に使う方式（`rmvpe` を選んでいても重みが無ければ `gliss`）。画面が起動したエンジンと AI のエンジンは別のプロセスなので、AI 側で呼んでも画面の方式は変わらない |
+| `set_f0_estimator(estimator?, scope?)` | ピッチ検出の方式を選ぶ（`rmvpe`（既定）/ `gliss` / `praat`）。`scope="current"` は選択中のボーカルトラック（ARA では現在の修飾）だけに明示し、Undo/Redo の履歴に加える。他の修飾やエンジン全体の選択は変えない。続けて `analyze_take(background=false)` を呼ぶと新しい方式で解析する。`scope="all"` はエンジン全体の方式を選び、トラックごとの明示方式を外す（単体版では履歴に加える）。`scope="default"` は方式の決まっていない新しい修飾だけの既定を変える。ARA で `scope` を省くと `default`、単体版で省くと `all`。返り値の `effective` と `engine_info.f0_estimator_effective` が現在のトラックの実効方式。画面が起動したエンジンと AI のエンジンは別プロセス |
 
 `backend` は `praat`（既定。Praat（praat-parselmouth）の TD-PSOLA）、`psola`（自前の TD-PSOLA）、`world` のどれか。
 praat-parselmouth が import できない環境では `praat` を頼んでも `psola` で再合成し、engine.log に警告を書く

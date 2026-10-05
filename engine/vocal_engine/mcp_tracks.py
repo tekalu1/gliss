@@ -102,12 +102,14 @@ def forget_track_estimators():
     return bool(had)
 
 
-def estimator_snapshot(s):
+def estimator_snapshot(s, track_ids=None):
     """方式変更前後の明示方式と、各トラックに必要な解析方式を保存する。"""
     from .analysis import f0 as F
 
     rows = {}
     for t in s.vocal_tracks():
+        if track_ids is not None and t["id"] not in track_ids:
+            continue
         q, _ = _track_project(s, t)
         if q is None:
             rows[t["id"]] = {"pref": t.get("estimator"), "effective": None, "analyzed": False}

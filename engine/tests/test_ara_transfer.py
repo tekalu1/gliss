@@ -245,6 +245,8 @@ def test_import_analysis_failure_still_has_undo(tr, tmp_path, monkeypatch):
 
     def fail_gliss(self, *args, **kwargs):
         if kwargs.get("estimator") == "gliss":
+            self.analysis["take"] = {"estimator": "gliss", "partial": True}
+            self.save()
             raise RuntimeError("synthetic analysis failure")
         return real(self, *args, **kwargs)
 
@@ -255,6 +257,50 @@ def test_import_analysis_failure_still_has_undo(tr, tmp_path, monkeypatch):
     assert _ok(m.undo())["undone"]["kind"] == "archive"
     restored = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
     assert restored["changesets"] == old["changesets"]
+    assert m._state["project"].analysis["take"]["estimator"] != "gliss"
+    monkeypatch.setattr(Project, "analyze", real)
+    assert _ok(m.redo())["redone"]["kind"] == "archive"
+    assert _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]["changesets"] == arc["changesets"]
+
+
+def test_archive_undo_analysis_failure_keeps_import_and_history(tr, tmp_path, monkeypatch):
+    m, a, md, R = tr
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.project import Project
+
+    gl, src, _, _, _ = _standalone(m, md, tmp_path)
+    arc = _ok(a.export_edits(gl, estimator="praat"))["archive"]
+    _daw_doc(a, tmp_path, src)
+    _ok(m.analyze_take(background=False))
+    nid = _ok(m.list_notes(kind="note"))["notes"][1]["id"]
+    _ok(m.shift_pitch(70, note_id=nid, author="human"))
+    _ok(a.import_edits(archive=arc, replace=True))
+    imported = _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"]
+    before_history = copy.deepcopy(m._state["session"].history)
+    real_cached, real_analyze = Project.analysis_cached, Project.analyze
+
+    def uncached(self, estimator=None, **kwargs):
+        return False if estimator == "praat" else real_cached(self, estimator, **kwargs)
+
+    def fail_restore(self, *args, **kwargs):
+        if kwargs.get("estimator") == "praat":
+            self.analysis["take"] = {"estimator": "praat", "partial": True}
+            self.save()
+            raise RuntimeError("synthetic archive restore failure")
+        return real_analyze(self, *args, **kwargs)
+
+    monkeypatch.setattr(Project, "analysis_cached", uncached)
+    monkeypatch.setattr(Project, "analyze", fail_restore)
+    r = m.undo()
+    assert r["ok"] is False and "synthetic archive restore failure" in r["error"]
+    assert m._state["session"].history == before_history
+    with open(m._state["session"].path, encoding="utf-8") as f:
+        assert json.load(f)["history"] == before_history
+    assert mt.history_summary()["undo"]["kind"] == "archive"
+    assert _ok(a.ara_archive(["mod-1"]))["archives"]["mod-1"]["archive"] == imported
+    monkeypatch.setattr(Project, "analysis_cached", real_cached)
+    monkeypatch.setattr(Project, "analyze", real_analyze)
+    assert _ok(m.undo())["undone"]["kind"] == "archive"
 
 
 def test_export_edits_errors_and_empty_track(tr, tmp_path):
@@ -481,6 +527,29 @@ def test_set_f0_estimator_scope(tr, tmp_path, monkeypatch):
     assert F.chosen_estimator() == "praat"
 
 
+def test_ara_current_estimator_is_explicit_and_undoable(tr, tmp_path, monkeypatch):
+    m, a, md, R = tr
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.analysis import f0 as F
+
+    gl, src, _, _, _ = _standalone(m, md, tmp_path)
+    _as_plugin(monkeypatch)
+    _daw_doc(a, tmp_path, src)
+    _ok(a.import_edits(gliss_path=gl, estimator="praat"))
+    s = m._state["session"]
+    t = s.find_ara("mod-1")
+    before = F.chosen_estimator()
+    r = _ok(m.set_f0_estimator("gliss", scope="current"))
+    assert r["effective"] == "gliss" and r["changed"] is True
+    assert s.estimator_of(t) == "gliss" and F.chosen_estimator() == before
+    _ok(m.analyze_take(background=False))
+    assert m._state["project"].analysis["take"]["estimator"] == "gliss"
+    assert _ok(m.undo())["undone"]["kind"] == "estimator"
+    assert s.estimator_of(t) == "praat" and m._state["project"].analysis["take"]["estimator"] == "praat"
+    assert _ok(m.redo())["redone"]["kind"] == "estimator"
+    assert s.estimator_of(t) == "gliss" and F.chosen_estimator() == before
+
+
 def test_standalone_estimator_undo_restores_analysis_and_note_edits(tr, tmp_path):
     m, a, md, R = tr
     from vocal_engine import mcp_tracks as mt
@@ -537,6 +606,8 @@ def test_estimator_undo_failure_restores_two_tracks_and_history(tr, tmp_path, mo
     assert result["ok"] is False and "synthetic second track failure" in result["error"]
     assert mt.history_summary()["undo"]["kind"] == "estimator"
     assert F.chosen_estimator() == "gliss"
+    with open(s.path, encoding="utf-8") as f:
+        assert json.load(f)["history"][-1]["undone"] is False
     for tid in ids:
         p = Project(s.project_dir_of(s.track(tid))).load()
         assert p.analysis["take"]["estimator"] == "gliss"
