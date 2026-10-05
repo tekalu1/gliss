@@ -42,7 +42,8 @@ export const S = {
   showGuide: true,
   showAllBounds: false, // 音素境界の全高表示。吸着・編集には影響しない
   sel: [],             // 選択中のノート id
-  loop: null,          // [t0, t1]（編集後の時間）
+  loop: null,          // [t0, t1]（ソング秒。ARA ではホスト通知だけで更新）
+  araLoopDraft: null,  // { trackId, range }。下段スケールの出力秒で、S.loop とは別に描く
   head: 0,
   playing: false,
   drag: null,

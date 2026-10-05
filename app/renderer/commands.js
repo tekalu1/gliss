@@ -7,7 +7,7 @@
 // キーとメニューバーからは ctx 無し（選択・再生位置が対象）。
 // スナップ（時間 N・音程 Shift+N）と表示の設定は grid.js（issue #18）。
 // ホイールの操作（縦・横のズームとスクロール。issue #27）も WHEEL の表に持ち、キーと同じ設定画面で変える。
-import { S, histLabel, isSel, spanOf, targets, toSource, totalSec } from './state.js';
+import { S, histLabel, isSel, spanOf, targets, toSource, totalSec, unwarp } from './state.js';
 import { askAi, canAskAi } from './askai.js';
 import { render, renderToolbar } from './draw.js';
 import {
@@ -17,7 +17,7 @@ import { G, saveGrid } from './grid.js';
 import { openTempoInput } from './tempo.js';
 import { beginSelectedAudition, closePop, closeTr, endAudition, openPop, openTr, setTool } from './interact.js';
 import { play, previewEnabled, setPreviewEnabled, stop } from './audio.js';
-import { ARA, araCompare, araFeatures, araTransport } from './ara.js';
+import { ARA, araCompare, araEditorHead, araEditorRegion, araFeatures, araTransport } from './ara.js';
 import { status } from './engine.js';
 import { startRename } from './tracks.js';
 import { guideShown, guideWhy } from './session.js';
@@ -72,7 +72,13 @@ const editable = () => selectedNotes().filter((n) => n.pitch_editable);
 
 /** 分ける（Alt+X / 右クリックの「ここで分ける」）。t: 編集後の秒（省くと再生位置）。 */
 function splitAt(ctx) {
-  const t = ctx?.t != null ? ctx.t : S.head - S.off;
+  const head = ctx?.t == null ? araEditorHead() : null;
+  if (ctx?.t == null && head == null) { status('再生位置がこのトラックのイベントの外にある'); return null; }
+  const t = ctx?.t != null ? ctx.t : head - S.off;
+  const edited = unwarp(t);
+  if (edited == null || (ARA && !araEditorRegion(edited))) {
+    status('このトラックのイベントの外では分割できない'); return null;
+  }
   const n = ctx?.noteId ? S.byId.get(ctx.noteId)
     : S.pitched.find((x) => {
       const [a, b] = spanOf(x);
@@ -80,7 +86,7 @@ function splitAt(ctx) {
     });
   if (!n || n.kind !== 'note') { status('分けるノートが無い（再生位置を選んだノートの上に置く）'); return null; }
   if (!idle()) { status('前の編集を当てている間は分割しない。当て終わってからもう一度'); return null; }
-  const src = toSource(t);
+  const src = toSource(edited);
   if (src < n.start_sec + CUT_MIN_SEC || src > n.end_sec - CUT_MIN_SEC) {
     status('ノートの端に近すぎる（両端から 20 ms 以上内側で分ける）');
     return null;

@@ -65,6 +65,51 @@ export function araToRep(t, tl) {
   return (t.offset_sec || 0) + r.mod_start + (tl - r.song_start) / araScale(r);
 }
 
+/** 表示中の修飾のリージョン。エンジンの track とホストの選択の切替中も画面の track を優先する。 */
+export function araEditorTrack() {
+  return S.tracks.find((x) => S.projectDir && x.project_dir && norm(x.project_dir) === norm(S.projectDir))
+    || S.tracks.find((x) => x.id === S.session?.current) || null;
+}
+
+/** mod 秒は編集済 PCM の出力秒。選択イベント、現在の再生イベント、最初の配置の順で対応を選ぶ。 */
+export function araRegionForMod(regions, sec, selectedId = '', currentSong = NaN, allowEnd = false) {
+  if (!Number.isFinite(sec)) return null;
+  const contains = (r) => r.mod_end > r.mod_start && r.song_end > r.song_start && sec >= r.mod_start
+    && (sec < r.mod_end || (allowEnd && Math.abs(sec - r.mod_end) < 1e-9));
+  const preferred = selectedId && regions.find((r) => r.id === selectedId && contains(r));
+  if (preferred) return preferred;
+  const current = regions.filter((r) => currentSong >= r.song_start && currentSong < r.song_end && contains(r))
+    .sort((a, b) => b.song_start - a.song_start)[0];
+  return current || regions.filter(contains).sort((a, b) => a.song_start - b.song_start)[0] || null;
+}
+
+export function araEditorRegion(sec, allowEnd = false) {
+  const track = araEditorTrack();
+  if (!track) return null;
+  const regions = A.regions.get(track.id) || [];
+  const selected = A.sel?.track_id === track.id ? A.sel.region?.id || '' : '';
+  return araRegionForMod(regions, sec, selected, S.head, allowEnd);
+}
+
+/** 下段の固定した出力秒から DAW をシーク。S.head はホスト通知だけで更新する。 */
+export function araSeekEditor(sec) {
+  const r = araEditorRegion(sec);
+  const song = r ? r.song_start + (sec - r.mod_start) * araScale(r) : null;
+  return song === null ? Promise.resolve({ ok: false, reason: 'no-region' }) : araTransport('seek', { song_sec: song });
+}
+
+/** ループの両端は同一のイベントへ対応させる。song 値はホストから通知されるまで書かない。 */
+export function araLoopEditor(a, b) {
+  const r = araEditorRegion(a);
+  if (!r || !Number.isFinite(b) || b <= a || b > r.mod_end + 1e-9) {
+    return Promise.resolve({ ok: false, reason: 'no-region' });
+  }
+  const scale = araScale(r);
+  A.loopHold = 0;
+  return araTransport('loop', { a: r.song_start + (a - r.mod_start) * scale,
+    b: r.song_start + (b - r.mod_start) * scale });
+}
+
 /** タイムラインの範囲 [頭, 終わり] を、リージョンの範囲まで広げる（複製したリージョンが代表の位置より後ろにあるとき）。 */
 export function araExtent(tl) {
   if (!ARA) return tl;
@@ -157,7 +202,7 @@ export function onPlayhead(p) {
   const loop = Array.isArray(p.loop) && p.loop.length === 2 ? [p.loop[0], p.loop[1]] : null;
   const loopChanged = A.transport && performance.now() > A.loopHold
     && JSON.stringify(loop) !== JSON.stringify(S.loop);
-  if (loopChanged) { S.loop = loop; H.render?.(); }
+  if (loopChanged) { S.loop = loop; S.araLoopDraft = null; H.render?.(); }
   H.follow?.();
   H.movePlayhead?.();
   if (was !== playing) {
@@ -221,6 +266,7 @@ export function pullHostState() {
         }
         if (h.engine) A.engine = { state: h.engine.state || 'ready', error: h.engine.error || null };
         if (h.playhead) onPlayhead(h.playhead);
+        H.render?.();
         H.renderTracks?.();
         updateChip();
         if (h.selection && h.selection.track_id && JSON.stringify(h.selection) !== JSON.stringify(A.sel)) onSelection(h.selection);

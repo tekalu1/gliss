@@ -32,7 +32,7 @@ import {
 } from './edits.js';
 import { G, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
 import { previewEnabled, previewState, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
-import { ARA, araLoop, araLoopHold, araSeek } from './ara.js';
+import { ARA, araLoopEditor, araSeekEditor, pullHostState } from './ara.js';
 import { status } from './engine.js';
 import { closeMenu, editorMenu, menuOpen } from './menus.js';
 import { runCommand, wheelAction } from './commands.js';
@@ -154,7 +154,8 @@ function onDown(e) {
   if (d.scale !== undefined) {
     // タイムスケールの二度押し = その位置の**発声区間へ飛ぶ**（158 秒の素材で要る）
     if (isDoubleTap(scaleTap, e)) { jumpToUtterance(clamp(T(px(e)), 0, totalSec())); return; }
-    S.drag = { type: 'scale', x0: e.clientX, t0: clamp(T(px(e)), 0, totalSec()) };
+    S.araLoopDraft = null;
+    S.drag = { type: 'scale', x0: e.clientX, t0: clamp(T(px(e)), 0, totalSec()), trackId: S.session?.current };
     svg.setPointerCapture(e.pointerId);
     return;
   }
@@ -425,8 +426,9 @@ function onMove(e) {
   } else if (dr.type === 'scale') {
     const t1 = clamp(T(px(e)), 0, totalSec());
     if (Math.abs(e.clientX - dr.x0) > 3) {
-      S.loop = [Math.min(dr.t0, t1) + S.off, Math.max(dr.t0, t1) + S.off];   // ループはタイムラインの秒
-      if (ARA) araLoopHold();
+      dr.loopDraft = [Math.min(dr.t0, t1), Math.max(dr.t0, t1)];
+      if (ARA) S.araLoopDraft = { trackId: dr.trackId, range: dr.loopDraft };
+      else S.loop = dr.loopDraft.map((t) => t + S.off);
       render();
     }
   }
@@ -490,13 +492,26 @@ function endDrag(e) {
     invalidateWarp();
   }
   if ((dr.type === 'box' || dr.type === 'lane') && !dr.moved && !dr.shift) S.sel = [];
-  if (dr.type === 'scale' && !(S.loop && Math.abs(e.clientX - dr.x0) > 3)) {
+  if (dr.type === 'scale' && !dr.loopDraft) {
     if (!ARA) S.loop = null;               // プラグインのループは DAW のもの（クリックでは解除しない）
-    S.head = dr.t0 + S.off;                // 再生位置はタイムラインの秒（上下で共通）
-    if (ARA) araSeek({ track_id: S.session?.current, sec: dr.t0 });   // DAW の再生位置も動かす（編集の秒）
+    seekEditorTime(dr.t0);
     if (S.playing) stop();
   } else if (ARA && dr.type === 'scale') {
-    araLoop({ track_id: S.session?.current, a: S.loop[0] - S.off, b: S.loop[1] - S.off });   // DAW のループ（編集の秒）
+    if (dr.trackId !== S.session?.current) { S.araLoopDraft = null; render(); return; }
+    const draft = dr.loopDraft;
+    const held = S.araLoopDraft;
+    araLoopEditor(draft[0], draft[1]).then((r) => {
+      if (S.araLoopDraft !== held) return;
+      if (!r?.ok) { S.araLoopDraft = null; status('DAW のその範囲をループできない'); render(); return; }
+      setTimeout(async () => {
+        if (S.araLoopDraft !== held) return;
+        await pullHostState();
+        if (S.araLoopDraft === held) { S.araLoopDraft = null; render(); }
+      }, 1200);
+    }).catch((err) => {
+      if (S.araLoopDraft !== held) return;
+      S.araLoopDraft = null; status(`DAW のループを設定できない: ${err.message}`); render();
+    });
   }
   render();
 }
@@ -1224,9 +1239,17 @@ export function jumpToUtterance(tEdited) {
   const u = utteranceAt(toSource(tEdited), 0.15, 1e9);
   if (!u) return false;
   focusRange(toEdited(u[0]), toEdited(u[1]));
-  S.head = toEdited(u[0]) + S.off;
+  seekEditorTime(toEdited(u[0]));
   render();
   return true;
+}
+
+/** 下段の編集秒へ移動。ARA のソング秒はホスト通知だけを正とする。 */
+export function seekEditorTime(sec) {
+  if (!ARA) { S.head = sec + S.off; return; }
+  araSeekEditor(sec).then((r) => {
+    if (!r?.ok) status('DAW のその位置へ移動できない');
+  }).catch((err) => status(`DAW の再生位置を動かせない: ${err.message}`));
 }
 
 // ---------------------------------------------------------------- キーボード

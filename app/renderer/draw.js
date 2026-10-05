@@ -15,9 +15,49 @@ import {
 } from './grid.js';
 import { renderTempo } from './tempo.js';
 import { bandColor, desat, lineColorer } from './corr.js';
-import { araEditorHead } from './ara.js';
+import { ARA, araEditorHead, araEditorRegion, araEditorTrack, araRegions, araScale } from './ara.js';
 
 const { KEYS_W, SCALE_H, LANE_H, EDGE } = LAYOUT;
+
+/** 下段は編集済 PCM の出力秒。DAW の小節時刻だけリージョンを通して写す。 */
+function editorTicks(labelPx = 50) {
+  if (!ARA) return ticks(S.view.t0 + S.off, S.view.t0 + S.view.span + S.off,
+    pps(), GRID_MIN_PX, labelPx).out.map((g) => ({ ...g, local: g.t - S.off }));
+  const track = araEditorTrack();
+  const out = [];
+  for (const r of (track && araRegions(track)) || []) {
+    const scale = araScale(r);
+    const lo = Math.max(S.view.t0, r.mod_start);
+    const hi = Math.min(S.view.t0 + S.view.span, r.mod_end);
+    if (hi <= lo || r.mod_end <= r.mod_start || r.song_end <= r.song_start) continue;
+    const a = r.song_start + (lo - r.mod_start) * scale;
+    const b = r.song_start + (hi - r.mod_start) * scale;
+    for (const g of ticks(a, b, pps() / scale, GRID_MIN_PX, labelPx).out) {
+      const local = r.mod_start + (g.t - r.song_start) / scale;
+      if (local < lo - 1e-9 || local >= hi - 1e-9 || araEditorRegion(local)?.id !== r.id) continue;
+      out.push({ ...g, local });
+    }
+  }
+  return out;
+}
+
+function editorLoopSegments() {
+  if (ARA && S.araLoopDraft?.trackId === araEditorTrack()?.id) return [S.araLoopDraft.range];
+  if (!S.loop) return [];
+  if (!ARA) return [[S.loop[0] - S.off, S.loop[1] - S.off]];
+  const track = araEditorTrack();
+  const out = [];
+  for (const r of (track && araRegions(track)) || []) {
+    const a = Math.max(S.loop[0], r.song_start);
+    const b = Math.min(S.loop[1], r.song_end);
+    if (b <= a || r.mod_end <= r.mod_start || r.song_end <= r.song_start) continue;
+    const scale = araScale(r);
+    const lo = r.mod_start + (a - r.song_start) / scale;
+    const hi = r.mod_start + (b - r.song_start) / scale;
+    if (araEditorRegion((lo + hi) / 2)?.id === r.id) out.push([lo, hi]);
+  }
+  return out;
+}
 const { TAKE, GUIDE, SEL, WAS, AI: AI_EDGE } = COLORS;
 
 let svg = null;
@@ -779,16 +819,15 @@ export function render() {
   }
 
   // ---- 時間グリッド（タイムラインの秒 = S.off + ピアノロールの秒。小節・拍、テンポが無ければ秒。issue #18）
-  const tk = ticks(S.view.t0 + S.off, S.view.t0 + S.view.span + S.off, pps(), GRID_MIN_PX);
-  for (const g of tk.out) {
-    const gx = Math.round(X(g.t - S.off)) + 0.5;
+  for (const g of editorTicks()) {
+    const gx = Math.round(X(g.local)) + 0.5;
     if (gx < KEYS_W || gx > W) continue;
     s += `<line data-grid="${g.l}" x1="${gx}" y1="${ROLL_T}" x2="${gx}" y2="${ROLL_B}" stroke="${GRIDC[g.l]}" pointer-events="none"/>`;
   }
 
   // ---- ループ区間（S.loop はタイムラインの秒）
-  if (S.loop) {
-    const lx0 = X(S.loop[0] - S.off); const lx1 = X(S.loop[1] - S.off);
+  for (const [a, b] of editorLoopSegments()) {
+    const lx0 = X(a); const lx1 = X(b);
     s += `<rect x="${f1(lx0)}" y="${ROLL_T}" width="${f1(lx1 - lx0)}" height="${ROLL_B - ROLL_T}" fill="${SEL}" opacity=".07" pointer-events="none"/>`;
   }
 
@@ -1113,7 +1152,8 @@ export function render() {
       + `<rect x="${f1(lx)}" y="${ROLL_B}" width="${f1(lw)}" height="${LANE_H}" fill="none" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;
   }
 
-  s += `<g id="ph" transform="translate(${f1(X(araEditorHead() - S.off))},0)" pointer-events="none">`
+  const head = araEditorHead();
+  s += `<g id="ph"${head == null ? ' style="display:none"' : ` transform="translate(${f1(X(head - S.off))},0)`}"} pointer-events="none">`
     + `<line x1="0" y1="0" x2="0" y2="${H}" stroke="${SEL}" stroke-width="1"/>`
     + `<path d="M-4,0 L4,0 L0,6 Z" fill="${SEL}"/></g>`;
 
@@ -1159,16 +1199,15 @@ function asrLane(ROLL_B, cand) {
 /** タイムスケール（目盛りはタイムラインの秒 = トラックの位置 S.off ＋ ピアノロールの秒）とループの印。 */
 function scaleSvg() {
   let s = `<rect x="0" y="0" width="${W}" height="${SCALE_H}" fill="#111113"/>`;
-  if (S.loop) {
-    const lx0 = X(S.loop[0] - S.off); const lx1 = X(S.loop[1] - S.off);
+  for (const [a, b] of editorLoopSegments()) {
+    const lx0 = X(a); const lx1 = X(b);
     s += `<rect x="${f1(lx0)}" y="0" width="${f1(lx1 - lx0)}" height="${SCALE_H}" fill="${SEL}" opacity=".07" pointer-events="none"/>`
       + `<rect x="${f1(lx0)}" y="${SCALE_H - 3}" width="${f1(lx1 - lx0)}" height="3" fill="${SEL}" opacity=".5" pointer-events="none"/>`;
   }
   // 目盛りはグリッドと同じ（小節・拍か秒）。ラベルは 50 px 以上あける
-  const tk = ticks(S.view.t0 + S.off, S.view.t0 + S.view.span + S.off, pps(), GRID_MIN_PX, 50);
-  for (const g of tk.out) {
+  for (const g of editorTicks(50)) {
     if (g.l === 2 && !g.lab) continue;
-    const tx = X(g.t - S.off);
+    const tx = X(g.local);
     if (tx < KEYS_W - 1) continue;
     s += `<line x1="${f1(tx)}" y1="${SCALE_H - (g.lab || g.l === 0 ? 8 : 4)}" x2="${f1(tx)}" y2="${SCALE_H}" stroke="#3a3a3e" pointer-events="none"/>`;
     if (g.lab) s += `<text data-rlab="1" x="${f1(tx + 3)}" y="12" font-size="10" fill="#8f8f94" pointer-events="none">${g.lab}</text>`;
@@ -1179,7 +1218,11 @@ function scaleSvg() {
 
 export function movePlayhead() {
   const g = svg?.querySelector('#ph');
-  if (g) g.setAttribute('transform', `translate(${f1(X(araEditorHead() - S.off))},0)`);
+  const head = araEditorHead();
+  if (g) {
+    g.style.display = head == null ? 'none' : '';
+    if (head != null) g.setAttribute('transform', `translate(${f1(X(head - S.off))},0)`);
+  }
   const c = document.querySelector('#clock');
   if (c) c.textContent = fmtTime(S.head);
   for (const fn of hooks.head) fn();
@@ -1189,7 +1232,9 @@ export function movePlayhead() {
  * ヘッダーの「再生位置に追従」（F。issue #40）がオフなら送らない。 */
 export function follow() {
   if (!S.vd || S.drag || !G.follow) return;
-  const t = araEditorHead() - S.off;
+  const head = araEditorHead();
+  if (head == null) return;
+  const t = head - S.off;
   const total = totalSec();
   if (t < 0 || t > total) return;                   // 編集中のトラックの外（他のトラックだけ鳴っている）
   const v = S.view;

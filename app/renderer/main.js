@@ -319,7 +319,7 @@ export function focusFirstUtterance() {
   if (voiced > total * 0.5) return false;          // ほぼ全部歌っているなら触らない
   const last = us[us.length - 1];
   focusRange(toEdited(us[0][0]), toEdited(Math.min(last[1], us[0][1] + 12)));
-  S.head = toEdited(us[0][0]) + S.off;
+  if (!ARA) S.head = toEdited(us[0][0]) + S.off;
   return true;
 }
 
