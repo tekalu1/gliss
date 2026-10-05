@@ -6,7 +6,7 @@
 //   (X3) 音量: キー（←→ 0.5 dB・Shift 0.1・Home・End）。再生位置のコマンドには渡らない
 //   (X4) パン: 上下のドラッグ・ダブルクリックで中央・キー・読み上げの値
 //   (X5) 聞こえないトラックは 2 つの部品を薄くする（値は残す）
-//   (X6) 取り消しの対象外（Ctrl+Z は別の操作に届く）・session.json に保存される
+//   (X6) 音量・パンを Ctrl+Z / Ctrl+Y で戻せる・session.json に保存される
 //   (X7) 再生中に効く（GainNode の音量・StereoPanner のパン）
 //   (X8) 見出しの幅: ドラッグ・ダブルクリックで 160・キー・上限と下限・ルーラーとレーンがそろう・150 px 未満は dB を隠す
 //   (X9) 高さ 40 px 未満では 2 段目を畳む（値は名前のツールチップ）
@@ -157,7 +157,6 @@ test('(X2) 音量: ドラッグ・吹き出し・ダブルクリックで 0 dB�
   const t = await byName('vox2');
   const vol = row(t).locator('.vol');
   const { b, x } = await knobX(t);
-  const history0 = await undoLabel();
   // つまみを左へ 20%（0 dB の 80% → 60%）
   await drag(vol, { x, y: 8 }, -0.2 * b.width, 0, {
     mid: async () => {
@@ -206,8 +205,7 @@ test('(X2) 音量: ドラッグ・吹き出し・ダブルクリックで 0 dB�
   await win.mouse.wheel(0, -120);
   await win.mouse.wheel(0, 120);
   expect((await byName('vox2')).gain_db).toBe(0);
-  // ここまでの操作で履歴は増えない
-  expect(await undoLabel()).toBe(history0);
+  await expect.poll(undoLabel).toBe('トラックの音量');
 });
 
 test('(X3) 音量: キーで動かす（←→ 0.5 dB・Shift 0.1・Home・End）', async () => {
@@ -312,10 +310,10 @@ test('(X5) 聞こえないトラックは薄くなる（値は残る）', async 
   expect(await op('.vol')).toBe(1);
 });
 
-test('(X6) 取り消しの対象外で、session.json に保存される', async () => {
+test('(X6) 音量・パンを戻せて、session.json に保存される', async () => {
   const ts = await tracks();
   const t = ts.find((x) => x.name === 'vox2');
-  // 取り消せる操作（名前）→ 音量・パン → Ctrl+Z は名前に届く
+  // 名前とミキサーの変更は別々の履歴になる
   await row(t).locator('.nm').click({ button: 'right' });
   await win.locator('#menu [data-cmd="rename"]').click();
   const input = win.locator('#heads input.rn');
@@ -324,14 +322,11 @@ test('(X6) 取り消しの対象外で、session.json に保存される', async
   await settle();
   expect(await undoLabel()).toBe('トラックの名前');
   const t2 = await byName('vox2b');
-  await row(t2).locator('.vol').focus();
-  for (let i = 0; i < 6; i++) await win.keyboard.press('ArrowLeft');       // −3 dB
-  await row(t2).locator('.pan').focus();
-  await win.keyboard.press('ArrowRight');
-  await win.keyboard.press('ArrowRight');                                   // R 10
+  const original = { gain_db: t2.gain_db, pan: t2.pan };
+  await win.evaluate((id) => window.__app.setTrack(id, { gain_db: -3, pan: 0.1 }), t2.id);
   expect((await byName('vox2b')).gain_db).toBe(-3);
   expect((await byName('vox2b')).pan).toBe(0.1);
-  expect(await undoLabel()).toBe('トラックの名前');                          // 履歴に入らない
+  expect(await undoLabel()).toContain('トラックの音量');
   await expect.poll(async () => (await engineTrack(t.id)).gain_db, { timeout: 10000 }).toBe(-3);
   // session.json に入っている（作業場所の session.json）
   const sessionPath = (await win.evaluate(() => window.api.call('list_tracks', {}))).path;
@@ -339,30 +334,27 @@ test('(X6) 取り消しの対象外で、session.json に保存される', async
   expect(saved.gain_db).toBe(-3);
   expect(saved.pan).toBe(0.1);
   expect(saved.name).toBe('vox2b');
-  // Ctrl+Z は名前を戻し、音量・パンは今のまま
+  // Ctrl+Z 1 回でミキサーだけ戻り、Redo で同じ値に戻る
   await win.locator('#mock').focus();
   await win.keyboard.press('Control+z');
   await settle();
-  const back = await byName('vox2');
+  const back = await byName('vox2b');
   expect(back).toBeTruthy();
-  expect(back.gain_db).toBe(-3);
-  expect(back.pan).toBe(0.1);
-  // やり直しても今の値
+  expect(back.gain_db).toBe(original.gain_db);
+  expect(back.pan).toBe(original.pan);
   await win.keyboard.press('Control+Shift+z');
   await settle();
   const again = await byName('vox2b');
   expect(again.gain_db).toBe(-3);
   expect(again.pan).toBe(0.1);
-  // 元に戻す（以降のテストは vox2 の名前・0 dB・中央で進める）
+  // 以降のテストのため、ミキサーと名前を順に戻す
+  await win.keyboard.press('Control+z');
+  await settle();
   await win.keyboard.press('Control+z');
   await settle();
   const t3 = await byName('vox2');
-  await row(t3).locator('.vol').focus();
-  await win.keyboard.press('Home');
-  await row(t3).locator('.pan').focus();
-  await win.keyboard.press('Home');
-  expect((await byName('vox2')).gain_db).toBe(0);
-  expect((await byName('vox2')).pan).toBe(0);
+  expect(t3.gain_db).toBe(original.gain_db);
+  expect(t3.pan).toBe(original.pan);
 });
 
 test('(X7) 再生中に動かすと、その場で音量・パンが変わる', async () => {

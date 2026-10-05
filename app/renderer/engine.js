@@ -178,10 +178,10 @@ export function analyzed(r) { analyzedHook?.(r); }
  * hold（`laterBusy()`）を渡すと、終わった後もそのまま（描き直してから呼び出し側が finish する）。
  * 渡さなければ label・target で作り、ここで終わらせる。cancel: false で取り消しを出さない。 */
 export async function analyzeTake({ hold = null, label = 'トラックを準備している', target = '', cancel = false,
-  onProgress = null } = {}) {
+  onProgress = null, background = true } = {}) {
   const h = hold || laterBusy({ label, target });
   try {
-    const r = await callJob('analyze_take', { background: true }, onProgress,
+    const r = await callJob('analyze_take', { background }, onProgress,
       { busy: h, stage: 'トラックの解析', cancel });
     S.awaitPrep = null;              // 解析が済んだ: 待つのをやめて空にしていた表示を描いてよい
     analyzed(r);

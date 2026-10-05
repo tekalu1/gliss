@@ -42,6 +42,7 @@ import {
 import { onPlayhead, onRender, render, renderToolbar } from './draw.js';
 import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setMix, setTrack } from './session.js';
 import { enqueue, handleEngineError, refresh, setHistoryHandler, wake } from './edits.js';
+import { refreshF0 } from './f0.js';
 import { dropBuffers, play, setGains, stop } from './audio.js';
 import { CUT_MIN_EDGE, covered, joinAt, normCuts, paintPiece, pieces } from './clipedit.js';
 import { closeMenu, openClipMenu, openRulerMenu, openTrackMenu } from './menus.js';
@@ -983,6 +984,7 @@ setHistoryHandler(async (r) => {
   }
   replay();
   renderTracks();
+  if ((r.undone || r.redone)?.kind === 'estimator') await refreshF0({ syncSaved: true });
   return hold;
 });
 
@@ -1635,7 +1637,7 @@ async function toggle(t, key) {
 }
 
 // ---------------------------------------------------------------- 音量・パン（見出しの 2 段目）
-// M／S と同じ聴き比べの操作: その場で音に当て（再生中も）、取り消しの履歴には入れず、session に保存する（session.js setMix）。
+// M／S と同じ聴き比べの操作: その場で音に当て（再生中も）、session に保存する（session.js setMix）。
 // 値を変えると見出しを作り直すので、ドラッグは window で追う。2 回押しは押下の間隔で見る（dblclick は作り直しで届かない）。
 
 /** 音量・パンを当てる（変わらなければ何もしない）。エンジンへの保存の失敗は状態行に出す。 */
@@ -2093,6 +2095,7 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   onSession((sess) => {
     ensureOverviews();
     renderTracks();
+    renderToolbar();
     adoptPrep((sess?.tracks || []).map((t) => [t.id, t.prep]), { session: true });
   });
   window.addEventListener('resize', () => { lastSig = ''; renderTracks(); });

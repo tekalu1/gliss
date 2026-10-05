@@ -10,6 +10,13 @@ const hooks = [];
 /** セッションを取り込んだあとに呼ぶもの（トラックビューの描き直しなど）。 */
 export function onSession(fn) { hooks.push(fn); }
 
+function adoptHistory(result) {
+  const history = result.session?.history;
+  if (!history) return;
+  S.hist = history;
+  if (S.session) S.session.history = history;
+}
+
 /** エンジンの返り値の `session` を取り込む。 */
 export function adoptSession(sess) {
   if (!sess || !Array.isArray(sess.tracks)) return;
@@ -29,7 +36,7 @@ export async function setTrack(id, patch) {
     adoptSession(r.session);
     return r;
   }
-  // ミュート／ソロ・音量・パン: 聴き比べの操作なので順番待ちに入れず、すぐ効かせる（取り消しの履歴にも入らない）。
+  // ミュート／ソロ・音量・パン: 聴き比べの操作なので順番待ちに入れず、すぐ効かせる。
   // 返ってきたセッションは丸ごとは取り込まない（順番待ちの操作 = 編集対象の切り替えなどと入れ違うと、
   // 古い編集対象に戻ってしまう）。ミュート／ソロだけ写す。音量・パンは画面の値が真（ドラッグ中に
   // 前の応答が届いて、動かした値を古い値に戻さない）
@@ -42,6 +49,7 @@ export async function setTrack(id, patch) {
     if (y) { x.mute = y.mute; x.solo = y.solo; x.audible = y.audible; }
   }
   setGains();
+  adoptHistory(r);
   for (const fn of hooks) fn(S.session);
   return r;
 }
@@ -50,7 +58,7 @@ export async function setTrack(id, patch) {
 // （毎回 session.json を書くので、動かした分だけは送らない）。離したときの値までは必ず送る
 const mixSend = new Map();      // トラック id → { busy, want }
 
-/** 音量・パンを今すぐ当て、エンジンに保存する（取り消しの履歴には入らない）。送り終わるまでの Promise。 */
+/** 音量・パンを今すぐ当て、エンジンに保存する。送り終わるまでの Promise。 */
 export function setMix(id, patch) {
   const t = S.tracks.find((x) => x.id === id);
   if (!t) return Promise.resolve(false);
@@ -74,7 +82,9 @@ async function pump(id, m) {
     m.want = null;
     m.done = [];
     try {
-      await call('set_track', { track_id: id, ...patch });
+      const r = await call('set_track', { track_id: id, ...patch });
+      adoptHistory(r);
+      for (const fn of hooks) fn(S.session);
       for (const w of waiters) w.resolve(true);
     } catch (err) {
       for (const w of waiters) w.reject(err);

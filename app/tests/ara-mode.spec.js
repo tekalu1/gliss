@@ -163,6 +163,65 @@ test('(A3) セッションが来ると、編集対象を解析して描く（M�
   expect(pop).toEqual({ center: 'none', dim: 'none' });
 });
 
+test('(A3f) 方式変更は現在の修飾だけで、Undo/Redoと起動時の既定変更に追従する', async () => {
+  const [a, b] = (await tracks()).map((t) => t.id);
+  const info = () => win.evaluate(() => window.api.call('engine_info', {}));
+  const before = await info();
+  const stateFile = path.join(ROOT, 'userdata', 'state.json');
+  const savedEstimator = () => fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')).f0Estimator ?? null : null;
+  const saved = savedEstimator();
+  await win.evaluate((id) => window.__app.selectTrack(id), b);
+  await idle();
+  const otherBefore = (await info()).f0_estimator_effective;
+  await win.evaluate((id) => window.__app.selectTrack(id), a);
+  await idle();
+  await app.evaluate(({ ipcMain }) => {
+    globalThis.__f0OriginalCall = ipcMain._invokeHandlers.get('engine.call');
+    globalThis.__f0Calls = [];
+    ipcMain.removeHandler('engine.call');
+    ipcMain.handle('engine.call', (event, name, args) => {
+      if (name === 'set_f0_estimator' || name === 'analyze_take') globalThis.__f0Calls.push({ name, args });
+      return globalThis.__f0OriginalCall(event, name, args);
+    });
+  });
+  try {
+    await win.evaluate(() => window.__app.runCommand('f0-praat'));
+    await idle();
+  } finally {
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler('engine.call');
+      ipcMain.handle('engine.call', globalThis.__f0OriginalCall);
+      globalThis.__f0OriginalCall = null;
+    });
+  }
+  const calls = await app.evaluate(() => globalThis.__f0Calls);
+  expect(calls.find((c) => c.name === 'set_f0_estimator')?.args).toMatchObject({ estimator: 'praat', scope: 'current' });
+  expect(calls.find((c) => c.name === 'analyze_take')?.args).toMatchObject({ background: false });
+  expect((await info()).f0_estimator_chosen).toBe(before.f0_estimator_chosen);
+  expect((await info()).f0_estimator_effective).toBe('praat');
+  expect((await win.evaluate(() => window.__app.f0())).effective).toBe('praat');
+  expect(savedEstimator()).toBe(saved);
+
+  await win.locator('#mock').focus();
+  await win.keyboard.press('Control+z'); await idle();
+  await expect.poll(async () => (await win.evaluate(() => window.__app.f0())).effective).toBe(before.f0_estimator_effective);
+  await win.keyboard.press('Control+y'); await idle();
+  await expect.poll(async () => (await win.evaluate(() => window.__app.f0())).effective).toBe('praat');
+
+  // プラグイン起動時の default 設定は解析済みの両修飾を変えない。
+  // Electron の ARA 画面テストはエンジンだけ app モードなので scope を明示する。
+  await win.evaluate(() => window.api.call('set_f0_estimator', { estimator: 'praat', scope: 'default' }));
+  expect((await info()).f0_estimator_effective).toBe('praat');
+  await win.evaluate((id) => window.__app.selectTrack(id), b); await idle();
+  expect((await info()).f0_estimator_effective).toBe(otherBefore);
+  expect((await win.evaluate(() => window.__app.f0())).effective).toBe(otherBefore);
+  await win.evaluate((id) => window.__app.selectTrack(id), a); await idle();
+  await win.evaluate(() => window.api.call('set_f0_estimator', { estimator: 'gliss', scope: 'default' }));
+  await win.locator('#mock').focus();
+  await win.keyboard.press('Control+z'); await idle();
+  expect((await info()).f0_estimator_effective).toBe(before.f0_estimator_effective);
+});
+
 test('(A3b) 解析中（止める処理）は札に出る。終わると「準備完了」が 1.5 秒出て消える', async () => {
   await win.evaluate(async () => {
     const m = await import('./busy.js');
