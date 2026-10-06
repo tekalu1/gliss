@@ -66,24 +66,97 @@ def reschedule_prep():
         _schedule(s)
 
 
-def remember_estimator(p, est):
+EXPLICIT_KEY = "estimator_explicit"   # session.json のトラック: 方式を利用者が明示した（アーカイブ・方式探しで決まったものでない）
+
+
+def _session_track_of(p, target=None):
+    """プロジェクト p のトラック (セッション, トラック id)。target = (セッション, トラック) を渡せばそれ
+    （ジョブの終わりなど、編集対象が別のトラックへ戻った後でも、頼まれたときのトラックへ書く）。"""
+    if target is not None:
+        s, t = target
+        if (s is not None and t is not None and p is not None and t.get("project_dir")
+                and _norm(p.dir) == _norm(s.project_dir_of(t))):
+            s.reload_if_changed()
+            try:
+                s.track(t["id"])
+            except ProjectError:
+                return None, None
+            return s, t["id"]
+    return _session_of(p)
+
+
+def remember_estimator(p, est, target=None):
     """analyze_take で明示した F0 の方式を、そのトラックの方式として覚える（選んでいる方式と同じなら外す）。
     session.json のトラックに `estimator` として保存し、裏の準備の署名・解析もそれを使う（準備が既定の方式で
-    解析し直して差し替えない）。セッションのトラックでなければ（単独のプロジェクト）メモリの上だけ。"""
+    解析し直して差し替えない）。セッションのトラックでなければ（単独のプロジェクト）メモリの上だけ。
+    target: 頼まれたときの (セッション, トラック)（`prep_target`）。中継が編集対象を一時的に切り替えて呼んだ
+    ジョブは、終わるときには編集対象が戻っているので、編集対象からはトラックが引けない。"""
     from .analysis import f0 as f0mod
     pref = None if est == f0mod.resolve_estimator() else est
     p.estimator_pref = pref
-    s, tid = _session_of(p)
+    s, tid = _session_track_of(p, target)
     if s is None:
         return
     t = s.track(tid)
-    if s.estimator_of(t) != pref:
+    if s.estimator_of(t) != pref or not t.get(EXPLICIT_KEY):
         if pref is None:
             t.pop("estimator", None)
         else:
             t["estimator"] = pref
+        t[EXPLICIT_KEY] = True                   # 利用者が明示した: ara_render_dirty の方式探し（_fit_estimator）で戻さない
         s.save()
         reschedule_prep()
+
+
+def mark_explicit(p, target=None):
+    """トラックの今の方式を、利用者が明示した方式として印を付ける（`analyze_take(estimator=…)` が今の方式と同じとき）。"""
+    s, tid = _session_track_of(p, target)
+    if s is None:
+        return
+    t = s.track(tid)
+    if not t.get(EXPLICIT_KEY):
+        t[EXPLICIT_KEY] = True
+        s.save()
+
+
+def estimators_now(s, p, track_ids=None):
+    """方式を替える前後で比べる、トラックごとの (Project, 実効の F0 の方式)。{トラック id: (q, 方式)}。
+    セッションが無ければ開いている曲だけ（鍵 "project"）。まだ解析していない・プロジェクトの無いトラックは入れない。"""
+    out = {}
+    if s is None:
+        if p is not None:
+            out["project"] = (p, p.f0_estimator())
+        return out
+    for t in s.vocal_tracks():
+        if track_ids is not None and t["id"] not in track_ids:
+            continue
+        q, _ = _track_project(s, t)
+        if q is None or not (q.analysis or {}).get("take"):
+            continue
+        q.estimator_pref = t.get("estimator")
+        try:
+            out[t["id"]] = (q, q.f0_estimator())
+        except Exception:                            # noqa: BLE001  使えない方式（重みが無い）: 比べない
+            continue
+    return out
+
+
+def retarget_switched(s, p, before, track_ids=None):
+    """方式を替えた後: 実効の方式が替わったトラックの、ノートの ID を対象にした編集を、替える前の解析での区間の
+    範囲対象に付け替える（`Project.retarget_note_targets`。音は変わらない。次の解析で同じ番号の別のノートに当たらない）。
+    before = 替える前の `estimators_now`。{トラック id: 付け替えの結果}（付け替える編集の無いトラックは入れない）。"""
+    after = estimators_now(s, p, track_ids)
+    res = {}
+    for key, (_q, old) in before.items():
+        if key not in after:
+            continue
+        q, new = after[key]
+        if new == old:
+            continue
+        r = q.retarget_note_targets(basis=old)
+        if r["retargeted"] or r["history"] or r["unresolved"] or r["skipped"]:
+            res[key] = r
+    return res
 
 
 def forget_track_estimators():
@@ -95,9 +168,10 @@ def forget_track_estimators():
     if s is None:
         return False
     s.reload_if_changed()
-    had = [t for t in s.tracks if s.estimator_of(t)]
+    had = [t for t in s.tracks if s.estimator_of(t) or t.get(EXPLICIT_KEY)]
     for t in had:
         t.pop("estimator", None)
+        t.pop(EXPLICIT_KEY, None)
     if had:
         s.save()
     return bool(had)
@@ -113,7 +187,8 @@ def estimator_snapshot(s, track_ids=None):
             continue
         q, _ = _track_project(s, t)
         if q is None:
-            rows[t["id"]] = {"pref": t.get("estimator"), "effective": None, "analyzed": False}
+            rows[t["id"]] = {"pref": t.get("estimator"), "explicit": bool(t.get(EXPLICIT_KEY)),
+                             "effective": None, "analyzed": False}
             continue
         q.estimator_pref = t.get("estimator")
         effective = q.f0_estimator()
@@ -121,7 +196,7 @@ def estimator_snapshot(s, track_ids=None):
         model_version = (q.f0_model_version or
                          (take.get("estimator_version") if take.get("estimator") == "gliss" else None) or
                          F.estimator_version("gliss")) if effective == "gliss" else None
-        rows[t["id"]] = {"pref": t.get("estimator"), "effective": effective,
+        rows[t["id"]] = {"pref": t.get("estimator"), "explicit": bool(t.get(EXPLICIT_KEY)), "effective": effective,
                          "analyzed": bool(take), "model_version": model_version}
     return {"chosen": F.chosen_estimator(), "tracks": rows}
 
@@ -170,11 +245,24 @@ def _restore_estimator_history(s, state):
             t = s.track(tid)
         except ProjectError:
             continue
+        q, _ = _track_project(s, t)
+        if q is not None and (q.analysis or {}).get("take") and row.get("effective"):
+            # 方式が替わる: 今の解析のうちにノート対象の編集を区間の範囲対象へ付け替える（音は変わらない）
+            q.estimator_pref = t.get("estimator")
+            try:
+                if q.f0_estimator() != row["effective"]:
+                    q.retarget_note_targets()
+            except Exception as e:                   # noqa: BLE001  使えない方式: 付け替えずに戻す
+                log.get().warning("方式の履歴を戻す前の付け替えを飛ばした: %s", e)
         pref = row.get("pref")
         if pref is None:
             t.pop("estimator", None)
         else:
             t["estimator"] = pref
+        if row.get("explicit"):
+            t[EXPLICIT_KEY] = True
+        else:
+            t.pop(EXPLICIT_KEY, None)
         q, is_cur = _track_project(s, t)
         if q is None:
             continue
@@ -1065,6 +1153,7 @@ def _restore_archive_history(s, e, side):
             raise ProjectError("補正を復元できない: %s" % why)
     cur = _srv._state.get("project")
     old_pref = t.get("estimator")
+    old_explicit = t.get(EXPLICIT_KEY)
     old_mark = s.history_marks.get(t["id"])
     try:
         with _recover_projects([s.project_dir_of(t)]):
@@ -1074,6 +1163,7 @@ def _restore_archive_history(s, e, side):
                 t.pop("estimator", None)
             else:
                 t["estimator"] = pref
+            t.pop(EXPLICIT_KEY, None)            # 取り込んだアーカイブの方式（利用者の明示ではない）
             p.estimator_pref = pref or est
             if p.edits and not p.analysis_cached(est):
                 with prep.exclusive(p.dir):
@@ -1084,6 +1174,8 @@ def _restore_archive_history(s, e, side):
             t.pop("estimator", None)
         else:
             t["estimator"] = old_pref
+        if old_explicit:
+            t[EXPLICIT_KEY] = old_explicit
         if old_mark is None:
             s.history_marks.pop(t["id"], None)
         else:

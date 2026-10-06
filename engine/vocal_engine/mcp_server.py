@@ -33,6 +33,7 @@ from .analysis.phonemes import get_phonemes as _get_phonemes
 from .audio import write_wav
 from .project import Project, ProjectError, ProjectConflict
 from .project.model import Target
+from .project.store import recorded_estimator
 from .render.base import resolve_backend_name
 from .render.pipeline import Renderer, segments_for
 from .view import render_view as _render_view
@@ -689,6 +690,16 @@ def analyze_take(force: bool = False, estimator: str = None,
     p = _project()
     p.reload_if_changed()
     est = p.f0_estimator(estimator)
+    # Gliss の第 2 版で解析した曲を最新版で解析し直すのは、force と estimator を両方明示したときだけ
+    # （force だけでは版を保つ。ノートの区切りと ID が変わり、ノート対象の編集の当たり方が変わるため）
+    latest = bool(force and estimator is not None)
+    # 方式・版が替わる（ノートの区切りと ID が変わる）: 解析し直す前に、ノート対象の編集を今の解析の区間の
+    # 範囲対象へ付け替える（音は変わらない。替えた後に同じ番号の別のノートへ当たらないように）
+    retarget = None
+    ta = (p.analysis or {}).get("take") or {}
+    if ta and not p._same_take_estimator(recorded_estimator(p.analysis), ta.get("estimator_version"),
+                                         est, latest):
+        retarget = p.retarget_note_targets()
     est_sec = p.duration_sec * (0.45 * (13 if confidence_sweep else 1))
     if p.guide:
         est_sec += p.duration_sec * 1.2      # DTW の分
@@ -701,6 +712,10 @@ def analyze_take(force: bool = False, estimator: str = None,
     # （issue #63。画面は常に background で呼ぶので、準備済みのトラックでも 200 ms の確認を待っていた）
     cached = default and p.analysis_cached()
     tgt = mcp_tracks.prep_target(p)         # (セッション, トラック)。セッションのトラックでなければ None
+    # 頼まれたときのトラック。中継（ara_relay）は選んだ修飾へ編集対象を一時的に切り替えて呼び、すぐ戻すので、
+    # ジョブが終わるときには編集対象からこのトラックを引けない（方式を覚える先を、ここで決めておく）
+    own_s, own_tid = mcp_tracks._session_of(p)
+    owner = (own_s, own_s.track(own_tid)) if own_s is not None else None
     if cached and tgt is not None:
         sig = prep.track_sig(*tgt)
         pdir = tgt[0].project_dir_of(tgt[1])
@@ -734,9 +749,12 @@ def analyze_take(force: bool = False, estimator: str = None,
                     ctx = prep.exclusive(q.dir) if tgt is not None else contextlib.nullcontext()
                     with ctx:
                         q.analyze(force=force, estimator=est, sweep=confidence_sweep,
-                                  cancel=cancel, progress=report, commit=commit)
+                                  cancel=cancel, progress=report, commit=commit, latest=latest)
                         # 明示した方式をそのトラックの方式にする（準備が譲っている間に。ここを出たら準備が再開する）
-                        mcp_tracks.remember_estimator(q, est)
+                        mcp_tracks.remember_estimator(q, est, target=owner)
+                if default and estimator is not None:
+                    # 今の方式と同じ方式の明示: 方式はそのまま、利用者が明示した印だけ付ける（方式探しで戻さない）
+                    mcp_tracks.mark_explicit(q, target=owner)
                 break
             except CacheBroken:
                 # 壊れたファイルは外し、印も取り消した（`Project._cache_broken`）。1 回ごとに 1 つ外れる
@@ -744,9 +762,16 @@ def analyze_take(force: bool = False, estimator: str = None,
                     raise
         _invalidate_renderer()
         t2 = mcp_tracks.prep_target(q)
+        if t2 is None and tgt is not None and os.path.normcase(q.dir) == os.path.normcase(p.dir):
+            t2 = tgt                         # 中継のジョブ: 編集対象が戻った後でも、頼まれたトラックに印を付ける
         if default and t2 is not None:
             prep.mark_ready(t2[0], t2[1], q)
-        return _summary_of_analysis(q)
+        out = _summary_of_analysis(q)
+        if retarget is not None:
+            ids = sorted({nid for _e, nid in q._missing_note_targets()})
+            out.update(retargeted=retarget["retargeted"], retarget=retarget,
+                       missing_note_targets={"count": len(ids), "ids": ids[:20]})
+        return out
 
     def joined(cancel, report, commit):
         for attempt in range(4):
@@ -2421,6 +2446,10 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
         if scope == "current" and (tid is None or s.track(tid)["kind"] != "vocal"):
             raise ProjectError("方式を変更するボーカルトラックが選ばれていない")
         before, chosen = now(), f0mod.chosen_estimator()
+        # 実効の方式が替わるトラックは、次の解析でノートの ID が振り直される。替える前の解析を覚えておき、
+        # 替えた後にノート対象の編集をその区間の範囲対象へ付け替える（音は変わらない）
+        eff_before = (_mcp_tracks.estimators_now(s, p, track_ids) if scope != "default" else {})
+        retarget = {}
         history_before = (_mcp_tracks.estimator_snapshot(s, track_ids) if s is not None and
                           (scope == "current" or not s.ara) else None)
         old_tracks = copy.deepcopy(s.tracks) if history_before is not None else None
@@ -2439,10 +2468,13 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
                                        (" / ".join(f0mod.ESTIMATORS), estimator))
                 t = s.track(tid)
                 t["estimator"] = estimator
+                t[_mcp_tracks.EXPLICIT_KEY] = True  # 利用者が明示した（ara_render_dirty の方式探しで戻さない）
                 if p is not None:
                     p.estimator_pref = estimator
                 cleared = old_tracks != s.tracks
             effective = now()
+            if eff_before:
+                retarget = _mcp_tracks.retarget_switched(s, p, eff_before, track_ids)
             if effective != before or f0mod.chosen_estimator() != chosen or cleared:
                 if history_before is not None:
                     history_after = _mcp_tracks.estimator_snapshot(s, track_ids)
@@ -2464,7 +2496,8 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
     return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
                estimators=list(f0mod.ESTIMATORS),
                rmvpe_model_found=f0mod.rmvpe_available(),
-               changed=effective != before)
+               changed=effective != before,
+               retargeted=sum(r["retargeted"] for r in retarget.values()), retarget=retarget or None)
 
 TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllable,
          inspect_lyrics_score, import_lyrics, analyze_take, get_pitch, list_notes, list_deviations,

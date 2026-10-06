@@ -1647,41 +1647,110 @@ def realize(project, plan, x):
     info = {"x": x, "moved_knots": len(moving)}
     if moving:
         tm = current_map(project)
-        kL = max(0, moving[0] - 1)
-        kR = min(len(ks) - 1, moving[-1] + 1)
-        # 変わる piece
-        pc = [p for p in st.pieces if p.a >= kL and p.b <= kR]
-        W0, W1 = ks[kL].src, ks[kR].src
+        timing = [(e, project.edit_span(e)) for e in project.edits if e.kind in TIMING_KINDS]
         legacy = any(e.kind == "move" for e in project.edits)
         if legacy:
-            W0, W1 = 0.0, project.duration_sec
-        ids = set()
-        while True:
-            grow = False
-            for e in project.edits:
-                if e.kind not in TIMING_KINDS or e.id in ids:
-                    continue
-                a, b = project.edit_span(e)
-                if b >= W0 - 1e-9 and a <= W1 + 1e-9:
-                    ids.add(e.id)
-                    if a < W0:
-                        W0, grow = float(a), True
-                    if b > W1:
-                        W1, grow = float(b), True
-            if not grow:
-                break
-        removes = [e.id for e in project.edits if e.id in ids]
-        W0 = min(W0, ks[kL].src)
-        W1 = max(W1, ks[kR].src)
-        pts = tm.points(W0, "left", ks[kL].src, ks[kL].side)
-        for p in pc:
-            pts += _piece_points(tm, st, p, new, force=p.note in plan.force_notes)
-        pts += tm.points(ks[kR].src, ks[kR].side, W1, "right")
-        pts = _dedup(pts)
-        specs = _emit(pts)
-        info.update(window_sec=[round(W0, 4), round(W1, 4)], removed=len(removes),
+            wins = [[0.0, project.duration_sec, max(0, moving[0] - 1), min(len(ks) - 1, moving[-1] + 1)]]
+        else:
+            wins = _windows(ks, moving, timing)
+        rm = set()
+        for W0, W1, kL, kR in wins:
+            rm |= _window_edits(timing, W0, W1)
+            pc = [p for p in st.pieces if p.a >= kL and p.b <= kR]
+            pts = tm.points(W0, "left", ks[kL].src, ks[kL].side)
+            pts += _pieces_points(tm, st, pc, new, plan.force_notes)
+            pts += tm.points(ks[kR].src, ks[kR].side, W1, "right")
+            specs += _emit(_dedup(pts))
+        removes = [e.id for e in project.edits if e.id in rm]
+        info.update(window_sec=[round(wins[0][0], 4), round(wins[-1][1], 4)], removed=len(removes),
                     pieces=len(specs))
+        if len(wins) > 1:
+            info["windows_sec"] = [[round(w[0], 4), round(w[1], 4)] for w in wins]
     return removes, specs, info
+
+
+def _window_edits(timing, W0, W1):
+    """組み直す窓 [W0, W1] の中のタイミング編集の id。窓と重なるもの・窓の端の時刻の無音の挿入（長さ 0）。
+    端で**接しているだけ**の編集（窓の外の区間の伸縮）は入れない（入れると、窓が隣の編集を伝って曲の端まで
+    広がり、動かしていないノートの編集まで組み直す）。"""
+    out = set()
+    for e, (a, b) in timing:
+        if b - a <= 1e-9:
+            if W0 - 1e-9 <= a <= W1 + 1e-9:
+                out.add(e.id)
+        elif a < W1 - 1e-9 and b > W0 + 1e-9:
+            out.add(e.id)
+    return out
+
+
+def _windows(ks, moving, timing):
+    """動く節の塊ごとの組み直す窓 [[W0, W1, kL, kR], ...]（時刻順・重ならない）。
+
+    塊 = 動く節の並び。窓はその両隣の動かない節まで（そのノートと隣）を、窓の端にまたがる編集の端まで広げる。
+    離れた 2 か所を 1 回で動かしても、間の動かないノートの編集は組み直さない（組み直すと編集の切れ目が
+    変わり、別々に再合成してつなぐ所が変わって、動かしていないノートの音が変わる）。窓が重なる・接するなら 1 つにする。"""
+    n = len(ks)
+    groups = []
+    for i in moving:
+        kL, kR = max(0, i - 1), min(n - 1, i + 1)
+        if groups and kL <= groups[-1][1]:
+            groups[-1][1] = max(groups[-1][1], kR)
+        else:
+            groups.append([kL, kR])
+    wins = [[ks[kL].src, ks[kR].src, kL, kR] for kL, kR in groups]
+    while True:
+        for w in wins:                                   # 窓の端にまたがる編集の端まで広げる
+            while True:
+                grow = False
+                for _e, (a, b) in timing:
+                    if b - a > 1e-9 and a < w[1] - 1e-9 and b > w[0] + 1e-9:
+                        if a < w[0]:
+                            w[0], grow = float(a), True
+                        if b > w[1]:
+                            w[1], grow = float(b), True
+                if not grow:
+                    break
+        wins.sort(key=lambda w: w[0])
+        merged = [wins[0]]
+        for w in wins[1:]:
+            last = merged[-1]
+            if w[0] <= last[1] + 1e-9:                   # 重なる・接する（端の無音を 2 つの窓で組み直さない）
+                last[1] = max(last[1], w[1])
+                last[2], last[3] = min(last[2], w[2]), max(last[3], w[3])
+            else:
+                merged.append(w)
+        if len(merged) == len(wins):
+            return merged
+        wins = merged
+
+
+def _pieces_points(tm, st, pc, new, force_notes):
+    """窓の中の piece の折れ点。動かない piece が続くところは今の時間写像の折れ点をそのまま使う
+    （piece ごとに区切ると節の時刻で編集が切れ、別々に再合成する所が増えて音が変わる）。"""
+    ks = st.knots
+    pts = []
+    i = 0
+    while i < len(pc):
+        p = pc[i]
+        if p.mode != "gap" and p.note not in force_notes and _still(tm, ks, p, new):
+            j = i
+            while (j + 1 < len(pc) and pc[j + 1].mode != "gap" and pc[j + 1].note not in force_notes
+                   and _still(tm, ks, pc[j + 1], new)):
+                j += 1
+            ka, kb = ks[pc[i].a], ks[pc[j].b]
+            pts += tm.points(ka.src, ka.side, kb.src, kb.side)
+            i = j + 1
+            continue
+        pts += _piece_points(tm, st, p, new, force=p.note in force_notes)
+        i += 1
+    return pts
+
+
+def _still(tm, ks, p, new):
+    """piece の両端の節が動かない（今の時間写像の位置のまま）。"""
+    ka, kb = ks[p.a], ks[p.b]
+    return (abs(float(new[p.a]) - tm.at(ka.src, ka.side)) < 1e-12
+            and abs(float(new[p.b]) - tm.at(kb.src, kb.side)) < 1e-12)
 
 
 def _piece_points(tm, st, p, new, force=False):
