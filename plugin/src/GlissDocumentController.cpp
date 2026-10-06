@@ -637,8 +637,14 @@ bool GlissDocumentController::doRestoreObjectsFromStream (juce::ARAInputStream& 
         if (auto* guide = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (a.guide.toRawUTF8()))
             sync->setPendingGuide (juce::String (guide->getPersistentID()));
 
-    // トラックごとのガイド（フィルターが対応させた今の修飾の ID に直す）。
+    // トラックごとのガイド（フィルターが対応させた今の修飾の ID に直す）。guides のあるアーカイブでは、アーカイブにある
+    // 修飾の指定をアーカイブのとおりにする（載っていない修飾は外す。編集をアーカイブの内容に戻すのと同じ）。
     std::map<juce::String, juce::String> restoredGuides;
+
+    if (a.hasGuides)
+        for (const auto& [id, m] : a.modifications)
+            if (auto* modification = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (id.toRawUTF8()))
+                restoredGuides[juce::String (modification->getPersistentID())] = {};
 
     for (const auto& [id, guideId] : a.guides)
     {

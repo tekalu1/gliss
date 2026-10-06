@@ -40,9 +40,13 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
   "modifications": { "<persistentID>": { "name": "…", "archive": { …Project.to_archive()… } | null } } }
 ```
 
-  - `guide` は共通のガイド（`set_guide_track`）、`guides` はトラックごとのガイド（`set_track_guide`。無ければ書かない。古いアーカイブは `guides` 無しで読める）。
+  - `guide` は共通のガイド（`set_guide_track`）、`guides` はトラックごとのガイド（`set_track_guide`。修飾が 1 つでもあれば空でも書く。古いアーカイブは `guides` 無しで読める）。
     どちらも `ara_archive` が返し、プラグインは保存でそのまま書く。開き直すと、フィルターが対応させた今の修飾の ID に直して、両方の修飾が登録できたものから
-    `ara_sync(guide=…, guides=…)` で戻す（取り消しの履歴に入れない）。ガイドにした修飾を DAW で消すと、その指定は外れる。
+    `ara_sync(guide=…, guides=…)` で戻す（取り消しの履歴に入れない）。`guides` のあるアーカイブでは、アーカイブにある修飾の指定をアーカイブのとおりにする
+    （載っていない修飾は `""` を送って外す。編集をアーカイブの内容に戻すのと同じ）。`guides` の無い古いアーカイブは作業場所の指定をそのまま使う。
+    エンジンが答えた組（当てた・断られた）は残さない（断られた組を毎回送り直して詰まらない）。
+    ガイドにした修飾を DAW で消すと、その指定は外れる。DAW の取り消しで修飾が戻ると、本人の指定とそれを指していた指定も戻る
+    （エンジンが `ara_gone` に控える。相手がまだ戻っていない組は `ara_guide_wait` に預ける）。
   - `work_key` は作業場所 `%LOCALAPPDATA%\Gliss\work\ara\<work_key>` の名前。新しいドキュメントで UUID を作り、アーカイブにあれば（まだエンジンで開いていなければ）それを使う（同じ PC なら前の解析のキャッシュが使える）。
   - `archive` の `f0_estimator` は、補正を作った F0 の方式（`rmvpe`・`gliss`・`praat`。未解析で明示も無ければ `null`）。
     再合成は F0 を使うので、方式が違うと音が変わる（実測: gliss で補正した編集を rmvpe で解析し直すと約 19 秒分が変わる）。

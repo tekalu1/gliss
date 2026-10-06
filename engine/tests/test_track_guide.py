@@ -347,7 +347,8 @@ def test_ara_archive_carries_guides_and_ara_sync_restores_them(ara, tmp_path):
     # 知らない ara_id は unknown に返して当てない
     r = _ok(a.ara_sync(guides={"mod-T1": "mod-NONE", "mod-NONE": "mod-GA"}))
     assert sorted(r["unknown"]) == ["mod-NONE", "mod-NONE"] and r["guides"] == {"mod-T2": "mod-GB"}
-    assert a.ara_sync(guides={"mod-T1": "mod-T1"})["ok"] is False
+    r = _ok(a.ara_sync(guides={"mod-T1": "mod-T1"}))         # 当てられない組は例外にせず rejected に返す
+    assert r["rejected"] and r["rejected"][0]["ara_id"] == "mod-T1" and r["guides"] == {"mod-T2": "mod-GB"}
     assert a.ara_sync(guides=["x"])["ok"] is False
 
 
@@ -457,3 +458,90 @@ def test_external_ai_sets_a_track_guide_through_the_relay(tmp_path, monkeypatch)
         F.set_preferred_estimator(None)
         md._clear()
         a._reset_render()
+
+
+# ================================================================ 見直しの修正
+def test_add_track_as_inst_clears_the_guide_assignments(mcp, tmp_path):
+    """add_track(kind="inst") で既存のトラックを伴奏にしても、set_track と同じく指定を外す。"""
+    m, mt, md = mcp
+    paths, ids = _session(mcp, tmp_path)
+    _ok(mt.set_track_guide(ids["t2"], ids["gA"]))
+    _ok(mt.set_track_guide(ids["gB"], ids["gA"]))
+    _ok(mt.set_guide_track(ids["gB"]))
+    _ok(mt.add_track(paths["gA"], kind="inst"))              # もうあるファイル: 種類だけ変わる
+    _ok(mt.add_track(paths["gB"], kind="inst"))
+    rows = _rows(mt)
+    assert rows[ids["gA"]]["kind"] == "inst" and rows[ids["gB"]]["kind"] == "inst"
+    assert rows[ids["t2"]]["guide_id"] is None and rows[ids["gB"]]["guide_id"] is None
+    assert _ok(mt.list_tracks())["guide"] is None            # 共通のガイドも外れる
+    assert all(t["effective_guide_id"] is None for t in rows.values() if t["kind"] == "inst")
+    assert not any(t["is_guide"] for t in rows.values())
+
+
+def test_ara_sync_skips_a_bad_guide_pair_and_applies_the_rest(ara, tmp_path):
+    m, a = ara
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.project.session import Session
+    paths, tids = _ara_doc(a, tmp_path)
+    _ok(mt.set_track(tids["mod-GB"], kind="inst"))
+    r = _ok(a.ara_sync(tracks=[{"ara_id": "mod-T1", "offset_sec": 1.5}],
+                       guides={"mod-T1": "mod-GB", "mod-T2": "mod-GA", "mod-GA": "mod-GA", "mod-X": "mod-GA"}))
+    assert [(x["ara_id"], x["guide"]) for x in r["rejected"]] == [("mod-T1", "mod-GB"), ("mod-GA", "mod-GA")]
+    assert all(x["reason"] for x in r["rejected"])
+    assert r["unknown"] == ["mod-X"] and r["guides"] == {"mod-T2": "mod-GA"}
+    s = m._state["session"]
+    assert s.find_ara("mod-T1")["offset_sec"] == 1.5         # ほかの変更は当たる
+    saved = Session.load(s.dir)                              # 未保存のまま残らない
+    assert saved.find_ara("mod-T1")["offset_sec"] == 1.5 and saved.find_ara("mod-T2")["guide_id"] == tids["mod-GA"]
+    # 伴奏にされたトラックの行に実効のガイドは出ない
+    _ok(mt.set_guide_track(tids["mod-GA"]))
+    rows = {t["id"]: t for t in _ok(mt.list_tracks())["tracks"]}
+    assert rows[tids["mod-GB"]]["effective_guide_id"] is None
+    assert a._row(s, s.track(tids["mod-GB"]))["effective_guide_id"] is None
+
+
+def test_daw_undo_of_a_deleted_modification_restores_its_guide_assignments(ara, tmp_path):
+    m, a = ara
+    paths, tids = _ara_doc(a, tmp_path)
+    key = {"mod-T1": "t1", "mod-T2": "t2", "mod-GA": "gA", "mod-GB": "gB"}
+
+    def readd(ara_id):
+        _ok(a.ara_set_modification(ara_id, paths[key[ara_id]], source_id="src-" + os.path.basename(paths[key[ara_id]]),
+                                   name=ara_id, group=key[ara_id]))
+
+    base = {"mod-T1": "mod-GA", "mod-T2": "mod-GA"}
+    _ok(a.ara_sync(guides=dict(base)))
+    # 指定を持つ本人を消して戻す
+    _ok(a.ara_remove_modification("mod-T1"))
+    assert _guides_in_session(m) == {"mod-T2": "mod-GA"}
+    readd("mod-T1")
+    assert _guides_in_session(m) == base and m._state["session"].find_ara("mod-T1")["id"] == tids["mod-T1"]
+    # ガイドにされていた修飾を消して戻す（参照元の指定も戻る）
+    _ok(a.ara_remove_modification("mod-GA"))
+    assert _guides_in_session(m) == {}
+    readd("mod-GA")
+    assert _guides_in_session(m) == base
+    # 両方を消して、どちらの順に戻しても戻る
+    for order in (("mod-T1", "mod-GA"), ("mod-GA", "mod-T1")):
+        _ok(a.ara_remove_modification("mod-T1"))
+        _ok(a.ara_remove_modification("mod-GA"))
+        assert _guides_in_session(m) == {}
+        for ara_id in order:
+            readd(ara_id)
+        assert _guides_in_session(m) == base, order
+    assert not m._state["session"].ara_guide_wait
+    # 取り消している間に別の指定を入れたトラックは上書きしない
+    _ok(a.ara_remove_modification("mod-T2"))
+    _ok(a.ara_sync(guides={"mod-T1": "mod-GB"}))
+    _ok(a.ara_remove_modification("mod-GA"))
+    readd("mod-GA")
+    readd("mod-T2")
+    assert _guides_in_session(m) == {"mod-T1": "mod-GB", "mod-T2": "mod-GA"}
+    # session.json に残る（エンジンを開き直しても預けた指定が消えない）
+    _ok(a.ara_remove_modification("mod-T1"))
+    _ok(a.ara_remove_modification("mod-GB"))
+    readd("mod-T1")                                          # ガイドの修飾はまだ無い: 預ける
+    from vocal_engine.project.session import Session
+    assert Session.load(m._state["session"].dir).ara_guide_wait == {tids["mod-T1"]: tids["mod-GB"]}
+    readd("mod-GB")
+    assert _guides_in_session(m)["mod-T1"] == "mod-GB"

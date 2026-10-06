@@ -134,16 +134,22 @@ public:
             expect (b.guides == a.guides);
             expectEquals (b.guide, juce::String ("shared"));
 
-            // guides は無ければ書かない（古いプラグインが読んだときと同じ形）。guides の無い古いアーカイブは空として読む
+            expect (b.hasGuides);
+
+            // 修飾が 1 つでもあれば guides は空でも書く（読んだ側は「アーカイブが正」と分かる）。修飾も指定も無ければ書かない
             a.guides.clear();
+            expect (! juce::JSON::parse (archive::write (a)).getProperty ("document", {}).hasProperty ("guides"));
+            a.modifications["mod A"] = { "Vocal 1", {} };
             const auto plain = archive::write (a);
-            expect (! juce::JSON::parse (plain).getProperty ("document", {}).hasProperty ("guides"));
+            expect (juce::JSON::parse (plain).getProperty ("document", {}).getProperty ("guides", {}).getDynamicObject() != nullptr);
             DocumentArchive c;
             expect (archive::read (plain, c, error), error);
-            expect (c.guides.empty());
+            expect (c.guides.empty() && c.hasGuides);
+
+            // guides の無い古いアーカイブは空として読み、hasGuides は false（作業場所の指定をそのまま使う）
             DocumentArchive d;
             expect (archive::read (R"({"format":"gliss-ara","version":1,"document":{"work_key":"k","guide":null},"modifications":{}})", d, error), error);
-            expect (d.guides.empty() && d.guide.isEmpty());
+            expect (d.guides.empty() && d.guide.isEmpty() && ! d.hasGuides);
         }
 
         beginTest ("archive refuses other formats and newer versions");
@@ -855,6 +861,8 @@ public:
             expect (sync.getGuidesForStore().empty());
             sync.setPendingGuides ({ { "mod", "guide-mod" } });
             expect (sync.getGuidesForStore() == (std::map<juce::String, juce::String> { { "mod", "guide-mod" } }));
+            sync.setPendingGuides ({ { "mod", "" } });   // 空 = アーカイブにその修飾の指定が無い（保存には載せない）
+            expect (sync.getGuidesForStore().empty());
 
             // エンジンが動いていなければ、取り直しは何もしない（待たない）
             const auto start = juce::Time::getMillisecondCounter();
