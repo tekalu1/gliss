@@ -19,6 +19,9 @@ gitleaks による全履歴の秘密情報の検査（ubuntu）を回す。
 - 画面: 素材を開くテストは、素材か重みが無いとファイルごと skip（`app/tests/materials.js` の `skipUnlessReady`）。
   重みが無いまま素材を開くと、画面が初回の「モデルの準備」で止まり、解析を待つテストが時間切れになるため。
   素材の要らないテスト（初回の画面・タイトルバー・更新の表示・忙しい表示など）はエンジンの `.venv` だけで回る。
+- 複数トラック・プラグインの画面は、合成の歌（`writeSong`）で素材なしに試せる。プラグインのモード（`GLISS_TEST_ARA=1`）で DAW の修飾を
+  再現するなら、`new_project` / `add_track` ではなく `ara_open` → `ara_set_modification`（`name` と `group` = DAW のトラック名）で作り、
+  `__araEmit('session-changed')` を送る（`app/tests/track-guide.spec.js`。`group` が入るのはこの道だけ）。`ara_open` の `work_key` は固定の英字でよい（乱数らしい値は gitleaks に掛かる）。
 - skip されるテストは、期待が古くなっても CI では落ちない（2026-10-03、`test_export.py` のツールの数と `commands.spec.js` の K1 が素材のあるときだけ落ちた）。
   MCP のツール・画面のコマンドを足したら、下の「手元の素材で全部を回す」で確かめる。
 
