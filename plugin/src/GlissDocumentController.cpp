@@ -71,6 +71,58 @@ private:
 };
 
 //==============================================================================
+/** 試験用（GLISS_TEST_BRIDGE_DIR）: 画面の engineCall の代わり。フォルダの <名前>.call.json（{tool, args}）を順に
+    engineCall に渡し、答えを <名前>.result.json に書く（plugin/tests/aratest の GlissARATest -changes が使う）。
+    args の文字列 "@ara:<修飾の persistentID>" はその修飾のトラックの id に置き換える。メッセージスレッドで動く。 */
+class GlissDocumentController::TestBridge final : private juce::Timer
+{
+public:
+    TestBridge (GlissDocumentController& ownerIn, juce::File dirIn) : owner (ownerIn), dir (std::move (dirIn))
+    {
+        startTimer (50);
+    }
+
+private:
+    void timerCallback() override
+    {
+        if (*busy)
+            return;
+
+        auto calls = dir.findChildFiles (juce::File::findFiles, false, "*.call.json");
+
+        if (calls.isEmpty())
+            return;
+
+        calls.sort();
+        const auto call = calls[0];
+        const auto base = call.getFileName().upToFirstOccurrenceOf (".call.json", false, false);
+        const auto request = juce::JSON::parse (call.loadFileAsString());
+        call.deleteFile();
+
+        auto args = request.getProperty ("args", {});
+
+        if (auto* o = args.getDynamicObject())
+            for (auto& p : o->getProperties())
+                if (p.value.isString() && p.value.toString().startsWith ("@ara:"))
+                    o->setProperty (p.name, owner.sync->getModStatus (p.value.toString().fromFirstOccurrenceOf ("@ara:", false, false)).trackId);
+
+        *busy = true;
+        owner.engineCall (request.getProperty ("tool", {}).toString(), args,
+                          [out = dir.getChildFile (base + ".result.json"), tmp = dir.getChildFile (base + ".result.tmp"), flag = busy]
+                          (const juce::var& result)
+        {
+            tmp.replaceWithText (juce::JSON::toString (result, true));
+            tmp.moveFileTo (out);
+            *flag = false;
+        });
+    }
+
+    GlissDocumentController& owner;
+    juce::File dir;
+    std::shared_ptr<bool> busy = std::make_shared<bool> (false);
+};
+
+//==============================================================================
 GlissAudioModification::GlissAudioModification (juce::ARAAudioSource* audioSource,
                                                 ARA::ARAAudioModificationHostRef hostRef,
                                                 const juce::ARAAudioModification* optionalModificationToClone)
@@ -133,10 +185,18 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
     const auto disabled = options.engineDisabled;
     sync = std::make_unique<DocumentSync> (EngineConfig::discover(), std::move (options), std::move (callbacks));
     diag::log ("document: created, work key " + workKey + (disabled ? " (engine disabled)" : ""));
+
+    if (const auto dir = env ("GLISS_TEST_BRIDGE_DIR"); dir.isNotEmpty() && juce::File::isAbsolutePath (dir))
+    {
+        juce::File (dir).createDirectory();
+        testBridge = std::make_unique<TestBridge> (*this, juce::File (dir));
+        diag::log ("document: test bridge on " + dir);
+    }
 }
 
 GlissDocumentController::~GlissDocumentController()
 {
+    testBridge.reset();
     stopTimer();
     *alive = false;
     sync->shutdown();

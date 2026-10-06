@@ -27,6 +27,8 @@ void ARAModelUpdateController::notifyAudioModificationContentChanged (ARA::ARAAu
                                                                      ARA::ContentUpdateScopes scopeFlags) noexcept
 {
     ++(scopeFlags.affectSamples () ? modelUpdateCounts ().modificationSamples : modelUpdateCounts ().modificationOther);
+    if (! scopeFlags.affectSamples () && ! scopeFlags.affectNotes ())
+        ++modelUpdateCounts ().modificationState;
     ARA_LOG ("host: audio modification content changed, flags 0x%X", static_cast<unsigned> (scopeFlags));
 }
 

@@ -3,6 +3,8 @@
 //
 //   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -workB <作業場所 B> [-rate <描画 C の周波数>]
 //   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -relay <relay_client.py>   （外部の AI からの編集の通し。下の runRelay）
+//   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -changes <relay_client.py> -workB <別の作業場所>
+//     （保存するものが変わるたびにホストへ知らせ、戻しただけでは知らせないことの通し。下の runChanges）
 //
 //   N. 合成の歌声もどき（44.1 kHz・モノラル・6.2 秒）を 1 つの AudioSource にし、リージョンを 2 つ（ソース全体をソングの 0 秒、
 //      ソースの 1.5〜4.2 秒をソングの 10 秒）置いたドキュメントを、編集なし（GLISS_TEST_EDIT を消す）で作り、ホストとして解析を頼んで
@@ -59,6 +61,7 @@ namespace
 {
 const std::string sourceID { "audioSourceTestPersistentID 0" };          // createHostAndBasicDocument が付ける ID
 const std::string modificationID { "audioModificationTestPersistentID 0" };
+const std::string secondModificationID { "audioModificationTestPersistentID 1" };   // -changes の 2 つ目の修飾
 
 /** 合成の歌声もどき（engine/tests/test_ara_tools.py の _voice と同じ作り: 倍音 8 本・5.5 Hz ±30 セントのビブラート・5 ノート）。 */
 class VoiceAudioFile : public AudioFileBase
@@ -345,8 +348,10 @@ std::wstring widen (const std::string& s)
     return w;
 }
 
-/** 外部の AI の代わり（relay_client.py）を起動し、終わるまで待つ（その間もホストのメインスレッドの仕事を回す）。終了コードを返す。 */
-int runExternalClient (PlugInEntry* plugInEntry, const std::string& script, const std::string& outDir, int timeoutMs)
+/** 外部の AI の代わり（relay_client.py）を起動し、終わるまで待つ（その間もホストのメインスレッドの仕事を回す）。終了コードを返す。
+    step: relay_client.py の 2 つ目の引数（空なら渡さない）。 */
+int runExternalClient (PlugInEntry* plugInEntry, const std::string& script, const std::string& outDir, int timeoutMs,
+                       const std::string& step = {})
 {
     const auto* python { std::getenv ("GLISS_ENGINE_PYTHON") };
     const auto* cwd { std::getenv ("GLISS_ENGINE_CWD") };
@@ -356,7 +361,8 @@ int runExternalClient (PlugInEntry* plugInEntry, const std::string& script, cons
         return -1;
     }
 
-    auto commandLine { L"\"" + widen (python) + L"\" \"" + widen (script) + L"\" \"" + widen (outDir) + L"\"" };
+    auto commandLine { L"\"" + widen (python) + L"\" \"" + widen (script) + L"\" \"" + widen (outDir) + L"\""
+                       + (step.empty () ? std::wstring () : L" " + widen (step)) };
     const auto workDir { widen (cwd) };
     STARTUPINFOW si {};
     si.cb = sizeof (si);
@@ -458,6 +464,258 @@ int runRelay (PlugInEntry* plugInEntry, const AudioFileList& files, const VoiceA
     return 2;
 #endif
 }
+
+#if defined (_WIN32)
+/** -changes の文書: 1 つのソースに修飾 2 つ（別の DAW のトラック。どちらもソース全体をソングの 0 秒に）。archive があれば戻す。 */
+ARADocumentController* createTwoModificationDocument (PlugInEntry* plugInEntry, std::unique_ptr<TestHost>& testHost,
+                                                      const std::string& name, VoiceAudioFile* voice, MemoryArchive* archive)
+{
+    testHost = std::make_unique<TestHost> ();
+    auto document { testHost->addDocument (name, plugInEntry) };
+    auto dc { testHost->getDocumentController (document) };
+
+    dc->beginEditing ();
+    auto musicalContext { testHost->addMusicalContext (document, "ARA Test Musical Context", { 1.0f, 0.0f, 0.0f }) };
+    auto sequence0 { testHost->addRegionSequence (document, "Track 1", musicalContext, { 0.0f, 1.0f, 0.0f }) };
+    auto sequence1 { testHost->addRegionSequence (document, "Track 2", musicalContext, { 0.0f, 1.0f, 0.0f }) };
+    auto audioSource { testHost->addAudioSource (document, voice, sourceID) };
+    dc->enableAudioSourceSamplesAccess (audioSource, true);
+    auto mod0 { testHost->addAudioModification (document, audioSource, "Test audio modification 0", modificationID) };
+    auto mod1 { testHost->addAudioModification (document, audioSource, "Test audio modification 1", secondModificationID) };
+    testHost->addPlaybackRegion (document, mod0, ARA::kARAPlaybackTransformationNoChanges, 0.0, audioSource->getDuration (),
+                                 0.0, audioSource->getDuration (), sequence0, "Test playback region", { 0.0f, 0.0f, 1.0f });
+    testHost->addPlaybackRegion (document, mod1, ARA::kARAPlaybackTransformationNoChanges, 0.0, audioSource->getDuration (),
+                                 0.0, audioSource->getDuration (), sequence1, "Second playback region", { 0.0f, 0.0f, 1.0f });
+    const auto restored { archive == nullptr || dc->restoreObjectsFromArchive (archive) };
+    dc->endEditing ();
+    return restored ? dc : nullptr;
+}
+
+/** 画面の代わり（プラグインの GLISS_TEST_BRIDGE_DIR）: {tool, args} を書いて、プラグインが engineCall に渡した答えを待つ。
+    args の "@ara:<persistentID>" はプラグインがトラックの id に置き換える。ok:false なら false。 */
+struct TestBridgeCalls
+{
+    std::string dir;
+    int serial = 0;
+
+    bool call (PlugInEntry* plugInEntry, ARADocumentController* dc, const std::string& tool, const std::string& argsJson)
+    {
+        char name[16];
+        std::snprintf (name, sizeof (name), "%03d", ++serial);
+        const auto base { dir + "/" + name };
+        writeText (base + ".call.tmp", "{\"tool\": \"" + tool + "\", \"args\": " + argsJson + "}");
+        std::rename ((base + ".call.tmp").c_str (), (base + ".call.json").c_str ());
+
+        for (int waited { 0 }; waited < 300000; waited += 50)
+        {
+            std::ifstream in (base + ".result.json", std::ios::binary);
+            if (in)
+            {
+                std::stringstream text;
+                text << in.rdbuf ();
+                const auto result { text.str () };
+                const bool ok { result.find ("\"ok\": false") == std::string::npos };
+                ARA_LOG ("bridge: %s %s -> %s", tool.c_str (), argsJson.c_str (), ok ? "ok" : result.substr (0, 300).c_str ());
+                return ok;
+            }
+            pumpHost (plugInEntry, dc, 50);
+        }
+
+        ARA_LOG ("bridge: %s did not answer", tool.c_str ());
+        return false;
+    }
+};
+
+/** 知らせが done を満たすまで（最長 timeoutMs）ホストを回し、満たしたらもう少し回して残りの知らせも受ける。 */
+bool waitForUpdates (PlugInEntry* plugInEntry, ARADocumentController* dc, const std::function<bool (const ModelUpdateCounts&)>& done,
+                     int timeoutMs)
+{
+    for (int waited { 0 }; waited < timeoutMs; waited += 100)
+    {
+        if (done (modelUpdateCounts ()))
+        {
+            pumpHost (plugInEntry, dc, 2000);
+            return true;
+        }
+        pumpHost (plugInEntry, dc, 100);
+    }
+    return done (modelUpdateCounts ());
+}
+
+/** -changes: 保存するもの（ARA のアーカイブ）が変わる操作のたびに、ホストへ「変わった」の知らせが届くこと（音が変わらない
+    ものは、音もノートも変わらない知らせ = modification_state、ガイドの指定は文書の知らせ = document_data も）と、
+    保存した文書を戻しただけでは何も届かないことを確かめる。結果は changes.json（操作ごとの知らせの数と合否）。
+    画面の操作はプラグインの試験用の口（GLISS_TEST_BRIDGE_DIR。画面と同じ engineCall）、外部の AI は relay_client.py。
+      1. 画面: 修飾 0 を +100 セント・ピッチ曲線（音が変わる）
+      2. 画面: 修飾 1 の歌詞だけ（音も編集も無い）
+      3. 画面: 修飾 1 の F0 の方式だけ（編集の無い修飾。scope = current）
+      4. 画面: 修飾 0 のガイドを修飾 1 に（トラックごとのガイド）
+      5〜8. 画面: 取り消し（ガイド → 方式）・やり直し（方式 → ガイド）
+      9. 外部の AI: 修飾 0 を -50 セント（音が変わる）
+      10. 外部の AI: 修飾 1 のガイドを修飾 0 に
+      11. 画面: 編集対象の切り替え・一覧だけ（保存するものは変わらない: 何も届かない）
+      保存 → 12. 同じ作業場所で戻す（何も届かない）・13. 別の作業場所で戻す（解析し直しても何も届かない）
+      14. 描画の版を 1（0.1.0-beta.6 までの曲）にしたアーカイブを戻す（その版の音のまま鳴らす: 何も届かない）
+      15. その文書で、画面から描画の版を上げる（set_render_version。保存するものが変わる: 知らせが届く） */
+int runChanges (PlugInEntry* plugInEntry, VoiceAudioFile& voice, const ARA::ARAFactory* factory,
+                const std::string& script, const std::string& outDir, const std::string& workOther)
+{
+    setEnv ("GLISS_TEST_EDIT", nullptr);
+    TestBridgeCalls bridge { outDir + "/bridge" };
+    CreateDirectoryW (widen (bridge.dir).c_str (), nullptr);
+    setEnv ("GLISS_TEST_BRIDGE_DIR", bridge.dir.c_str ());
+
+    std::string report;
+    bool allPassed { true };
+    const auto record = [&] (const std::string& name, bool passed)
+    {
+        const auto counts { modelUpdateCounts () };
+        report += (report.empty () ? "" : ",\n ") + ("\"" + name + "\": {\"pass\": " + (passed ? "true" : "false")
+                                                    + ", \"counts\": " + counts.toJson () + "}");
+        ARA_LOG ("changes: %s %s %s", name.c_str (), passed ? "PASS" : "FAIL", counts.toJson ().c_str ());
+        allPassed = allPassed && passed;
+    };
+    const auto samples = [] (const ModelUpdateCounts& c) { return c.modificationSamples > 0 && c.regionSamples > 0; };
+    const auto stateOnly = [] (const ModelUpdateCounts& c) { return c.modificationState > 0; };
+    // 方式の切り替えは解析し直したノートの知らせ（notesAreAffected）と同じ周に来ると、ARA の知らせの束ね（範囲の和）で
+    // 1 つの「ノートが変わった」になる（ホストはどちらでも保存し直す）。音の知らせではないことだけを見る
+    const auto notSamples = [] (const ModelUpdateCounts& c) { return c.modificationOther > 0; };
+    const auto documentData = [] (const ModelUpdateCounts& c) { return c.documentData > 0 && c.modificationState > 0; };
+    const std::string m0 { "\"@ara:" + modificationID + "\"" }, m1 { "\"@ara:" + secondModificationID + "\"" };
+    MemoryArchive archive { factory->documentArchiveID };
+
+    {
+        std::unique_ptr<TestHost> testHost;
+        auto dc { createTwoModificationDocument (plugInEntry, testHost, "GlissARATest X", &voice, nullptr) };
+        renderDocument (plugInEntry, dc, voice.getSampleRate ());
+        waitForRegionNotes (plugInEntry, dc, ARA::kARAContentGradeDetected, 60000);
+        pumpHost (plugInEntry, dc, 2000);
+
+        bool called { bridge.call (plugInEntry, dc, "select_track", "{\"track_id\": " + m0 + "}")
+                      && bridge.call (plugInEntry, dc, "analyze_take", "{\"background\": false}") };
+        pumpHost (plugInEntry, dc, 2000);
+        modelUpdateCounts () = {};
+        called = called && bridge.call (plugInEntry, dc, "shift_pitch", "{\"cents\": 100, \"start_sec\": 0, \"end_sec\": 6.2}")
+                 && bridge.call (plugInEntry, dc, "set_pitch_curve",
+                                 "{\"points\": [[0, 0], [0.2, 80], [0.4, 0]], \"start_sec\": 1.65, \"end_sec\": 2.2}");
+        record ("1 screen edit", called && waitForUpdates (plugInEntry, dc, samples, 60000));
+
+        called = bridge.call (plugInEntry, dc, "select_track", "{\"track_id\": " + m1 + "}")
+                 && bridge.call (plugInEntry, dc, "analyze_take", "{\"background\": false}");
+        pumpHost (plugInEntry, dc, 2000);
+        modelUpdateCounts () = {};
+        called = called && bridge.call (plugInEntry, dc, "set_lyrics",
+                                        "{\"text\": \"\u3042\u3044\u3046\u3048\u304a\", \"start_sec\": 0.4, \"end_sec\": 6.0, \"reanalyze\": false}");
+        record ("2 screen lyrics only", called && waitForUpdates (plugInEntry, dc, stateOnly, 30000)
+                                        && modelUpdateCounts ().modificationSamples == 0);
+
+        modelUpdateCounts () = {};
+        called = bridge.call (plugInEntry, dc, "set_f0_estimator", "{\"estimator\": \"gliss\", \"scope\": \"current\"}");
+        record ("3 screen estimator only", called && waitForUpdates (plugInEntry, dc, notSamples, 30000)
+                                           && modelUpdateCounts ().modificationSamples == 0);
+
+        modelUpdateCounts () = {};
+        called = bridge.call (plugInEntry, dc, "set_track_guide", "{\"track_id\": " + m0 + ", \"guide_track_id\": " + m1 + "}");
+        record ("4 screen guide", called && waitForUpdates (plugInEntry, dc, documentData, 30000));
+
+        modelUpdateCounts () = {};
+        called = bridge.call (plugInEntry, dc, "undo", "{}");
+        record ("5 screen undo (guide)", called && waitForUpdates (plugInEntry, dc, documentData, 30000));
+
+        modelUpdateCounts () = {};
+        called = bridge.call (plugInEntry, dc, "undo", "{}");
+        record ("6 screen undo (estimator)", called && waitForUpdates (plugInEntry, dc, notSamples, 30000));
+
+        modelUpdateCounts () = {};
+        called = bridge.call (plugInEntry, dc, "redo", "{}");
+        record ("7 screen redo (estimator)", called && waitForUpdates (plugInEntry, dc, notSamples, 30000));
+
+        modelUpdateCounts () = {};
+        called = bridge.call (plugInEntry, dc, "redo", "{}");
+        record ("8 screen redo (guide)", called && waitForUpdates (plugInEntry, dc, documentData, 30000));
+
+        modelUpdateCounts () = {};
+        called = runExternalClient (plugInEntry, script, outDir, 300000, "edit") == 0;
+        record ("9 external edit", called && waitForUpdates (plugInEntry, dc, samples, 60000));
+
+        modelUpdateCounts () = {};
+        called = runExternalClient (plugInEntry, script, outDir, 300000, "guide") == 0;
+        record ("10 external guide", called && waitForUpdates (plugInEntry, dc, documentData, 30000));
+
+        pumpHost (plugInEntry, dc, 2000);
+        modelUpdateCounts () = {};
+        called = bridge.call (plugInEntry, dc, "select_track", "{\"track_id\": " + m0 + "}")
+                 && bridge.call (plugInEntry, dc, "list_tracks", "{}");
+        pumpHost (plugInEntry, dc, 5000);
+        record ("11 selection only (nothing)", called && modelUpdateCounts ().changes () == 0);
+
+        if (! dc->supportsPartialPersistency () || ! dc->storeObjectsToArchive (&archive))
+        {
+            ARA_LOG ("storing the archive failed");
+            return 1;
+        }
+    }
+
+    const std::string archiveData = archive;
+    writeText (outDir + "/archive-x.json", archiveData);
+    const auto restoreOnly = [&] (const std::string& name, MemoryArchive& from, const std::function<bool (const ModelUpdateCounts&)>& pass)
+    {
+        modelUpdateCounts () = {};
+        std::unique_ptr<TestHost> testHost;
+        auto dc { createTwoModificationDocument (plugInEntry, testHost, "GlissARATest X " + name, &voice, &from) };
+        if (dc == nullptr)
+        {
+            record (name, false);
+            return;
+        }
+        renderDocument (plugInEntry, dc, voice.getSampleRate ());
+        pumpHost (plugInEntry, dc, 8000);
+        record (name, pass (modelUpdateCounts ()));
+    };
+    const auto nothing = [] (const ModelUpdateCounts& c) { return c.changes () == 0; };
+
+    MemoryArchive same { archiveData, factory->documentArchiveID };
+    restoreOnly ("12 restore in the same work folder (nothing)", same, nothing);
+
+    // 描画の版を前の版にしたアーカイブ（0.1.0-beta.6 までの曲。その版の音のまま鳴らす）
+    auto older { archiveData };
+    const std::string current { "\"render_version\": 2" }, previous { "\"render_version\": 1" };
+    int replaced { 0 };
+    for (auto at { older.find (current) }; at != std::string::npos; at = older.find (current, at + previous.size ()), ++replaced)
+        older.replace (at, current.size (), previous);
+    MemoryArchive olderArchive { older, factory->documentArchiveID };
+    {
+        modelUpdateCounts () = {};
+        std::unique_ptr<TestHost> testHost;
+        auto dc { createTwoModificationDocument (plugInEntry, testHost, "GlissARATest X 14", &voice, &olderArchive) };
+        if (dc == nullptr)
+        {
+            record ("14 restore an archive of the older renderer (nothing)", false);
+        }
+        else
+        {
+            renderDocument (plugInEntry, dc, voice.getSampleRate ());
+            pumpHost (plugInEntry, dc, 8000);
+            record ("14 restore an archive of the older renderer (nothing)", replaced > 0 && nothing (modelUpdateCounts ()));
+
+            modelUpdateCounts () = {};
+            const bool called { bridge.call (plugInEntry, dc, "select_track", "{\"track_id\": " + m0 + "}")
+                                && bridge.call (plugInEntry, dc, "set_render_version", "{\"apply\": true}") };
+            record ("15 screen upgrade of the renderer", called && waitForUpdates (plugInEntry, dc, [] (const ModelUpdateCounts& c)
+                    { return c.modificationSamples > 0 || c.modificationState > 0; }, 30000));
+        }
+    }
+
+    setEnv ("VOCAL_ENGINE_WORK_DIR", workOther.c_str ());
+    MemoryArchive other { archiveData, factory->documentArchiveID };
+    restoreOnly ("13 restore in another work folder (nothing)", other, nothing);
+
+    writeText (outDir + "/changes.json", "{" + report + "}");
+    plugInEntry->uninitializeARA ();
+    ARA_LOG ("changes: %s", allPassed ? "all passed" : "FAILED");
+    return allPassed ? 0 : 1;
+}
+#endif
 } // namespace
 
 int main (int argc, const char* argv[])
@@ -468,12 +726,14 @@ int main (int argc, const char* argv[])
     const auto outDir { argument (args, "-out") };
     const auto workB { argument (args, "-workB") };
     const auto relayScript { argument (args, "-relay") };
+    const auto changesScript { argument (args, "-changes") };
     const auto otherRate { std::atof (argument (args, "-rate", "48000").c_str ()) };
 
     auto plugInEntry { PlugInEntry::parsePlugInEntry (args) };
-    if (! plugInEntry || outDir.empty () || (workB.empty () && relayScript.empty ()))
+    if (! plugInEntry || outDir.empty () || (workB.empty () && relayScript.empty ()) || (! changesScript.empty () && workB.empty ()))
     {
-        ARA_LOG ("usage: GlissARATest -vst3 <Gliss.vst3> -out <folder> (-workB <work folder for document B> [-rate <Hz>] | -relay <relay_client.py>)");
+        ARA_LOG ("usage: GlissARATest -vst3 <Gliss.vst3> -out <folder> (-workB <work folder for document B> [-rate <Hz>] | -relay <relay_client.py>"
+                 " | -changes <relay_client.py> -workB <another work folder>)");
         return 2;
     }
 
@@ -492,6 +752,11 @@ int main (int argc, const char* argv[])
 
     if (! relayScript.empty ())
         return runRelay (plugInEntry.get (), files, *voice, factory, relayScript, outDir);
+
+#if defined (_WIN32)
+    if (! changesScript.empty ())
+        return runChanges (plugInEntry.get (), *voice, factory, changesScript, outDir, workB);
+#endif
 
     // ---- N: 編集なしで、ホストが解析を頼んで待つ → ノート（detected）。リージョンは 2 つ（2 つ目はソースの途中を別の位置に） ----
     const std::string testEdit { std::getenv ("GLISS_TEST_EDIT") != nullptr ? std::getenv ("GLISS_TEST_EDIT") : "" };

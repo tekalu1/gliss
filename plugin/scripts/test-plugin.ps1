@@ -21,7 +21,11 @@
 #   10. GlissARATest -relay: an external AI (another vocal_engine.mcp process, plugin/tests/relay_client.py) lists the open
 #       documents, attaches to the modification and shifts it by +100 cents through the relay; the plug-in picks it up
 #       (render, notes, archive), checked by plugin/tests/verify_ara_relay.py; the relay record is removed at the end
-#   11. no engine process is left behind
+#   11. GlissARATest -changes: every change of what the archive holds tells the host (screen edit through the plug-in's
+#       test bridge, lyrics only, F0 method only, guide, undo/redo, external edit and guide), selection alone does not,
+#       and restoring the stored document (same and another work folder) tells nothing; an archive of the older renderer
+#       with a pitch curve tells the host that the sound changed. Per-step counts in aratest-changes\changes.json
+#   12. no engine process is left behind
 # The engine checks are skipped (reported) when no engine python is found (-EnginePython, GLISS_ENGINE_PYTHON, or the
 # .venv of the main worktree).
 # Nothing is written outside plugin\build and the temp folder (the engine's work and log folders, the plug-in state file
@@ -181,7 +185,7 @@ try {
     if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
 
     if (-not $EnginePython -or -not (Test-Path $EnginePython)) {
-        Write-Host "SKIP engine checks 7-9: no engine python (pass -EnginePython or set GLISS_ENGINE_PYTHON)"
+        Write-Host "SKIP engine checks 7-11: no engine python (pass -EnginePython or set GLISS_ENGINE_PYTHON)"
     } else {
         Write-Host "engine: $EnginePython (cwd $($engineEnv.GLISS_ENGINE_CWD))"
 
@@ -255,6 +259,29 @@ try {
         }
         $records = @(Get-ChildItem $sessR -Filter '*.json' -ErrorAction SilentlyContinue)
         Report 'relay records removed when the document closed' ($records.Count -eq 0) ("left=" + $records.Count)
+
+        # 11. host notifications for every change of the saved state, none for restoring only
+        $outX = Join-Path $work 'aratest-changes'
+        $workX = Join-Path $work 'aratest-changes-work'
+        $workX2 = Join-Path $work 'aratest-changes-work-2'
+        $sessX = Join-Path $work 'changes-sessions'
+        foreach ($d in @($outX, $workX, $workX2, $sessX)) { New-Item -ItemType Directory -Force $d | Out-Null }
+        $env11 = $engineEnv.Clone()
+        $env11.VOCAL_ENGINE_WORK_DIR = $workX
+        $env11.GLISS_ARA_SESSIONS_DIR = $sessX
+        $env11.GLISS_ARA_SYNC_WAIT_MS = '120000'
+        $env11.GLISS_ARA_READ_TIMEOUT_MS = '3000'
+        $env11.GLISS_ARA_TRACE_DIR = (Join-Path $work 'trace-changes')
+        New-Item -ItemType Directory -Force $env11.GLISS_ARA_TRACE_DIR | Out-Null
+        $saved = $TimeoutSec
+        $TimeoutSec = [Math]::Max($TimeoutSec, 900)
+        try {
+            $code = Invoke-Checked $araTest @('-vst3', $gliss, '-out', $outX, '-changes', (Join-Path $plugin 'tests\relay_client.py'), '-workB', $workX2) 'aratest-changes' $env11
+        } finally { $TimeoutSec = $saved }
+        $steps = Get-Content (Join-Path $work 'aratest-changes.log.err'), (Join-Path $work 'aratest-changes.log') -ErrorAction SilentlyContinue |
+            Select-String 'changes: \d+ '
+        $steps | ForEach-Object { Write-Host ("    " + ($_.Line -replace '^.*changes: ', '')) }
+        Report 'GlissARATest -changes (every saved-state change tells the host, restoring does not)' ($code -eq 0) "exit=$code steps=$($steps.Count)"
     }
 }
 finally {
