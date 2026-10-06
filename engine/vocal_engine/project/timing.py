@@ -199,12 +199,45 @@ def default_connected(project, a, b):
     return all(n.kind == "unvoiced" for n in between)
 
 
+PAIR_TIME_TOL_SEC = 0.06   # 付け替えた connection の境目と、今の解析の組の境目のずれの許し
+
+
+def connection_pair(project, e, notes=None):
+    """`connection` の編集が指す組 (a, b)。F0 の方式を替える前に付け替えたもの（params.by_time）は、記録した境目の
+    区間（target = a の終わり〜b の始まり）に両端が最も近い、今の解析の隣り合う組（許し PAIR_TIME_TOL_SEC。
+    無ければ None = 当てない）。notes: 引く相手のノートの並び（省くと params.pair で選ぶ）。"""
+    if not e.params.get("by_time"):
+        return (e.params["a"], e.params["b"])
+    t0, t1 = float(e.target.start_sec), float(e.target.end_sec)
+    if notes is None:
+        notes = (pitched_notes(project) if e.params.get("pair") == "note" else
+                 sorted([n for n in project.take_notes if n.kind == "note" or n.kind in EXTRA_KINDS],
+                        key=lambda n: n.start_sec))
+    best = None
+    for x, y in zip(notes[:-1], notes[1:]):
+        dx, dy = abs(x.end_sec - t0), abs(y.start_sec - t1)
+        if dx <= PAIR_TIME_TOL_SEC and dy <= PAIR_TIME_TOL_SEC and (best is None or dx + dy < best[0]):
+            best = (dx + dy, x.id, y.id)
+    return (best[1], best[2]) if best is not None else None
+
+
 def connection_overrides(project):
     """編集リストの `connection`（後勝ち）。{(a, b): bool}"""
     out = {}
+    lists = {}
     for e in project.edits:
         if e.kind == "connection":
-            out[(e.params["a"], e.params["b"])] = bool(e.params["connected"])
+            notes = None
+            if e.params.get("by_time"):
+                kind = "note" if e.params.get("pair") == "note" else "any"
+                if kind not in lists:
+                    lists[kind] = (pitched_notes(project) if kind == "note" else
+                                   sorted([n for n in project.take_notes if n.kind == "note" or n.kind in EXTRA_KINDS],
+                                          key=lambda n: n.start_sec))
+                notes = lists[kind]
+            key = connection_pair(project, e, notes)
+            if key is not None:
+                out[key] = bool(e.params["connected"])
     return out
 
 
@@ -1863,7 +1896,7 @@ def connection_specs(project, changes):
         if a not in ns or b not in ns:
             continue
         removes += [e.id for e in project.edits if e.kind == "connection"
-                    and e.params.get("a") == a and e.params.get("b") == b]
+                    and connection_pair(project, e) == (a, b)]
         x, y = ns[a], ns[b]
         # 子音・息を含む組（issue #35）の既定は、挟んでいる音程ノートの組の接続から
         dflt = (default_connected(project, x, y) if x.kind == "note" and y.kind == "note"

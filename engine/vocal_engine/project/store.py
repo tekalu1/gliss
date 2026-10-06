@@ -964,6 +964,16 @@ class Project:
             p.f0_model_version = None
         p._seq = dict(archive.get("seq") or {"edit": 0, "changeset": 0})
         p.changesets = [Changeset.from_json(c) for c in archive.get("changesets", [])]
+        # ノート ID に頼る編集を作った解析の記録の無い（前の版の）changeset: アーカイブの方式（保存したときにその編集を
+        # 鳴らしていた解析）を記録にする。方式の記録も無いアーカイブは「分からない」（方式を替えるときに付け替えない）
+        if est in f0mod.ESTIMATORS:
+            legacy = {"op": "basis", "estimator": est,
+                      "version": (archive.get("f0_estimator_version") or f0mod.GLISS_F0_V2_VERSION) if est == "gliss" else None}
+        else:
+            legacy = {"op": "basis", "unknown": True}
+        for cs in p.changesets:
+            if _changeset_basis(cs) is None and any(op.get("op") == "add" and note_dependent(op["edit"]) for op in cs.ops):
+                cs.ops.append(dict(legacy))
         p._phonemes = {"take": None, "guide": None}
         p._notes_cache = None
         p._replay()
@@ -1861,6 +1871,7 @@ class Project:
                      changeset=cs_id, note=s.get("note"))
             ops.append({"op": "add", "edit": e.to_json()})
             made.append(e)
+        self._stamp_basis(ops)
         cs = Changeset(id=cs_id, label=label or (made[0].describe() if made else "（空）"),
                        author=author, created_at=now_iso(), ops=ops)
         self.changesets.append(cs)
@@ -1910,6 +1921,7 @@ class Project:
                 op["in_place_of"] = s["in_place_of"]     # 編集リストの中の元の位置に入れる
             ops.append(op)
             made.append(e)
+        self._stamp_basis(ops)
         cs = Changeset(id=cs_id, label=label or (made[0].describe() if made else "（空）"),
                        author=author, created_at=now_iso(), ops=ops)
         self.changesets.append(cs)
@@ -1992,35 +2004,85 @@ class Project:
         return [(e, e.target.note_id) for e in self.edits
                 if e.target.type == "note" and e.target.note_id not in ids]
 
+    def _note_basis(self):
+        """今の解析（メモリのテイクのノート）の記録 `{"op": "basis", estimator, version, notes}`。notes はノートの
+        id・種類・区間（ms）の指紋（同じ指紋 = 同じ番号が同じノート）。解析がメモリに無ければ None。"""
+        ns = self._take_notes
+        if not ns:
+            return None
+        ta = self.analysis.get("take") or {}
+        fp = hashlib.sha1(json.dumps([[n.id, n.kind, int(round(n.start_sec * 1000)), int(round(n.end_sec * 1000))]
+                                      for n in ns]).encode("utf-8")).hexdigest()[:16]
+        return {"op": "basis", "estimator": ta.get("estimator"), "version": ta.get("estimator_version"), "notes": fp}
+
+    def _stamp_basis(self, ops):
+        """ノート ID に頼る編集を足す changeset の ops に、その編集を作った解析の記録を足す
+        （方式を替える前の付け替えが、記録と今の解析を照合する。`retarget_note_targets`）。"""
+        if any(op.get("op") == "add" and note_dependent(op["edit"]) for op in ops):
+            b = self._note_basis()
+            if b is not None:
+                ops.append(b)
+
+    def _basis_matches(self, b, basis):
+        """changeset の記録 b（無ければ None）の番号が、保存した解析（メモリに読んだもの）の番号と同じノートを指すか。
+        (合う, 合わない理由)。b が無い（前の版のエンジンで作り、アーカイブを経ていない）編集は、今までどおり
+        保存した解析が basis（省くと `f0_estimator()`）の方式のものなら合うとする。"""
+        ta = self.analysis.get("take") or {}
+        if b is None:
+            basis = self.f0_estimator(basis)
+            if ta.get("estimator") is not None and not self._same_take_estimator(
+                    ta["estimator"], ta.get("estimator_version"), basis):
+                return False, "保存した解析（%s）が編集を作った方式（%s）のものでない" % (ta["estimator"], basis)
+            return True, None
+        if b.get("notes"):
+            now = self._note_basis()
+            if now is not None and now["notes"] == b["notes"]:
+                return True, None
+            return False, "保存した解析（%s）のノートの区切りが、編集を作った解析（%s）と違う" % (
+                ta.get("estimator"), b.get("estimator"))
+        if b.get("estimator"):
+            same = ta.get("estimator") == b["estimator"] and (
+                b["estimator"] != "gliss" or not b.get("version") or not ta.get("estimator_version")
+                or ta["estimator_version"] == b["version"])
+            if same:
+                return True, None
+            return False, "保存した解析（%s）が、アーカイブに記録された方式（%s）のものでない" % (
+                ta.get("estimator"), b["estimator"])
+        return False, "編集を作った解析が分からない（方式の記録の無いアーカイブから戻した編集）"
+
     def retarget_note_targets(self, basis=None):
-        """F0 の方式・モデルの版を替える**前に**: ノートの ID を対象にした編集（target = note）を、今の解析での
-        そのノートの区間の範囲対象に書き換える（`notes_edit._retarget` と同じ書き換え。区間が同じなので音は変わらない）。
+        """F0 の方式・モデルの版を替える**前に**: ノートの ID に頼る編集を、今の解析での区間に書き換える。
+        target = note はそのノートの区間の範囲対象（`notes_edit._retarget` と同じ書き換え。区間が同じなので音は
+        変わらない）、`connection` は組の境目の区間で引く形（params.by_time。`timing.connection_overrides`）。
 
         ノートの ID は解析ごとの通し番号なので、方式・版を替えた後の解析では同じ番号が別のノートを指す
         （無声・息のこともある）。替える前に区間へ直しておけば、替えた後も同じ区間に同じ量が掛かる。
         changeset の中の `add` を書き換えるので、編集の id・author・changeset・並び・取り消しの単位は変わらない
         （人の編集も中身はそのまま）。取り消した changeset の編集は、その changeset を当てた状態のノートの区間で書き換える。
 
-        basis: 編集を作った F0 の方式（省くと `f0_estimator()`）。保存した解析がその方式のものでなければ
-        （未解析・アーカイブを戻した直後で解析が別の方式のまま）区間が分からないので書き換えない（`skipped` に理由）。
+        書き換えるのは、編集を作った解析の記録（changeset の `basis`。ノートの区切りの指紋・アーカイブの方式）が
+        保存した解析と合う changeset だけ。合わない・分からない（記録の無い古いアーカイブ）ものは書き換えず、
+        `unverified` に返す（番号のまま残る。替えた後の解析で別のノートに当たりうるので、呼び出し側が報告する）。
+        basis: 記録の無い（前の版で作った）編集を作った F0 の方式（省くと `f0_estimator()`）。
         返り値 {"retargeted": 書き換えた有効な編集の数, "history": 履歴の中だけの編集の数,
-                 "unresolved": [区間が分からなかった編集の id], "skipped": 理由 | None}"""
-        out = {"retargeted": 0, "history": 0, "unresolved": [], "skipped": None}
+                 "pairs": そのうち connection の数, "unresolved": [区間が分からなかった編集の id],
+                 "unverified": [作った解析を確かめられず書き換えなかった有効な編集の id], "skipped": 理由 | None}"""
+        out = {"retargeted": 0, "history": 0, "pairs": 0, "unresolved": [], "unverified": [], "skipped": None}
         self.reload_if_changed()
         found = [(i, op) for i, cs in enumerate(self.changesets) for op in cs.ops
-                 if op.get("op") == "add" and (op["edit"].get("target") or {}).get("type") == "note"]
+                 if op.get("op") == "add" and note_dependent(op["edit"])
+                 and not (op["edit"].get("params") or {}).get("by_time")]
         if not found:
             return out
         ta = self.analysis.get("take") or {}
-        basis = self.f0_estimator(basis)
         if not ta or not os.path.exists(self._cache_path("take-analysis.json")):
             out["skipped"] = "テイクがまだ解析されていない"
             return out
-        if ta.get("estimator") is not None and not self._same_take_estimator(
-                ta["estimator"], ta.get("estimator_version"), basis):
-            out["skipped"] = "保存した解析（%s）が編集を作った方式（%s）のものでない" % (ta["estimator"], basis)
-            return out
         self.ensure_analyzed()
+        verdict = {}
+        for i, _op in found:
+            if i not in verdict:
+                verdict[i] = self._basis_matches(_changeset_basis(self.changesets[i]), basis)
         live = {e.id for e in self.edits}
         now = {n.id: n for n in self.take_notes}
         states = {}
@@ -2036,21 +2098,48 @@ class Project:
                 states[i] = {n.id: n for n in ns}
             return states[i]
 
+        def lookup(i, d, nid):
+            return now.get(nid) if d["id"] in live else (notes_at(i).get(nid) or now.get(nid))
+
+        reasons = []
         for i, op in found:
             d = op["edit"]
-            nid = d["target"].get("note_id")
-            n = now.get(nid) if d["id"] in live else (notes_at(i).get(nid) or now.get(nid))
-            if n is None:
-                out["unresolved"].append(d["id"])
+            ok, why = verdict[i]
+            if not ok:
+                if d["id"] in live:
+                    out["unverified"].append(d["id"])
+                if why not in reasons:
+                    reasons.append(why)
                 continue
-            op["edit"] = dict(d, target=Target.range(n.start_sec, n.end_sec).to_json())
+            if d.get("kind") == "connection":
+                pr = d.get("params") or {}
+                na, nb = lookup(i, d, pr.get("a")), lookup(i, d, pr.get("b"))
+                if na is None or nb is None:
+                    out["unresolved"].append(d["id"])
+                    continue
+                # 組の境目の区間（a の終わり〜b の始まり）で、替えた後の解析の組を引く
+                op["edit"] = dict(d, target=Target.range(na.end_sec, nb.start_sec).to_json(),
+                                  params=dict(pr, by_time=True,
+                                              pair="note" if na.kind == "note" and nb.kind == "note" else "any"))
+                out["pairs"] += 1
+            else:
+                n = lookup(i, d, d["target"].get("note_id"))
+                if n is None:
+                    out["unresolved"].append(d["id"])
+                    continue
+                op["edit"] = dict(d, target=Target.range(n.start_sec, n.end_sec).to_json())
             out["retargeted" if d["id"] in live else "history"] += 1
+        if reasons:
+            out["skipped"] = "；".join(reasons)
+            log.get().warning("F0 の方式を替える前の付け替え: ノート ID に頼る編集 %d 件を、作った解析を確かめられないので"
+                              "書き換えない（%s）", len(out["unverified"]), out["skipped"])
         if out["retargeted"] or out["history"]:
             self._replay()
             self._notes_cache = None
             self.save()
-            log.get().info("F0 の方式を替える前に、ノート対象の編集 %d 件（履歴の中だけ %d 件）を範囲対象に付け替えた"
-                           "（区間が分からない %d 件）", out["retargeted"], out["history"], len(out["unresolved"]))
+            log.get().info("F0 の方式を替える前に、ノート ID に頼る編集 %d 件（履歴の中だけ %d 件。うち接続 %d 件）を"
+                           "区間に付け替えた（区間が分からない %d 件）", out["retargeted"], out["history"], out["pairs"],
+                           len(out["unresolved"]))
         return out
 
     def missing_note_targets_with(self, estimator):
@@ -2458,6 +2547,17 @@ class Project:
             return r.boundary(boundary_id)
         except KeyError as e:
             raise ProjectError(str(e))
+
+
+def note_dependent(edit):
+    """編集（dict）がノート ID に頼るか: 対象がノート（target = note）か、ノートの組を ID で引く `connection`。
+    `transition`・`split`・`merge` は時刻で引くので入れない。"""
+    return (edit.get("target") or {}).get("type") == "note" or edit.get("kind") == "connection"
+
+
+def _changeset_basis(cs):
+    """changeset に記録した、ノート ID に頼る編集を作った解析（`{"op": "basis", …}`。無ければ None）。"""
+    return next((op for op in cs.ops if op.get("op") == "basis"), None)
 
 
 def _live_edits(changesets):

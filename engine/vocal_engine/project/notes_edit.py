@@ -137,6 +137,12 @@ def _repair_pairs(project, rename, drop):
         if e.kind not in PAIR_KINDS:
             continue
         a, b = e.params.get("a"), e.params.get("b")
+        if e.params.get("by_time"):
+            # 方式を替える前に付け替えた組は時刻で引く（名前を直す要は無い。結合で消える組なら外す）
+            from .timing import connection_pair
+            if e.kind == "connection" and connection_pair(project, e) in drop:
+                rm.append(e.id)
+            continue
         if (a, b) in drop:
             if e.kind == "connection":
                 rm.append(e.id)

@@ -270,12 +270,20 @@ Gliss の F0 はモデルの版も解析キャッシュとアーカイブの `f0
   changeset・取り消しの単位はそのまま。取り消した changeset の編集も、その changeset を当てた状態の区間で書き換える）。
   替えた後に同じ番号の別のノート（無声・息のこともある）へ当たらない。`analyze_take` の `estimator`・`force` で方式・版が替わるとき、
   `set_f0_estimator(scope="current" | "all")` で実効の方式が替わるトラック、方式の Undo/Redo で行う。
-  返り値に `retargeted`（付け替えた有効な編集の数）・`retarget: {retargeted, history（履歴の中だけの数）, unresolved（区間が分からなかった
-  編集の id）, skipped（付け替えなかった理由）}`・`missing_note_targets: {count, ids}`（解析した後に対象のノートが無い編集）。
-  保存した解析が編集を作った方式のものでない（`ara_restore`・`import_edits` の直後で、まだアーカイブの方式で解析していない）ときは
-  区間が分からないので付け替えない（`skipped`）。
-- `connection`（接続・切り離し）の編集は params のノートの ID の組で引くので、方式を替えた後は当たらない・別の組に当たることがある
-  （付け替えない）。`transition`・`split`・`merge` は時刻で引くので替えても同じ所に当たる。
+  返り値に `retargeted`（付け替えた有効な編集の数）・`retarget: {retargeted, history（履歴の中だけの数）, pairs（そのうち connection
+  の数）, unresolved（区間が分からなかった編集の id）, unverified（作った解析を確かめられず書き換えなかった有効な編集の id）,
+  skipped（書き換えなかった理由）}`・`missing_note_targets: {count, ids, unverified, unverified_edits}`（解析した後に対象のノートが
+  無い編集と、番号のまま残したので別のノートに当たりうる編集）。
+- 付け替えるのは、**編集を作った解析と今の保存した解析が同じと確かめられた** changeset だけ。ノートの ID に頼る編集を足す changeset には、
+  作ったときの解析の記録（ops の `{"op": "basis", estimator, version, notes}`。`notes` はノートの id・種類・区間の指紋）を入れ、
+  付け替えの前に今の解析の指紋と照合する。記録の無い前の版の changeset は、アーカイブから戻すとき（`ara_restore`・複製・`import_edits`）に
+  アーカイブの `f0_estimator`（保存したときにその編集を鳴らしていた方式）を記録にし（方式の記録も無いアーカイブは `{"unknown": true}`）、
+  保存した解析がその方式のものなら付け替える。アーカイブを経ていない前の版の編集は、保存した解析が今の方式（`basis` 引数）のものなら
+  付け替える。合わない・分からないもの（例: 補正を作った方式と解析の方式がずれた曲で、補正を作った方式へ戻す手当て）は書き換えずに
+  `unverified` と `skipped` に返し、番号のまま残す（区間を取り違えて永久に別の所へ移すより、戻す先の方式の解析で番号のまま当てる）。
+- `connection`（接続・切り離し）の編集は、組の境目の区間（target = a の終わり〜b の始まり）で引く形（params の `by_time: true`・
+  `pair: "note" | "any"`）に付け替える。替えた後の解析の隣り合う組のうち、両端が記録した境目に最も近い組（±60 ms の中。無ければ当てない）に
+  当たる。`transition`・`split`・`merge` は時刻で引くので替えても同じ所に当たる。
 
 ```json
 {"ok": true,

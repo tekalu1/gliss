@@ -791,8 +791,11 @@ def analyze_take(force: bool = False, estimator: str = None,
         out = _summary_of_analysis(q)
         if retarget is not None:
             ids = sorted({nid for _e, nid in q._missing_note_targets()})
+            # 作った解析を確かめられずに番号のまま残した編集（unverified）も、当たらない恐れのある編集として返す
             out.update(retargeted=retarget["retargeted"], retarget=retarget,
-                       missing_note_targets={"count": len(ids), "ids": ids[:20]})
+                       missing_note_targets={"count": len(ids), "ids": ids[:20],
+                                             "unverified": len(retarget["unverified"]),
+                                             "unverified_edits": retarget["unverified"][:20]})
         return out
 
     def joined(cancel, report, commit):

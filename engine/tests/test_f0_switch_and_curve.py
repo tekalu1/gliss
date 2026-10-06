@@ -135,7 +135,7 @@ def test_retarget_keeps_the_sound_and_the_edit_identity(eng, tmp_path):
     spans = _spans(p)
     ident = [(e.id, e.kind, e.author, e.changeset, e.params) for e in p.edits]
     r = p.retarget_note_targets()
-    assert r == {"retargeted": 2, "history": 1, "unresolved": [], "skipped": None}
+    assert r == {"retargeted": 2, "history": 1, "pairs": 0, "unresolved": [], "unverified": [], "skipped": None}
     assert all(e.target.type == "range" for e in p.edits)
     assert [(e.id, e.kind, e.author, e.changeset, e.params) for e in p.edits] == ident
     assert _spans(p) == spans
@@ -159,7 +159,7 @@ def test_switching_the_estimator_keeps_note_edits_on_their_spans(eng, tmp_path):
     assert q.analysis["take"]["estimator"] == "gliss"
     assert _spans(q) == spans                                       # 区間は praat のノートのまま
     assert r["retargeted"] == 2 and r["retarget"]["history"] == 1
-    assert r["missing_note_targets"] == {"count": 0, "ids": []}
+    assert r["missing_note_targets"] == {"count": 0, "ids": [], "unverified": 0, "unverified_edits": []}
     _ok(m.redo())
     q = m._state["project"]
     assert [e.target.type for e in q.edits].count("note") == 0
@@ -210,13 +210,17 @@ def test_set_f0_estimator_current_retargets_before_the_next_analysis(eng, tmp_pa
 
 
 def test_retarget_skips_when_the_analysis_is_not_the_edits_basis(eng, tmp_path):
-    """保存した解析が編集を作った方式のものでない（アーカイブを戻した直後など）: 区間が分からないので書き換えない。"""
+    """保存した解析が編集を作った方式のものでない（作った解析の記録の無い前の版の編集を、別の方式で作ったと分かっているとき）:
+    区間が分からないので書き換えない。"""
     m, a, md, R = eng
     _song(m, md, tmp_path)
     _ok(m.analyze_take(background=False))
     n = _notes(m)
     _ok(m.shift_pitch(100, note_id=n[3]))
     p = m._state["project"]
+    for cs in p.changesets:                                          # 前の版で作った編集（作った解析の記録が無い）
+        cs.ops = [op for op in cs.ops if op.get("op") != "basis"]
+    p.save()
     r = p.retarget_note_targets(basis="gliss")
     assert r["retargeted"] == 0 and r["skipped"] and p.edits[0].target.type == "note"
 
@@ -258,8 +262,8 @@ def test_explicit_estimator_is_not_reverted_and_missing_is_reported(eng, tmp_pat
     assert d["ok"] is False and "n099" in d["error"] and "missing_note_targets" in d["error"]
     assert t["estimator_explicit"] is True
     assert r["missing_note_targets"]["ids"] == ["n099"]
-    # 戻したアーカイブの方式（gliss）と保存した解析（praat）が違う: 区間が分からないので付け替えない
-    assert r["retargeted"] == 0 and r["retarget"]["skipped"]
+    # 編集を作った解析（praat。changeset の記録）は保存した解析と同じだが、対象の番号 n099 は無い: 付け替えられない
+    assert r["retargeted"] == 0 and r["retarget"]["unresolved"] == [m._state["project"].edits[0].id]
 
 
 def test_archive_estimator_is_still_fitted(eng, tmp_path, monkeypatch):
