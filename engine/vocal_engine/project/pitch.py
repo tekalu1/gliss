@@ -72,6 +72,7 @@ EPS_CENTS = 0.1               # これより小さい差は段差として扱わ
 MATCH_TOL_SEC = 5e-4          # なだらかさの値を段差の時刻に引くときの許容
 AUTO_CACHE_MAX = 4096         # 自動の幅のキャッシュの件数の上限（最近使ったもの優先）
 PITCH_KINDS = ("pitch_shift", "pitch_curve")
+CLIP_TOL_SEC = 1e-6           # 層の Segment をつなぐとき、曲線の点をつなぎ目で切る許容（`_clip_curve`）
 
 
 class PitchError(RuntimeError):
@@ -751,6 +752,32 @@ def _as_curve(s):
     return [[0.0, float(s.cents)], [d, float(s.cents)]]
 
 
+def _clip_curve(pts, lo=None, hi=None):
+    """曲線の点列（相対秒の昇順）を [lo, hi] に切る（端は補間した値の点にする）。lo / hi が None ならその側は切らない。
+
+    `pitch_curve` の編集を切った Segment は、編集全体の点（Segment の外の点も）を持ったまま原点だけずらしている
+    （`render/pipeline.py: _apply_to_segment`・`_slice`）。そのまま次の Segment の点列とつなぐと時刻が戻り、
+    np.interp（再合成の曲線の引き方）の結果が崩れて、隣のずらし量が漏れる（0 の曲線を足すだけで前のノートの
+    +282 セントが次のノートに掛かった）。つなぐ側だけ切れば、同じ Segment の中の値は変わらない。"""
+    # 点の時刻は丸めてある（`apply_layers` の round(…, 9)）ので、端から CLIP_TOL_SEC を超えて外にはみ出す点が
+    # 無ければ切らない（切ると値は同じでも点列が変わり、つなぎ目の外れていない曲線の再合成まで変わる）
+    tt = [p[0] for p in pts]
+    cc = [p[1] for p in pts]
+    if lo is not None and tt[0] >= lo - CLIP_TOL_SEC:
+        lo = None
+    if hi is not None and tt[-1] <= hi + CLIP_TOL_SEC:
+        hi = None
+    out = []
+    if lo is not None and tt[0] < lo:
+        out.append([lo, float(np.interp(lo, tt, cc))])
+    for t, c in pts:
+        if (lo is None or t >= lo) and (hi is None or t <= hi):
+            out.append([t, c])
+    if hi is not None and tt[-1] > hi:
+        out.append([hi, float(np.interp(hi, tt, cc))])
+    return out
+
+
 def _join_layer_pieces(segs):
     """窓で切った Segment のうち、途切れずに続く（同じ伸縮・移動の）ものを 1 つにまとめる。
 
@@ -769,7 +796,9 @@ def _join_layer_pieces(segs):
                 and abs(p.gain - s.gain) < 1e-12
                 and abs(p.move_ms - s.move_ms) < 1e-12):
             sh = s.start_sec - p.start_sec
-            p.curve_points = _as_curve(p) + [[t + sh, c] for t, c in _as_curve(s)]
+            # つなぎ目より後ろの p の点・前の s の点は落とす（点列の時刻を昇順に保つ）
+            p.curve_points = (_clip_curve(_as_curve(p), hi=sh)
+                              + [[t + sh, c] for t, c in _clip_curve(_as_curve(s), lo=0.0)])
             p.cents = 0.0
             p.end_sec = s.end_sec
             p.edit_ids = list(p.edit_ids) + [i for i in s.edit_ids if i not in p.edit_ids]
