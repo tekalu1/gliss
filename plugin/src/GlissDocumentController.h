@@ -196,7 +196,7 @@ private:
     bool pluginStateLoaded = false;
 
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
-    std::unique_ptr<TestBridge> testBridge;   // GLISS_TEST_BRIDGE_DIR（試験用の画面の代わり）
+    std::unique_ptr<TestBridge> testBridge;   // GLISS_TEST_BRIDGE_DIR（試験用の画面の代わり。GLISS_TEST_HOOKS のビルドだけ）
     juce::ThreadPool bridgePool { 2 };   // engineCall・restartEngine・saveState の書き込み（メッセージスレッドで待たない）
 };
 

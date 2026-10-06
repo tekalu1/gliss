@@ -71,7 +71,8 @@ private:
 };
 
 //==============================================================================
-/** 試験用（GLISS_TEST_BRIDGE_DIR）: 画面の engineCall の代わり。フォルダの <名前>.call.json（{tool, args}）を順に
+#if GLISS_TEST_HOOKS
+/** 試験用（GLISS_TEST_BRIDGE_DIR。CMake の GLISS_TEST_HOOKS のビルドだけ）: 画面の engineCall の代わり。フォルダの <名前>.call.json（{tool, args}）を順に
     engineCall に渡し、答えを <名前>.result.json に書く（plugin/tests/aratest の GlissARATest -changes が使う）。
     args の文字列 "@ara:<修飾の persistentID>" はその修飾のトラックの id に置き換える。メッセージスレッドで動く。 */
 class GlissDocumentController::TestBridge final : private juce::Timer
@@ -121,6 +122,9 @@ private:
     juce::File dir;
     std::shared_ptr<bool> busy = std::make_shared<bool> (false);
 };
+#else
+class GlissDocumentController::TestBridge {};   // 配布のビルド: 試験用の口は無い
+#endif
 
 //==============================================================================
 GlissAudioModification::GlissAudioModification (juce::ARAAudioSource* audioSource,
@@ -191,12 +195,14 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
     sync = std::make_unique<DocumentSync> (EngineConfig::discover(), std::move (options), std::move (callbacks));
     diag::log ("document: created, work key " + workKey + (disabled ? " (engine disabled)" : ""));
 
+#if GLISS_TEST_HOOKS
     if (const auto dir = env ("GLISS_TEST_BRIDGE_DIR"); dir.isNotEmpty() && juce::File::isAbsolutePath (dir))
     {
         juce::File (dir).createDirectory();
         testBridge = std::make_unique<TestBridge> (*this, juce::File (dir));
         diag::log ("document: test bridge on " + dir);
     }
+#endif
 }
 
 GlissDocumentController::~GlissDocumentController()

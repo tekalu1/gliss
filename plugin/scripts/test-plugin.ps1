@@ -87,7 +87,8 @@ function Report([string]$Name, [bool]$Ok, [string]$Detail = '') {
 
 try {
     if (-not $SkipBuild) {
-        cmake -S $plugin -B $build -G 'Visual Studio 17 2022' -A x64 -Wno-dev | Out-Null
+        # GLISS_TEST_HOOKS: the test bridge (GLISS_TEST_BRIDGE_DIR) used by GlissARATest -changes; release builds leave it out
+        cmake -S $plugin -B $build -G 'Visual Studio 17 2022' -A x64 -Wno-dev -DGLISS_TEST_HOOKS=ON | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'cmake configure (plugin) failed' }
         cmake --build $build --config $Config --target GlissARA_VST3 GlissHostCheck GlissPluginTests --parallel 8 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'cmake build (plugin) failed' }

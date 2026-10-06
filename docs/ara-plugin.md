@@ -281,7 +281,8 @@ AI からの手順:
 | `GLISS_ARA_TRACE_DIR` | 指すフォルダの `gliss-ara-<プロセス ID>.log` に、プラグインの出来事、通常再生の `trace`、EditorRenderer 試聴の `preview-trace` と `preview: release` を書く。試聴の各ブロックは加算したサンプルのフレーム数・非ゼロフレーム数・二乗和を数えて atomic で公開し、ログは message thread のタイマーから書く。未設定なら計測しない |
 | `GLISS_ARA_READ_TIMEOUT_MS` | リアルタイムの描画でも先読みの完了をこの ms だけ待つ。検証ホスト（TestHost は CPU の速さで取りに来る）で欠けなく比べるため。普段は使わない |
 | `GLISS_ARA_SYNC_WAIT_MS` | リアルタイムの描画でも、同期（エンジン・差分の再合成）の完了をこの ms だけ待つ（prepareToPlay ごとの持ち時間。既定はバウンスのときだけ 10 秒）。検証ホストで編集の当たった音を描かせるため |
-| `GLISS_TEST_BRIDGE_DIR` | 試験用の画面の代わり（絶対パス）。そのフォルダの `<名前>.call.json`（`{"tool", "args"}`）を順に画面と同じ `engineCall` に渡し、答えを `<名前>.result.json` に書く。`args` の文字列 `"@ara:<修飾の persistentID>"` はその修飾のトラックの id に置き換える（`GlissARATest -changes`） |
+| `GLISS_TEST_BRIDGE_DIR` | **CMake の `GLISS_TEST_HOOKS=ON` のビルドだけ**（`test-plugin.ps1` が ON で構成する。配布の `scripts/build-plugin.mjs` は OFF で構成し、出来た DLL にこの名前が無いことを確かめる）。試験用の画面の代わり（絶対パス）。そのフォルダの `<名前>.call.json`（`{"tool", "args"}`）を順に画面と同じ `engineCall` に渡し、答えを `<名前>.result.json` に書く。`args` の文字列 `"@ara:<修飾の persistentID>"` はその修飾のトラックの id に置き換える（`GlissARATest -changes`） |
+| `GLISS_TEST_MAX_RENDER_SEC`・（エンジン）`GLISS_TEST_RENDER_DELAY_SEC` | 試験用。1 回の `ara_render_dirty` で再合成する長さ（`GLISS_TEST_HOOKS` のビルドだけ）と、エンジンが窓を作る呼び出しの前に待つ秒。再合成が長い間の知らせを確かめる（`GlissARATest -changes` の 16） |
 | `GLISS_TEST_EDIT` | 試験用の編集。エンジンにつないで最初の修飾を解析した後に 1 回だけ当てる。`{"tool": "shift_pitch", "args": {...}}`・`shift_pitch` の引数そのもの（`{"cents": 100, "start_sec": 0, "end_sec": 5}`）・`shift_pitch:<note_id>:<cents>` |
 | `GLISS_ENGINE_DISABLED` | `1` でエンジンを起動しない（原音のまま。エンジンの要らない検証を速く・利用者の環境のエンジンを起動しないため） |
 | `GLISS_PLUGIN_STATE_FILE` | 画面の設定 `plugin-state.json`（既定 `%APPDATA%\Gliss\plugin-state.json`）の置き場を差し替える（試験で利用者の設定を書かない） |

@@ -134,7 +134,9 @@ function main() {
   console.log(`${vs.name} ${vs.version}`);
 
   const cached = cachedGenerator();
-  const configure = ['-S', PLUGIN, '-B', BUILD, '-Wno-dev'];
+  // 試験用の口（GLISS_TEST_BRIDGE_DIR。plugin/CMakeLists.txt の GLISS_TEST_HOOKS）は配布に入れない。test-plugin.ps1 が
+  // 同じ plugin/build を ON で構成していても、ここで OFF に戻す
+  const configure = ['-S', PLUGIN, '-B', BUILD, '-Wno-dev', '-DGLISS_TEST_HOOKS=OFF'];
   if (!cached) {
     if (vs.generator) configure.push('-G', vs.generator);
     configure.push('-A', 'x64');
@@ -149,6 +151,10 @@ function main() {
   const built = path.resolve(info.binary);
   const bundle = path.dirname(path.dirname(path.dirname(built)));
   if (!fs.existsSync(built) || path.basename(bundle) !== 'Gliss.vst3') throw new Error(`ビルドしたのに ${built} が無い`);
+  // 試験用の口（GLISS_TEST_BRIDGE_DIR。plugin/CMakeLists.txt の GLISS_TEST_HOOKS）が配布に入っていないこと
+  if (fs.readFileSync(built).includes(Buffer.from('GLISS_TEST_BRIDGE_DIR'))) {
+    throw new Error(`${built} に試験用の口が入っている（GLISS_TEST_HOOKS=OFF で構成し直す）`);
+  }
   fs.rmSync(PLUGIN_DIST, { recursive: true, force: true });
   fs.mkdirSync(PLUGIN_DIST, { recursive: true });
   fs.cpSync(bundle, BUNDLE, { recursive: true });
