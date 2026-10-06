@@ -2273,6 +2273,8 @@ class Project:
         if not force and self._phonemes.get(source) is not None and src is not None and \
                 _src_sig(src[0]) == src and (self.background or os.path.exists(cache)):
             # 今の歌詞の音素を、同じファイルからもう読んでいる（歌詞を変えると _phonemes は捨てる）
+            if not os.path.exists(keyed):
+                _copy(src[0], keyed)
             self._register_phonemes(source, keyed if self.background else None)
             return self._phonemes[source]
         for path in ((cache, keyed) if not force else ()):
@@ -2305,6 +2307,9 @@ class Project:
                 self._srcs["ph_" + source] = sig
                 if path != cache and not self.background:
                     _copy(path, cache)
+                if path != keyed and not os.path.exists(keyed):
+                    # 鍵付きの保存が無い（古い作業場所・外された）: 今の写しから作る（準備済みの印に要る）
+                    _copy(path, keyed)
                 self._register_phonemes(source)
                 return self._phonemes[source]
         if not self.background:
