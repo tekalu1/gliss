@@ -1956,36 +1956,114 @@ def render_region(start_sec: float = None, end_sec: float = None, backend: str =
     return _ok(path=out, **info)
 
 
+_AUDITION_KEEP_SEC = 30
+_AUDITION_MAX_FILES = 1024
+_AUDITION_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _audition_output_path(project, frames):
+    """返却済みの試聴WAVを上書きせず、未読の可能性がある間は消さない。"""
+    directory = project.sub("renders")
+    now = time.time()
+    files = []
+    for entry in os.scandir(directory):
+        if not (entry.name.startswith("audition-") and entry.name.endswith(".wav")):
+            continue
+        try:
+            st = entry.stat()
+            if now - st.st_mtime >= _AUDITION_KEEP_SEC:
+                try:
+                    os.unlink(entry.path)
+                    continue
+                except OSError:
+                    pass  # native が開いているファイルは保持し、容量に数える
+            files.append(st.st_size)
+        except FileNotFoundError:
+            continue
+    needed = 44 + int(frames) * 4
+    if (len(files) >= _AUDITION_MAX_FILES
+            or sum(files) + needed > _AUDITION_MAX_BYTES):
+        raise ProjectError("試聴の一時WAVが上限に達した。古いファイルの保持期限後に再試行する")
+    return os.path.abspath(os.path.join(directory, "audition-%s.wav" % uuid.uuid4().hex))
+
+
 @_tool
 def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
                     end_sec: float = None, backend: str = "praat") -> dict:
     """**画面向け**: つかんだノートのプレビュー音（ノートをドラッグしている間に鳴らす。issue #27）。
 
     ノートを `cents` だけ動かした**つもり**で [start_sec, end_sec)（既定はノートの範囲）を再合成し、
-    モノラル 32 bit float の WAV（プロジェクトの renders/audition.wav。毎回上書き）のパスを返す。
-    **プロジェクトは書き換えない**（編集も取り消しの履歴も増えない）。中身は、確定した編集に
-    `shift_pitch(cents, note_id)` を足したときの `render_region` と同じ。LLM が聴くなら render_preview を使う。
+    モノラル 32 bit float の WAV（プロジェクトの renders/audition-*.wav。要求ごとに一意）のパスを返す。
+    **プロジェクトは書き換えない**（編集も取り消しの履歴も増えない）。ARAの同版PCMがあればその
+    範囲を厳密に返す。長いpitch編集の局所再合成は全長窓と位相が違う場合がある。
+    LLM が聴くなら render_preview を使う。
     """
     p = _project()
-    p.reload_if_changed()
+    if p.reload_if_changed():
+        _invalidate_renderer()
     from .render.region import RegionRenderer, audition as _aud
+    from .mcp_ara import _rev_parts, audition_pcm, audition_renderer
     name = resolve_backend_name(backend)
-    # 再生（render_tracks）が作った下ごしらえがあれば使い回す（チャンネルは問わない）。無ければモノラルで作る
-    rr = _state["region"].get((name, "mono")) or _state["region"].get((name, "all"))
-    if rr is None:
-        rr = RegionRenderer.for_project(p, backend=backend, channels="mono")
-        _state["region"][(name, "mono")] = rr
     with _prep_yield():
-        y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr)
+        p.ensure_analyzed()
+        view_rev = p.view_key()
+        asig, erev = _rev_parts(p)
+        rev = "%s:%s" % (asig, erev)
+        track_id = _state.get("track")
+        session = _state.get("session")
+        ara_id = None
+        if session is not None and track_id is not None:
+            ara_id = session.track(track_id).get("ara_id")
+        cached = None
+        cache_t0 = time.perf_counter()
+        if ara_id and abs(float(cents)) < 1e-6:
+            note = p.note(note_id)
+            sr = int(p.take["sr"])
+            ia = max(0, int(round((note.start_sec if start_sec is None else float(start_sec)) * sr)))
+            ib = min(int(p.take["frames"]), int(round(
+                (note.end_sec if end_sec is None else float(end_sec)) * sr)))
+            if ib <= ia:
+                raise ValueError("範囲が不正（start >= end）")
+            cached = audition_pcm(ara_id, p, name, asig, rev, ia, ib)
+        if cached is not None:
+            y, (wa, wb) = cached
+            cache_sec = round(time.perf_counter() - cache_t0, 4)
+            info = {"sr": sr, "frames": ib - ia, "start_sec": round(ia / sr, 6),
+                    "cents": 0.0, "backend": name,
+                    "rendered_windows_sec": [[round(wa / sr, 4), round(wb / sr, 4)]],
+                    "timing_sec": {"segments": 0.0, "prepare": 0.0, "render": cache_sec,
+                                   "total": cache_sec, "ara_pcm_reused": True}}
+        else:
+            # ARAの再生用レンダラが同じ解析版なら共有する。無ければ単体アプリのキャッシュを使う。
+            rr = audition_renderer(ara_id, p, name, asig) if ara_id else None
+            if rr is None:
+                rr = (_state["region"].get((name, "mono", "audition"))
+                      or _state["region"].get((name, "mono"))
+                      or _state["region"].get((name, "all")))
+                if rr is not None and (rr.f0r is not p.take_f0 or rr.n_frames != int(p.take["frames"])):
+                    rr = None
+            if rr is None:
+                rr = RegionRenderer.for_project(p, backend=backend, channels="mono",
+                                                audition_local=True)
+                _state["region"][(name, "mono", "audition")] = rr
+            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr)
+        if p.view_key() != view_rev or _rev_parts(p) != (asig, erev):
+            raise ProjectConflict("試聴中に解析または編集の版が変わった。結果を破棄した")
     if y.ndim == 2 and y.shape[1] > 1:
         y = y.mean(axis=1)
-    out = os.path.abspath(os.path.join(p.sub("renders"), "audition.wav"))
+    out = _audition_output_path(p, len(y))
     import soundfile as sf
     tmp = out + ".tmp.wav"
-    sf.write(tmp, np.asarray(y, dtype="float32").reshape(-1), info["sr"], subtype="FLOAT")
-    os.replace(tmp, out)
+    try:
+        sf.write(tmp, np.asarray(y, dtype="float32").reshape(-1), info["sr"], subtype="FLOAT")
+        os.replace(tmp, out)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     return _ok(path=out, sr=info["sr"], frames=info["frames"], start_sec=info["start_sec"],
                note_id=note_id, cents=info["cents"], backend=info["backend"],
+               rev=rev, view_rev=view_rev, track_id=track_id, ara_id=ara_id,
+               source_id=(p.take or {}).get("source_id"),
                rendered_windows_sec=info["rendered_windows_sec"], timing_sec=info["timing_sec"])
 
 
@@ -2073,7 +2151,8 @@ def export_view_data(start_sec: float = None, end_sec: float = None,
     """
     p = _project()
     p.reload_if_changed()
-    return _ok(**_export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path))
+    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path)
+    return _ok(**out, view_rev=p.view_key())
 
 
 @_tool

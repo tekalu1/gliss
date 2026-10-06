@@ -45,6 +45,9 @@ Praat が出せない区間は**自前の TD-PSOLA（psola）で合成**し、in
 ライセンス: Praat / parselmouth は GPL-3.0-or-later。このツールは GPL-3.0-or-later で配布する（2026-09-23 決定）ので製品に含めてよい。
 """
 import numpy as np
+import os
+import struct
+import tempfile
 
 TIME_STEP = 0.01          # 段階0と同じ（To Manipulation の time step）
 FLOOR_MIN = 40.0          # 段階0: floor = max(40, ...)
@@ -116,8 +119,15 @@ class PraatContext:
             self.pulses = call(manip, "Extract pulses")
             pt = call(manip, "Extract pitch tier")
             k = int(call(pt, "Get number of points"))
-            self.pt_t = np.array([call(pt, "Get time from index", i + 1) for i in range(k)], dtype="float64")
-            self.pt_v = np.array([call(pt, "Get value at index", i + 1) for i in range(k)], dtype="float64")
+            if k > 1000:
+                try:
+                    self.pt_t, self.pt_v = _pitch_tier_points(pt, k)
+                except (OSError, ValueError):
+                    self.pt_t = np.array([call(pt, "Get time from index", i + 1) for i in range(k)], dtype="float64")
+                    self.pt_v = np.array([call(pt, "Get value at index", i + 1) for i in range(k)], dtype="float64")
+            else:
+                self.pt_t = np.array([call(pt, "Get time from index", i + 1) for i in range(k)], dtype="float64")
+                self.pt_v = np.array([call(pt, "Get value at index", i + 1) for i in range(k)], dtype="float64")
             self.n_pulses = int(call(self.pulses, "Get number of points"))
         except Exception as e:                       # 素材が短すぎる等
             self.error = _short_error(e)
@@ -135,6 +145,28 @@ class PraatContext:
         return {"pitch_floor": round(self.floor, 1), "pitch_ceiling": round(self.ceil, 1),
                 "time_step": TIME_STEP, "pulses": self.n_pulses, "pitch_tier_points": len(self.pt_t),
                 "error": self.error, "shared_analysis": self.level_ref is not None}
+
+
+def _pitch_tier_points(tier, count):
+    """長尺PitchTierの点をPraatバイナリ形式で一括取得する。"""
+    fd, path = tempfile.mkstemp(prefix="gliss-pitch-tier-", suffix=".bin")
+    os.close(fd)
+    try:
+        tier.save_as_binary_file(path)
+        with open(path, "rb") as f:
+            data = f.read()
+        header = b"ooBinaryFile\tPitchTier"
+        offset = len(header) + 2 * 8 + 4
+        if (not data.startswith(header) or len(data) != offset + 16 * count
+                or struct.unpack_from(">i", data, len(header) + 16)[0] != count):
+            raise ValueError("Praat PitchTierの点数が一致しない")
+        values = np.frombuffer(data, dtype=">f8", count=2 * count, offset=offset).astype("float64")
+        return values[::2], values[1::2]
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 class _Fallback(Exception):

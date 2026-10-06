@@ -414,6 +414,54 @@ def _renderer_for(ara_id, p, backend, channels, asig):
     return rr
 
 
+def audition_renderer(ara_id, p, backend, asig):
+    """同じ素材・解析版ならARA再生のレンダラを試聴へ貸す（新たな全域準備を避ける）。"""
+    hit = _renderers.get(ara_id)
+    if hit is None:
+        return None
+    key, rr = hit
+    if key[0] != _norm(p.dir) or key[1] != (p.take or {}).get("sha256"):
+        return None
+    if key[2] != backend or key[4] != asig:
+        return None
+    _renderers.move_to_end(ara_id)
+    return rr
+
+
+def audition_pcm(ara_id, p, backend, asig, rev, ia, ib):
+    """ARAへ渡した同じ版のPCMに要求範囲が丸ごとあれば、その部分を返す。"""
+    st = _render.get(ara_id)
+    if (st is None or st.get("rev") != rev or st.get("asig") != asig
+            or st.get("backend") != backend or st.get("pending")
+            or st.get("project_dir") != _norm(p.dir)):
+        return None
+    pcm = st.get("audition_pcm")
+    if (pcm is None or pcm["sr"] != int(p.take["sr"])
+            or pcm["source_frames"] != int(p.take["frames"])):
+        return None
+    channels = pcm["channels"]
+    for w in pcm["windows"]:
+        first = w["start_frame"]
+        last = first + w["frames"]
+        if not (first <= ia < ib <= last):
+            continue
+        offset = w["byte_offset"] + (ia - first) * channels * 4
+        length = (ib - ia) * channels * 4
+        try:
+            with open(pcm["path"], "rb") as f:
+                f.seek(offset)
+                raw = f.read(length)
+            if len(raw) != length:
+                return None
+        except OSError:
+            return None
+        y = np.frombuffer(raw, dtype="<f4").reshape(-1, channels)
+        if channels > 1:
+            return y.mean(axis=1, dtype="float64"), (first, last)
+        return y[:, 0].copy(), (first, last)
+    return None
+
+
 def _out_path(wd, ara_id):
     d = os.path.join(wd, OUT_DIR)
     os.makedirs(d, exist_ok=True)
@@ -777,9 +825,15 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     if remaining:
         _out_seq[0] += 1
         token = "%s~%d" % (rev, _out_seq[0])
+    previous_pcm = (st.get("audition_pcm") if st is not None and not reset
+                    and st.get("rev") == rev else None)
+    current_pcm = ({"path": path, "windows": out_windows, "channels": int(ch),
+                    "sr": int(sr), "source_frames": int(n)} if path else previous_pcm)
     _render[ara_id] = {"rev": token, "segs": segs, "windows": [list(w) for w in wins],
                        "pending": _merge([list(w) for w in remaining]), "backend": name,
-                       "channels": channels, "asig": asig}
+                       "channels": channels, "asig": asig,
+                       "project_dir": _norm(p.dir) if p is not None else None,
+                       "audition_pcm": current_pcm}
     return _ok(track=t["id"], ara_id=ara_id, rev=token, reset=reset, more=bool(remaining),
                analysis_pending=pending_analysis, sr=int(sr),
                channels=int(ch), source_frames=int(n), restore=restore, windows=out_windows, path=path,
