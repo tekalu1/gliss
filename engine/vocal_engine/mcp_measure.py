@@ -62,15 +62,8 @@ def measure_against_guide(start_sec: float = None, end_sec: float = None, note_i
         background = bool(render) and (t1 - t0) * 2.0 > _srv.JOB_THRESHOLD_SEC
 
     def work():
-        rr = None
-        if render:
-            from .render.base import resolve_backend_name
-            from .render.region import RegionRenderer
-            key = (resolve_backend_name(backend), "mono")
-            rr = _srv._state["region"].get(key)
-            if rr is None:
-                rr = RegionRenderer.for_project(p, backend=backend, channels="mono")
-                _srv._state["region"] = {key: rr}
+        # ジョブなら、走る時の編集対象は p と違うことがある（中継）。p の再合成器を使う
+        rr = _srv._region_renderer(p, backend, "mono") if render else None
         with _srv._prep_yield():
             res = GM.measure(p, start_sec, end_sec, note_ids=note_ids, render=bool(render),
                              backend=backend, renderer=rr)
