@@ -29,15 +29,22 @@ juce::File pythonForTests()
 
 // 偽のエンジン: 呼ばれるたびに state.json を読み、修飾ごとに {rev, state, windows, pending} を返す。
 // ara_render_dirty は since が前に返した版と違えば reset、windows なら 100 フレームの窓（中身は 0.5）。
-const char* fakeEngine = R"PY(import json, os, sys
+const char* fakeEngine = R"PY(import json, os, sys, time
 d = os.path.dirname(os.path.abspath(__file__))
 pcm = os.path.join(d, 'win.f32')
 with open(pcm, 'wb') as f:
     f.write(b'\x00\x00\x00\x3f' * 100)
 last = {}
 def state():
-    with open(os.path.join(d, 'state.json'), encoding='utf-8') as f:
-        return json.load(f)
+    # 試験の書き手は置き換え（ReplaceFile）で書くが、置き換えの最中は開けないことがある: 少し待って読み直す
+    for attempt in range(100):
+        try:
+            with open(os.path.join(d, 'state.json'), encoding='utf-8') as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            if attempt == 99:
+                raise
+            time.sleep(0.01)
 def reply(id, value):
     print(json.dumps({'jsonrpc': '2.0', 'id': id, 'result': {'structuredContent': {'result': value}}}), flush=True)
 for line in sys.stdin:
@@ -330,11 +337,8 @@ private:
         root->setProperty ("mods", juce::var (mods));
         root->setProperty ("guides", juce::var (g));
         root->setProperty ("render_changed", renderChanged);
-        const auto file = dir.getChildFile ("state.json");
-        const auto tmp = dir.getChildFile ("state.json.tmp");
-        tmp.replaceWithText (juce::JSON::toString (juce::var (root)));
-        for (int i = 0; i < 50 && ! tmp.moveFileTo (file); ++i)
-            juce::Thread::sleep (10);
+        // 置き換えで書く（moveFileTo は先に消すので、偽のエンジンが無いファイルを読むことがある）
+        expect (dir.getChildFile ("state.json").replaceWithText (juce::JSON::toString (juce::var (root))));
     }
 
     /** 同期が落ち着くまで（同期を 2 周させてから settled を待つ）。 */

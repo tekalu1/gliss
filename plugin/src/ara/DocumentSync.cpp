@@ -636,12 +636,13 @@ bool DocumentSync::captureSource (const SyncSource& s, const SyncModel& m)
 
     if (ok)
     {
-        // エンジンがちょうど読んでいると置き換えられないことがある。少し待ってやり直す。
+        // 置き換える（moveFileTo は先に消すので、エンジンが無いファイルを見ることがある）。エンジンがちょうど読んでいると
+        // 置き換えられないことがある。少し待ってやり直す。
         ok = false;
 
         for (int attempt = 0; attempt < 20 && ! ok; ++attempt)
         {
-            ok = tmp.moveFileTo (wav);
+            ok = tmp.replaceFileIn (wav);
 
             if (! ok)
                 juce::Thread::sleep (50);
