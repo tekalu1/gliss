@@ -748,6 +748,9 @@ def analyze_take(force: bool = False, estimator: str = None,
                                   cancel=cancel, progress=report, commit=commit, latest=latest)
                         # 明示した方式をそのトラックの方式にする（準備が譲っている間に。ここを出たら準備が再開する）
                         mcp_tracks.remember_estimator(q, est)
+                if default and estimator is not None:
+                    # 今の方式と同じ方式の明示: 方式はそのまま、利用者が明示した印だけ付ける（方式探しで戻さない）
+                    mcp_tracks.mark_explicit(q)
                 break
             except CacheBroken:
                 # 壊れたファイルは外し、印も取り消した（`Project._cache_broken`）。1 回ごとに 1 つ外れる
@@ -2459,6 +2462,7 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
                                        (" / ".join(f0mod.ESTIMATORS), estimator))
                 t = s.track(tid)
                 t["estimator"] = estimator
+                t[_mcp_tracks.EXPLICIT_KEY] = True  # 利用者が明示した（ara_render_dirty の方式探しで戻さない）
                 if p is not None:
                     p.estimator_pref = estimator
                 cleared = old_tracks != s.tracks

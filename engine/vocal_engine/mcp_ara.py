@@ -358,6 +358,7 @@ def _apply_estimator(s, t, est):
     if why:
         return None, why
     t["estimator"] = est
+    t.pop(_mt.EXPLICIT_KEY, None)               # アーカイブの方式（利用者の明示ではない）
     return est, None
 
 
@@ -365,7 +366,10 @@ def _fit_estimator(s, t, p):
     """ノートの ID に頼る編集の対象が、今の方式の解析に無いとき、全部の対象が見つかる方式を探してそのトラックの方式にする。
     方式の記録の無い（古い）アーカイブ・記録が別の方式になってしまったアーカイブ（開き直しで方式が外れたまま保存された曲）を
     救う。ノートの ID は解析の方式で変わるので、補正を作った方式でなければ編集が当たらない。今の方式で全部当たるなら何もしない。
-    探す（F0 の推定は方式ごとに数秒〜数十秒）のは、同じ組み合わせにつき 1 回だけ。見つかれば True（解析し直した）。"""
+    探す（F0 の推定は方式ごとに数秒〜数十秒）のは、同じ組み合わせにつき 1 回だけ。見つかれば True（解析し直した）。
+
+    利用者が明示した方式（`analyze_take(estimator=…)`・`set_f0_estimator(scope="current")`。トラックの
+    `estimator_explicit`）は戻さない。当たらない編集は、呼び出し元が missing として報告する（`_missing_error`）。"""
     from .analysis import f0 as F
     missing = sorted({nid for _e, nid in p._missing_note_targets()})
     if not missing:
@@ -375,6 +379,10 @@ def _fit_estimator(s, t, p):
     if key in _fit_tried:
         return False
     _fit_tried.add(key)
+    if t.get(_mt.EXPLICIT_KEY):
+        log.get().warning("修飾 %s: 編集の対象のノート %s が、利用者が明示した方式 %s の解析に無い（方式は戻さない）",
+                          t["ara_id"], ", ".join(missing[:5]), cur)
+        return False
     for cand in F.ESTIMATORS:
         if cand == cur or _estimator_problem(cand):
             continue
@@ -387,7 +395,7 @@ def _fit_estimator(s, t, p):
             continue
         log.get().warning("修飾 %s: 編集の対象のノート %s が方式 %s の解析に無い。全部当たる %s に替える",
                           t["ara_id"], ", ".join(missing[:5]), cur, cand)
-        _apply_estimator(s, t, cand)
+        _apply_estimator(s, t, cand)             # 方式探しで決めた方式（明示の印は付けない）
         p.estimator_pref = cand
         s.save()
         with prep.exclusive(p.dir):
@@ -399,6 +407,19 @@ def _fit_estimator(s, t, p):
     log.get().warning("修飾 %s: 編集の対象のノート %s が、どの方式の解析にも揃わない（今の方式 %s のまま）",
                       t["ara_id"], ", ".join(missing[:5]), cur)
     return False
+
+
+def _missing_error(t, p):
+    """ノートの ID に頼る編集の対象が今の解析に無い（方式探しでも揃わない・利用者が明示した方式）: 黙って
+    別のノートや無しで鳴らさず、どの編集が当たらないかを ProjectError で返す（再合成しない）。"""
+    lost = p._missing_note_targets()
+    if not lost:
+        return
+    ids = sorted({nid for _e, nid in lost})
+    raise ProjectError("修飾 %s: ノートの ID を対象にした編集 %d 件（%s）の対象のノート %s が、今の F0 の方式 %s の解析に無い"
+                       "（missing_note_targets）。方式を補正を作った方式に戻すか、その編集を外す"
+                       % (t.get("ara_id"), len(lost), ", ".join(e.id for e, _n in lost[:5]),
+                          ", ".join(ids[:5]), p.f0_estimator()))
 
 
 # ---------------------------------------------------------------- 版
@@ -854,6 +875,7 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
         if p.edits and not pending_analysis:
             p.ensure_analyzed()
             _fit_estimator(s, t, p)              # 編集の対象のノートが無いとき、当たる方式に替える（アーカイブの方式が合わない曲）
+            _missing_error(t, p)
         asig, erev = _rev_parts(p)
         rev = "%s:%s" % (asig, erev)
         if p.edits and not pending_analysis:
