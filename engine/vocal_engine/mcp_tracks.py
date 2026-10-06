@@ -477,7 +477,7 @@ def add_track(path: str, kind: str = None, name: str = None, offset_sec: float =
     elif kind is not None and kind != t["kind"]:
         if kind == "inst" and t["id"] == current_track_id():
             raise SessionError("編集中のトラックは伴奏にできない")
-        t["kind"] = kind
+        s.set_kind(t, kind)
     if guide:
         if t["kind"] != "vocal":
             raise SessionError("伴奏のトラックはガイドにできない（kind を vocal にする）")
@@ -572,12 +572,7 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
             raise SessionError("編集中のトラックは伴奏にできない（先に別のトラックを選ぶ）")
         if kind == "inst" and t["kind"] == "vocal" and len(s.vocal_tracks()) <= 1:
             raise SessionError("ボーカルのトラックが無くなるので伴奏にできない")
-        t["kind"] = kind
-        if kind == "inst":
-            s.drop_guide_refs(track_id)          # このトラックを指していたトラックごとのガイドは共通のガイドに戻す
-            set_guide_id(t, None)                # 伴奏はガイドを持たない
-            if s.guide == track_id:
-                s.guide = None
+        s.set_kind(t, kind)                      # 伴奏にしたら、このトラックの指定と、これを指していた指定を外す
     if name is not None:
         t["name"] = str(name).strip() or t["name"]
     if mute is not None:

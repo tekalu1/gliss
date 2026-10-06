@@ -277,7 +277,8 @@ class Session:
         self.tempo = None            # テンポ（issue #18。無ければ秒のグリッド）
         self.tempo_checked = []      # iXML のテンポを読みに行ったトラック（読み直さない）
         self.ara = False             # DAW（ARA）のドキュメントのセッション（mcp_ara.py）
-        self.ara_gone = {}           # 外した ARA のトラック: ara_id → {id, …}（足し直したら同じ id）
+        self.ara_gone = {}           # 外した ARA のトラック: ara_id → {id, guide_id?, guide_refs?, …}（足し直したら同じ id・同じガイドの指定）
+        self.ara_guide_wait = {}     # 足し直したら戻すガイドの指定: トラック id → ガイドのトラック id（相手がまだ戻っていない）
 
     # ------------------------------------------------------------ 読み書き
     @property
@@ -318,6 +319,7 @@ class Session:
         self.ara = bool(d.get("ara"))
         self.ara_gone = {str(k): dict(v) if isinstance(v, dict) else {"id": str(v)}
                          for k, v in (d.get("ara_gone") or {}).items()}
+        self.ara_guide_wait = {str(k): str(v) for k, v in (d.get("ara_guide_wait") or {}).items()}
         self._sig = self._stat()
         return self
 
@@ -327,6 +329,8 @@ class Session:
              "tracks": self.tracks, "tempo": self.tempo, "tempo_checked": self.tempo_checked}
         if self.ara:
             d.update(ara=True, ara_gone=self.ara_gone)
+            if self.ara_guide_wait:
+                d["ara_guide_wait"] = self.ara_guide_wait
         if self.history is not None:
             d.update(history=self.history, history_seq=self.history_seq,
                      history_marks=self.history_marks)
@@ -516,8 +520,19 @@ class Session:
     def effective_guide_id(self, t):
         """トラック t が使うガイドのトラック id。`guide_id`（トラックごと）があればそれ、無ければ共通のガイド（`guide`）。
         どちらも無ければ None。t 自身は返さない（共通のガイドのトラック自身にはガイドが無い）。"""
+        if t.get("kind") != "vocal":
+            return None                          # 伴奏はガイドを持たない
         gid = t.get("guide_id") or self.guide
         return gid if gid and gid != t["id"] else None
+
+    def set_kind(self, t, kind):
+        """トラックの種類を変える。伴奏にしたら、そのトラックのガイドの指定と、それを指していた指定（トラックごと・共通）を外す。"""
+        t["kind"] = kind
+        if kind == "inst":
+            self.drop_guide_refs(t["id"])
+            set_guide_id(t, None)
+            if self.guide == t["id"]:
+                self.guide = None
 
     def guide_users(self):
         """ガイドとして使われているトラック id → それを実効のガイドにしているトラック id の並び（ボーカルだけ）。"""

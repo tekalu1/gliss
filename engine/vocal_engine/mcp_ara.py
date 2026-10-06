@@ -124,6 +124,38 @@ def _guides_of(s):
     return out
 
 
+def _guide_records(s, t):
+    """外すトラック t のガイドの指定（本人の `guide_id` と、t を指していた指定）。`ara_gone` に控えて、足し直しで戻す。"""
+    rec = {}
+    if t.get("guide_id"):
+        rec["guide_id"] = t["guide_id"]
+    refs = [x["id"] for x in s.tracks if x.get("guide_id") == t["id"]]
+    if refs:
+        rec["guide_refs"] = refs
+    return rec
+
+
+def _restore_guides(s, t, gone):
+    """足し直したトラック t のガイドの指定を戻す（DAW の取り消し）。相手がまだ戻っていない組は
+    `s.ara_guide_wait`（トラック id → ガイドのトラック id）に預け、相手が戻ったときに当てる。
+    今のトラックに別の指定が入っていれば上書きしない。"""
+    wait = s.ara_guide_wait
+    pairs = []
+    if gone.get("guide_id"):
+        pairs.append((t["id"], gone["guide_id"]))
+    pairs.extend((r, t["id"]) for r in gone.get("guide_refs") or [])
+    pairs.extend(wait.items())
+    by_id = {x["id"]: x for x in s.tracks}
+    for src, dst in pairs:
+        a, b = by_id.get(src), by_id.get(dst)
+        if a is None or b is None:
+            wait[src] = dst                      # 相手がまだ戻っていない
+            continue
+        wait.pop(src, None)
+        if a["kind"] == "vocal" and b["kind"] == "vocal" and src != dst and not a.get("guide_id"):
+            set_guide_id(a, dst)
+
+
 def _audio_sha(path):
     """ソース全体の音の中身のハッシュ（`media.clip_audio_hash` と同じ値。書式・ファイルのバイトによらない）。"""
     return M.clip_hash_of(M.Clip(os.path.abspath(path)))
@@ -595,6 +627,7 @@ def ara_set_modification(ara_id: str, source_path: str, source_id: str | None = 
                         offset_sec=float(offset_sec or 0.0), project_dir="tracks/ara-%s" % _key(ara_id),
                         source_id=source_id or None, ara_id=ara_id, track_id=gone.get("id"))
         t["group"] = group
+        _restore_guides(s, t, gone)
         h = _audio_sha(path)
         t.update(ara_file_sig=_sig(path), ara_audio_sha=h)
         pj = os.path.join(s.project_dir_of(t), "project.json")
@@ -653,7 +686,7 @@ def ara_remove_modification(ara_id: str) -> dict:
     tid = t["id"]
     was_cur = tid == _mt.current_track_id()
     _forget_history(s, tid)
-    s.ara_gone[ara_id] = {"id": tid, "audio_sha": t.get("ara_audio_sha")}
+    s.ara_gone[ara_id] = dict({"id": tid, "audio_sha": t.get("ara_audio_sha")}, **_guide_records(s, t))
     s.remove_track(tid)
     s.save()
     switched = None
@@ -670,6 +703,36 @@ def ara_remove_modification(ara_id: str) -> dict:
     return _ok(removed=True, track=tid, switched_to=switched, reopened=bool(reopened), session=_mt.summary(s))
 
 
+def _plan_guides(s, guides, unknown):
+    """`ara_sync(guides=)` の検査: ([(トラック, 当てるガイドのトラック id | None)], rejected)。
+    知らない ara_id は unknown に、当てられない組（伴奏・自分自身）は rejected に積んで飛ばす（ほかの組は当てる）。"""
+    if guides is None:
+        return [], []
+    if not isinstance(guides, dict):
+        raise SessionError("guides は {ara_id: ガイドの ara_id}")
+    plan, rejected = [], []
+    for aid, gid in guides.items():
+        t = s.find_ara(aid)
+        if t is None:
+            unknown.append(aid)
+            continue
+        want = None
+        if gid:
+            gt = s.find_ara(gid)
+            if gt is None:
+                unknown.append(gid)
+                continue
+            why = ("伴奏のトラックはガイドにできない" if gt["kind"] != "vocal" else
+                   "トラック自身はガイドにできない" if gt["id"] == t["id"] else
+                   "伴奏のトラックにはガイドを指定できない" if t["kind"] != "vocal" else None)
+            if why:
+                rejected.append({"ara_id": aid, "guide": gid, "reason": why})
+                continue
+            want = gt["id"]
+        plan.append((t, want))
+    return plan, rejected
+
+
 @_tool
 def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str | None = None,
              guides: dict | None = None) -> dict:
@@ -681,12 +744,14 @@ def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str |
       （画面のガイドの指定 set_guide_track と違い、取り消しの履歴に入れない）。
     guides: トラックごとのガイド {修飾の ara_id: ガイドの修飾の ara_id}（"" か null でそのトラックの指定を外す）。
       アーカイブの document.guides を戻すとき用（画面の set_track_guide と違い、取り消しの履歴に入れない）。
-      渡した修飾だけを変える（省いた修飾はそのまま）。知らない ara_id は unknown に返して、その指定は当てない。
+      渡した修飾だけを変える（省いた修飾はそのまま）。知らない ara_id は unknown に、当てられない組（伴奏・自分自身）は
+      rejected（[{ara_id, guide, reason}]）に返して、その組だけ飛ばす（ほかの組と tracks・tempo は当てる）。
     編集対象かガイドの位置が変わって、編集対象のガイドの重ね方が変わったら開き直す（reopened = true →
     画面は analyze_take から描き直す）。知らない ara_id は unknown に返す。
     """
     s = _session()
     changed, unknown = [], []
+    guide_plan, rejected = _plan_guides(s, guides, unknown)   # 位置などを変える前に検査する（不正な組は rejected に積んで飛ばす）
     for e in tracks or []:
         if not isinstance(e, dict):
             raise SessionError("tracks の要素は {ara_id, offset_sec?, name?, group?}")
@@ -735,31 +800,10 @@ def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str |
             s.guide = g
             guide_changed = True
     guides_changed = []
-    if guides is not None:
-        if not isinstance(guides, dict):
-            raise SessionError("guides は {ara_id: ガイドの ara_id}")
-        plan = []                                # 全部の検査が通ってから当てる（途中で失敗しても一部だけ変えない）
-        for aid, gid in guides.items():
-            t = s.find_ara(aid)
-            if t is None:
-                unknown.append(aid)
-                continue
-            want = None
-            if gid:
-                gt = s.find_ara(gid)
-                if gt is None:
-                    unknown.append(gid)
-                    continue
-                if gt["kind"] != "vocal":
-                    raise SessionError("伴奏のトラックはガイドにできない: %s" % gid)
-                if gt["id"] == t["id"]:
-                    raise SessionError("トラック自身はガイドにできない: %s" % aid)
-                want = gt["id"]
-            plan.append((t, want))
-        for t, want in plan:
-            if t.get("guide_id") != want:
-                set_guide_id(t, want)
-                guides_changed.append(t["id"])
+    for t, want in guide_plan:
+        if t.get("guide_id") != want:
+            set_guide_id(t, want)
+            guides_changed.append(t["id"])
     guide_changed = guide_changed or bool(guides_changed)
     if changed or tempo_changed or guide_changed:
         s.save()
@@ -768,7 +812,7 @@ def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str |
         _mt._schedule(s)
     return _ok(changed=changed, unknown=unknown, tempo=copy.deepcopy(s.tempo), tempo_changed=tempo_changed,
                guide=s.guide, guide_changed=guide_changed, guides=_guides_of(s),
-               guides_changed=guides_changed, reopened=bool(reopened), session=_mt.summary(s))
+               guides_changed=guides_changed, rejected=rejected, reopened=bool(reopened), session=_mt.summary(s))
 
 
 @_tool
