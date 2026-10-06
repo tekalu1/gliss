@@ -712,6 +712,10 @@ def analyze_take(force: bool = False, estimator: str = None,
     # （issue #63。画面は常に background で呼ぶので、準備済みのトラックでも 200 ms の確認を待っていた）
     cached = default and p.analysis_cached()
     tgt = mcp_tracks.prep_target(p)         # (セッション, トラック)。セッションのトラックでなければ None
+    # 頼まれたときのトラック。中継（ara_relay）は選んだ修飾へ編集対象を一時的に切り替えて呼び、すぐ戻すので、
+    # ジョブが終わるときには編集対象からこのトラックを引けない（方式を覚える先を、ここで決めておく）
+    own_s, own_tid = mcp_tracks._session_of(p)
+    owner = (own_s, own_s.track(own_tid)) if own_s is not None else None
     if cached and tgt is not None:
         sig = prep.track_sig(*tgt)
         pdir = tgt[0].project_dir_of(tgt[1])
@@ -747,10 +751,10 @@ def analyze_take(force: bool = False, estimator: str = None,
                         q.analyze(force=force, estimator=est, sweep=confidence_sweep,
                                   cancel=cancel, progress=report, commit=commit, latest=latest)
                         # 明示した方式をそのトラックの方式にする（準備が譲っている間に。ここを出たら準備が再開する）
-                        mcp_tracks.remember_estimator(q, est)
+                        mcp_tracks.remember_estimator(q, est, target=owner)
                 if default and estimator is not None:
                     # 今の方式と同じ方式の明示: 方式はそのまま、利用者が明示した印だけ付ける（方式探しで戻さない）
-                    mcp_tracks.mark_explicit(q)
+                    mcp_tracks.mark_explicit(q, target=owner)
                 break
             except CacheBroken:
                 # 壊れたファイルは外し、印も取り消した（`Project._cache_broken`）。1 回ごとに 1 つ外れる
@@ -758,6 +762,8 @@ def analyze_take(force: bool = False, estimator: str = None,
                     raise
         _invalidate_renderer()
         t2 = mcp_tracks.prep_target(q)
+        if t2 is None and tgt is not None and os.path.normcase(q.dir) == os.path.normcase(p.dir):
+            t2 = tgt                         # 中継のジョブ: 編集対象が戻った後でも、頼まれたトラックに印を付ける
         if default and t2 is not None:
             prep.mark_ready(t2[0], t2[1], q)
         out = _summary_of_analysis(q)

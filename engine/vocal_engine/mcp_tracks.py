@@ -69,14 +69,32 @@ def reschedule_prep():
 EXPLICIT_KEY = "estimator_explicit"   # session.json のトラック: 方式を利用者が明示した（アーカイブ・方式探しで決まったものでない）
 
 
-def remember_estimator(p, est):
+def _session_track_of(p, target=None):
+    """プロジェクト p のトラック (セッション, トラック id)。target = (セッション, トラック) を渡せばそれ
+    （ジョブの終わりなど、編集対象が別のトラックへ戻った後でも、頼まれたときのトラックへ書く）。"""
+    if target is not None:
+        s, t = target
+        if (s is not None and t is not None and p is not None and t.get("project_dir")
+                and _norm(p.dir) == _norm(s.project_dir_of(t))):
+            s.reload_if_changed()
+            try:
+                s.track(t["id"])
+            except ProjectError:
+                return None, None
+            return s, t["id"]
+    return _session_of(p)
+
+
+def remember_estimator(p, est, target=None):
     """analyze_take で明示した F0 の方式を、そのトラックの方式として覚える（選んでいる方式と同じなら外す）。
     session.json のトラックに `estimator` として保存し、裏の準備の署名・解析もそれを使う（準備が既定の方式で
-    解析し直して差し替えない）。セッションのトラックでなければ（単独のプロジェクト）メモリの上だけ。"""
+    解析し直して差し替えない）。セッションのトラックでなければ（単独のプロジェクト）メモリの上だけ。
+    target: 頼まれたときの (セッション, トラック)（`prep_target`）。中継が編集対象を一時的に切り替えて呼んだ
+    ジョブは、終わるときには編集対象が戻っているので、編集対象からはトラックが引けない。"""
     from .analysis import f0 as f0mod
     pref = None if est == f0mod.resolve_estimator() else est
     p.estimator_pref = pref
-    s, tid = _session_of(p)
+    s, tid = _session_track_of(p, target)
     if s is None:
         return
     t = s.track(tid)
@@ -90,9 +108,9 @@ def remember_estimator(p, est):
         reschedule_prep()
 
 
-def mark_explicit(p):
+def mark_explicit(p, target=None):
     """トラックの今の方式を、利用者が明示した方式として印を付ける（`analyze_take(estimator=…)` が今の方式と同じとき）。"""
-    s, tid = _session_of(p)
+    s, tid = _session_track_of(p, target)
     if s is None:
         return
     t = s.track(tid)
