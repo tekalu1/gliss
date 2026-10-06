@@ -118,3 +118,27 @@ def test_restore_reports_a_newer_renderer_that_this_engine_cannot_play(eng, tmp_
     assert m._state["project"].render_version == 1
     r = _ok(a.ara_restore("mod-2", dict(arc, render_version=99)))
     assert r["render_changed"] is True and m._state["project"].render_version == 2
+
+
+def test_first_analysis_after_restoring_into_a_new_work_folder_keeps_the_saved_state(eng, tmp_path):
+    """新しい作業場所（別の PC・作業フォルダーを消した後）で Gliss の方式のアーカイブを戻し、最初の解析をしても、保存の状態は
+    戻した時のまま（アーカイブの方式の版の印が解析で外れても変わらない。開いただけで「変更あり」にしない）。"""
+    from vocal_engine import mcp_tracks as mt
+    m, a, md, R = eng
+    t1, t2 = _doc(m, a, tmp_path)
+    _ok(mt.select_track(t2))
+    _ok(m.analyze_take(estimator="gliss", background=False))
+    _ok(m.shift_pitch(100, start_sec=0.5, end_sec=1.2))
+    arc = copy.deepcopy(_ok(a.ara_archive(["mod-2"]))["archives"]["mod-2"]["archive"])
+    assert arc["f0_estimator"] == "gliss" and arc["f0_estimator_version"]
+    src = m._state["session"].find_ara("mod-2")["path"]
+    _open(a, key="doc-2")                                           # 新しい作業場所
+    _add(a, "mod-2", src, name="テイク 2")
+    r = _ok(a.ara_restore("mod-2", arc))
+    assert m._state["project"].f0_model_version == arc["f0_estimator_version"]
+    tid = m._state["session"].find_ara("mod-2")["id"]
+    _ok(mt.select_track(tid))
+    _ok(m.analyze_take(background=False))                          # 最初の解析（版の印が外れる）
+    assert m._state["project"].analysis["take"]["estimator"] == "gliss"
+    assert _state(a) == r["state"]
+    assert _ok(a.ara_archive(["mod-2"]))["archives"]["mod-2"]["archive"]["f0_estimator_version"] == arc["f0_estimator_version"]

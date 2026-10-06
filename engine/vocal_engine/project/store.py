@@ -837,6 +837,16 @@ class Project:
         return self
 
     # ------------------------------------------------------------ アーカイブ（UI と無関係の状態）
+    def archived_f0_version(self, estimator):
+        """アーカイブに書く F0 の方式の版（`f0_estimator_version`。Gliss だけ）: 覚えた版（古いアーカイブから戻した印）→
+        保存した解析の版 → 同梱の最新版。印は解析で外れる（版が解析に記録される）が、この値は前後で変わらない。"""
+        if estimator != "gliss":
+            return None
+        recorded = self.analysis.get("take") or {}
+        return (self.f0_model_version or
+                (recorded.get("estimator_version") if recorded.get("estimator") == "gliss" else None) or
+                f0mod.estimator_version("gliss"))
+
     def to_archive(self):
         """**編集の状態だけ**を UI・マシンと無関係な dict にする（ARA のアーカイブに入れる単位）。
 
@@ -851,10 +861,7 @@ class Project:
         JSON にそのまま書ける（数値・文字列・真偽・None・配列・dict だけ）。
         """
         estimator = self.estimator_pref or recorded_estimator(self.analysis)
-        recorded = self.analysis.get("take") or {}
-        version = (self.f0_model_version or
-                   (recorded.get("estimator_version") if recorded.get("estimator") == "gliss" else None) or
-                   f0mod.estimator_version("gliss")) if estimator == "gliss" else None
+        version = self.archived_f0_version(estimator)
 
         def ref(m):
             if not m:

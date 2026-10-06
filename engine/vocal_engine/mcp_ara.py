@@ -440,15 +440,15 @@ def _without_estimates(lyrics, guide=True):
 
 def _state_sig(t, p):
     """保存（ARA のアーカイブ）に入る、利用者が変えた状態の署名。編集の changeset の列（取り消し・やり直しの印を含む）・
-    利用者の歌詞・トラックの F0 の方式（明示・アーカイブ・方式探しで決めたもの。session の estimator）とその版・
-    描画の版から決まる。
+    利用者の歌詞・トラックの F0 の方式（明示・アーカイブ・方式探しで決めたもの。session の estimator）とアーカイブに
+    書くその版（`Project.archived_f0_version`。古いアーカイブの版の印が最初の解析で外れても変わらない）・描画の版から決まる。
     解析だけで変わるもの（自動推定の歌詞・解析の時刻・方式を決めていないトラックの解析の方式）は入れない
     （曲を開いて解析しただけで「保存するものが変わった」にしない）。p はディスクから読んだ Project（無ければ None）。
     プラグインはホストに知らせた署名と違えば、ホストに「保存するものが変わった」と知らせる（docs/ara-plugin.md）。"""
     est = t.get("estimator")
     data = [[c.to_json() for c in p.changesets] if p is not None else [],
             _without_estimates(p.lyrics if p is not None else {}, guide=False),
-            est, p.f0_model_version if p is not None and est == "gliss" else None,
+            est, p.archived_f0_version(est) if p is not None else None,
             p.render_version if p is not None else RENDER_VERSION]
     return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
                         .encode("utf-8")).hexdigest()[:12]
