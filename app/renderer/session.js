@@ -98,9 +98,9 @@ async function pump(id, m) {
 // エンジンは編集中のトラックにガイドが重ならない理由を session.guide_note で返す。画面は黙って重ねないのではなく、
 // ステータス行と「ガイドに合わせる」の使えない理由に出す（ユーザーが理由を知らずにトラックを外して回らないように）
 const NOTE_TEXT = {
-  編集対象がガイドのトラック自身: '編集中のトラックがガイド。別のトラックを選ぶと重なる',
-  ガイドが指定されていない: 'トラックの見出しのガイドのアイコンでガイドを指定する',
-  ガイドが伴奏になっている: 'ガイドのトラックが伴奏になっている。ボーカルに戻すか別のトラックをガイドにする',
+  編集対象がガイドのトラック自身: '編集中のトラックが共通のガイド。見出しのガイドのボタンで別のガイドを選ぶか、別のトラックを選ぶ',
+  ガイドが指定されていない: 'トラックの見出しのガイドのボタンでガイドを選ぶ',
+  ガイドが伴奏になっている: 'ガイドのトラックが伴奏になっている。ボーカルに戻すか、見出しのガイドのボタンで別のガイドを選ぶ',
 };
 
 /** 編集中のトラックにガイドが重なっている（ガイドの解析と対応付けまで済んでいる。view data の guide_basis）。 */
@@ -114,17 +114,21 @@ export function guideWhy() {
   if (!S.tracks.length) return 'ガイドを開いてから';
   const n = S.session?.guide_note;
   if (n) return NOTE_TEXT[n] || n;
-  if (S.session?.guide) return 'ガイドを解析できていない（ステータス行を見る）';
+  if (S.session?.guide || curTrack()?.guide_id) return 'ガイドを解析できていない（ステータス行を見る）';
   return NOTE_TEXT.ガイドが指定されていない;
 }
 
-/** ステータス行の「 / ガイド: 名前」（重ならないときは理由、対応付けに失敗して位置のまま重ねたときはその旨）。 */
+const curTrack = () => S.tracks.find((t) => t.id === S.session?.current) || null;
+
+/** ステータス行の「 / ガイド: 名前」（重ならないときは理由、対応付けに失敗して位置のまま重ねたときはその旨）。
+ * 名前は編集中のトラックの実際のガイドのトラック名（トラックごとのガイド。無ければファイル名）。 */
 export function guideSuffix() {
   if (guideShown()) {
     const w = S.vd?.guide_warning ? '（対応付けに失敗したので位置のまま重ねている）' : '';
-    return ` / ガイド: ${S.guide.name}${w}`;
+    const g = S.tracks.find((t) => t.id === curTrack()?.effective_guide_id);
+    return ` / ガイド: ${g?.name || S.guide.name}${w}`;
   }
-  if (!S.session?.guide && !S.guide) return '';
+  if (!S.session?.guide && !S.guide && !curTrack()?.guide_id) return '';
   return `（ガイドは重ならない: ${guideWhy()}）`;
 }
 

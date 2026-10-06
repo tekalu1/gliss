@@ -8,7 +8,7 @@
 //   (A3) セッションが来る（session-changed）→ 編集対象を解析して描く。M・S は出さない
 //   (A4) 再生ボタン・Space は DAW の再生の制御（transport('toggle')）。Web Audio では鳴らさない
 //   (A5) playhead イベント: 上段と時計はソング秒、下段は代表位置の編集秒で描き、再生中とループを表示する
-//   (A6) クリップの位置は動かせない（下半分のドラッグ）。右クリックのメニューは「ガイド」だけ・「ここを下に表示」だけ
+//   (A6) クリップの位置は動かせない（下半分のドラッグ）。右クリックのメニューは「ガイド」の 2 つだけ・「ここを下に表示」だけ
 //   (A7) ルーラーのクリック → seek、ドラッグ → loop（上下とも）。クリックはループを解除しない。メニューの「ループを解除」→ loop(null)
 //   (A8) selection イベント: DAW で選ばれたリージョンのトラックに切り替え、表示範囲をリージョンに寄せる。同じトラックなら表示範囲だけ
 //   (A9) リージョンの枠・キャッシュの状態の印と札・エンジンが落ちた箱とつなぎ直し
@@ -150,11 +150,11 @@ test('(A3) セッションが来ると、編集対象を解析して描く（M�
   expect(await current()).toBe(ts[0].id);
   const n = await win.evaluate(() => window.__app.notes().length);
   expect(n).toBeGreaterThanOrEqual(2);
-  // ミュート／ソロ・音量・パンは隠す（DAW が鳴らす）・ガイドのアイコンは残す
+  // ミュート／ソロ・音量・パンは隠す（DAW が鳴らす）・ガイドは空いた 2 段目に名前つきのボタン（track-guide.spec.js）
   const vis = await win.evaluate(() => {
     const shown = (el) => !!el && getComputedStyle(el).display !== 'none';
     const h = document.querySelector('#heads .th');
-    return { m: shown(h.querySelector('[data-act=m]')), s: shown(h.querySelector('[data-act=s]')), g: shown(h.querySelector('[data-act=guide]')),
+    return { m: shown(h.querySelector('[data-act=m]')), s: shown(h.querySelector('[data-act=s]')), g: shown(h.querySelector('[data-act=guide].wide')),
       mix: h.querySelectorAll('[data-mix]').length };
   });
   expect(vis).toEqual({ m: false, s: false, g: true, mix: 0 });
@@ -495,7 +495,7 @@ test('(A6) クリップの位置は動かせない・右クリックのメニュ
   await win.keyboard.press('Escape');
   await win.locator('#heads .th').first().click({ button: 'right' });
   const head = await win.evaluate(() => window.__app.menuItems().map((i) => i.label));
-  expect(head).toEqual(['このトラックをガイドにする']);
+  expect(head).toEqual(['ガイドを選ぶ…', 'このトラックを共通のガイドにする']);
   await win.keyboard.press('Escape');
   // はさみ・ミュートのツールは、トラックビューではクリップを分けない・消さない（クリップは DAW のリージョン）
   for (const tool of ['tool-cut', 'tool-mute']) {

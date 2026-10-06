@@ -1290,7 +1290,7 @@ function onKey(e) {
   if (e.key === 'Escape') {
     if (S.drag?.type === 'stroke') { S.drag = null; S.stroke = null; render(); }
     else if (S.drag?.type === 'fade') { S.local.fade.delete(S.drag.id); S.drag = null; render(); }
-    else if (menuOpen()) closeMenu();
+    else if (menuOpen()) { if (closeMenu()) return; }    // プルダウン: 開いたボタンにフォーカスを返す
     else if (!pop.hidden) closePop();
     else if (!popTr.hidden) closeTr();
     else if (S.sel.length) { S.sel = []; render(); }

@@ -54,6 +54,7 @@ const LABELS = {
   import_lyrics: '譜面と照合している…', set_tempo: 'テンポを反映している…', set_track: 'トラックを変えている…',
   split_track: 'クリップを分けている…', join_track: 'クリップをつないでいる…', mute_track_range: '部分を反映している…',
   add_track: 'トラックを足している…', remove_track: 'トラックを外している…', set_guide_track: 'ガイドを変えている…',
+  set_track_guide: 'ガイドを変えている…',
   select_track: 'トラックを切り替えている…', save_project: '保存している…', undo: '元に戻している…', redo: 'やり直している…',
   render_tracks: '再生の音を作っている…', export_wav: '書き出している…',
 };

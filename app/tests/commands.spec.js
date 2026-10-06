@@ -247,7 +247,8 @@ test('(C5) トラック見出し（名前を変える F2）とクリップ', asy
   await win.locator(`#heads .th[data-id="${cur.id}"] .nm`).click({ button: 'right' });
   let it = await items();
   expect(it.map((x) => [x.label, x.key])).toEqual([
-    ['名前を変える', 'F2'], [cur.guide ? 'ガイドを外す' : 'このトラックをガイドにする', ''], ['元の位置に戻す', ''],
+    ['名前を変える', 'F2'], ['ガイドを選ぶ…', ''], [cur.guide ? '共通のガイドから外す' : 'このトラックを共通のガイドにする', ''],
+    ['元の位置に戻す', ''],
     ['伴奏として扱う', ''], ['トラックを外す', ''],
   ]);
   await win.screenshot({ path: path.join(DOCS, 'screenshot-menu-track.png') });

@@ -75,15 +75,16 @@ test('(1) ガイドのトラック自身を編集中は重ならず、理由を�
   await win.evaluate((id) => window.__app.selectTrack(id), guide.id);
   await settle();
   expect(await guideShown()).toBe(false);
-  expect(await status()).toContain('ガイドは重ならない: 編集中のトラックがガイド。別のトラックを選ぶと重なる');
+  const SELF = '編集中のトラックが共通のガイド。見出しのガイドのボタンで別のガイドを選ぶか、別のトラックを選ぶ';
+  expect(await status()).toContain(`ガイドは重ならない: ${SELF}`);
   await pressG();
-  expect(await status()).toBe('ガイドに合わせる…: 今は使えない（編集中のトラックがガイド。別のトラックを選ぶと重なる）');
+  expect(await status()).toBe(`ガイドに合わせる…: 今は使えない（${SELF}）`);
   expect(await win.locator('#bMacro').isDisabled()).toBe(true);
   // 別のトラックを選べば重なる
   await win.evaluate((id) => window.__app.selectTrack(id), take.id);
   await settle();
   expect(await guideShown()).toBe(true);
-  expect(await status()).toContain(`/ ガイド: ${path.basename(GUIDE)}`);
+  expect(await status()).toContain(`/ ガイド: ${guide.name}`);       // ガイドのトラックの名前
 });
 
 test('(2) ガイドを指定していないとき・編集中のトラックをガイドにしたときも理由を出す', async () => {
@@ -92,15 +93,15 @@ test('(2) ガイドを指定していないとき・編集中のトラックを�
   await settle();
   expect(await guideShown()).toBe(false);
   await pressG();
-  expect(await status()).toContain('今は使えない（トラックの見出しのガイドのアイコンでガイドを指定する）');
+  expect(await status()).toContain('今は使えない（トラックの見出しのガイドのボタンでガイドを選ぶ）');
   // 編集中のトラック自身をガイドにした
   await win.evaluate((id) => window.__app.setGuide(id), take.id);
   await settle();
-  expect(await status()).toContain('（今のトラックには重ならない: 編集中のトラックがガイド。別のトラックを選ぶと重なる）');
+  expect(await status()).toContain('（今のトラックには重ならない: 編集中のトラックが共通のガイド。');
   await win.evaluate((id) => window.__app.setGuide(id), guide.id);
   await settle();
   expect(await guideShown()).toBe(true);
-  expect(await status()).toBe(`ガイド: ${guide.name}`);
+  expect(await status()).toBe(`共通のガイド: ${guide.name}`);
 });
 
 test('(3) 外した最初のテイクをドロップで足し直すと、前の編集が戻る', async () => {
