@@ -29,7 +29,7 @@ from . import prep
 from .project import Project, ProjectError
 from .project.store import replace_file
 from .project.session import (CUT_EPS, CUT_MIN_EDGE, MUTE_MIN, SessionError, covered, norm_gain_db, norm_mutes,
-                              norm_pan, pieces_of, subtract_range)
+                              norm_pan, pieces_of, set_guide_id, subtract_range)
 
 _ok = _srv._ok
 _tool = _srv._tool
@@ -324,7 +324,7 @@ def summary(s=None, extra=None):
         # 画面はこれをステータス行と「ガイドに合わせる」の使えない理由に出す（issue #32）
         try:
             t = s.track(tid)
-            out["guide_note"] = (s.guide_clip_for(t)[1] if s.guide
+            out["guide_note"] = (s.guide_clip_for(t)[1] if t.get("guide_id") or s.guide
                                  else "ガイドが指定されていない" if t["kind"] == "vocal" else None)
         except ProjectError:
             out["guide_note"] = None
@@ -427,6 +427,9 @@ def list_tracks() -> dict:
     kind: "vocal"（ボーカルのテイク。編集できる。1 本をガイドに指定できる）/ "inst"（伴奏。聴くだけ）。
     offset_sec: **タイムライン上の位置**（音源全体をずらした量。既定 0 = 曲頭 0:00 起点）。
     編集の秒（list_notes などの秒）は、そのトラックの頭が 0（タイムラインの秒 = offset_sec + 編集の秒）。
+    guide / guide_id / effective_guide_id / is_guide: guide = 共通のガイド（set_guide_track）、guide_id = そのトラックに明示した
+      ガイド（set_track_guide。null なら共通のガイド）、effective_guide_id = 実際に使うガイド、is_guide = どれかのトラックの
+      実効のガイドになっている（guide_for = それを使うトラックの id）。
     guide_stale: 編集対象のプロジェクトのガイドが古い（外部でガイド・位置を変えた。select_track で開き直す）。
     cuts: クリップを分けた切れ目（トラックの頭が 0 の秒。split_track / join_track）。
     mutes: クリップで消している区間 [[始め, 終わり]…]（同じ秒。mute_track_range。再生・書き出しで鳴らさない）。
@@ -570,8 +573,11 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
         if kind == "inst" and t["kind"] == "vocal" and len(s.vocal_tracks()) <= 1:
             raise SessionError("ボーカルのトラックが無くなるので伴奏にできない")
         t["kind"] = kind
-        if kind == "inst" and s.guide == track_id:
-            s.guide = None
+        if kind == "inst":
+            s.drop_guide_refs(track_id)          # このトラックを指していたトラックごとのガイドは共通のガイドに戻す
+            set_guide_id(t, None)                # 伴奏はガイドを持たない
+            if s.guide == track_id:
+                s.guide = None
     if name is not None:
         t["name"] = str(name).strip() or t["name"]
     if mute is not None:
@@ -720,6 +726,44 @@ def set_guide_track(track_id: str = None, author: str = "ai") -> dict:
     reopened = _reopen_if_stale(s)
     _schedule(s)                                 # 古い組み合わせの準備はやめ、新しいガイドで入れ直す
     return _ok(guide=s.guide, reopened=reopened, session=summary(s),
+               next=("analyze_take を呼ぶ" if reopened else None))
+
+
+@_tool
+@_guarded
+def set_track_guide(track_id: str = None, guide_track_id: str = None, author: str = "ai") -> dict:
+    """トラックごとのガイドを指定する。guide_track_id を省略（null）すると共通のガイド（set_guide_track）に戻す。取り消せる（undo）。
+
+    1 つの曲で、主旋律・ハモリ・囁きなどが別々のガイドへ合わせるときに使う（それぞれのトラックにガイドのトラックを指定する）。
+    track_id: 指定されるトラック（省略時は編集対象）。ボーカルのトラックだけ。guide_track_id: ガイドにするボーカルのトラック
+    （track_id 自身は不可）。実効のガイド = そのトラックの guide_id、無ければ共通のガイド。
+    list_deviations / correct_to_guide / measure_against_guide / plan_edit(op="guide") / 画面のガイドの表示は、
+    編集対象のトラックの実効のガイドを見る。編集対象のトラックを変えたら（返り値の reopened）analyze_take を呼ぶ
+    （ガイドの解析と対応付けが走る）。
+    """
+    s = _session()
+    before, cur0 = s.snapshot(), current_track_id()
+    tid = track_id or cur0
+    if not tid:
+        raise SessionError("track_id が要る（編集対象のトラックが無い）")
+    t = s.track(tid)
+    if t["kind"] != "vocal":
+        raise SessionError("伴奏のトラックにはガイドを指定できない: %s" % t["name"])
+    if guide_track_id:
+        g = s.track(guide_track_id)
+        if g["id"] == t["id"]:
+            raise SessionError("トラック自身はガイドにできない: %s" % t["name"])
+        if g["kind"] != "vocal":
+            raise SessionError("伴奏のトラックはガイドにできない: %s" % g["name"])
+        set_guide_id(t, g["id"])
+    else:
+        set_guide_id(t, None)
+    _record_session(s, "ガイドの指定", t["id"], before, cur0, cur0, author)
+    s.save()
+    reopened = _reopen_if_stale(s)
+    _schedule(s)                                 # 古い組み合わせの準備はやめ、新しいガイドで入れ直す
+    return _ok(track=t["id"], guide_id=t.get("guide_id"), effective_guide_id=s.effective_guide_id(t),
+               reopened=reopened, session=summary(s),
                next=("analyze_take を呼ぶ" if reopened else None))
 
 
@@ -1101,7 +1145,7 @@ def history_undo():
         e["undone"] = True
         s.save()
     else:
-        s.restore(e["before"], include_mixer=bool(e.get("include_mixer")))
+        s.restore(e["before"], include_mixer=bool(e.get("include_mixer")), other=e.get("after"))
         e["undone"] = True
         s.save()
         switched = _history_switch(s, e, e.get("current_before"))
@@ -1149,7 +1193,7 @@ def history_redo():
         e["undone"] = False
         s.save()
     else:
-        s.restore(e["after"], include_mixer=bool(e.get("include_mixer")))
+        s.restore(e["after"], include_mixer=bool(e.get("include_mixer")), other=e.get("before"))
         e["undone"] = False
         s.save()
         switched = _history_switch(s, e, e.get("current_after"))
@@ -1386,5 +1430,5 @@ def render_tracks(track_ids: list = None, backend: str = "praat", background: bo
     return _ok(**work())
 
 
-TOOLS = [list_tracks, select_track, add_track, remove_track, set_track, set_guide_track, make_score_guide,
+TOOLS = [list_tracks, select_track, add_track, remove_track, set_track, set_guide_track, set_track_guide, make_score_guide,
          split_track, join_track, mute_track_range, set_tempo, track_overview, render_tracks]

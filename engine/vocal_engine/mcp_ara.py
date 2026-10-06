@@ -46,7 +46,7 @@ from . import prep
 from .audio import file_sig
 from .project import Project, ProjectError
 from .project import document as D
-from .project.session import Session, SessionError, norm_tempo
+from .project.session import Session, SessionError, norm_tempo, set_guide_id
 from .project import transfer as _tr
 from .project.store import ARCHIVE_FORMAT, dir_lock
 
@@ -106,7 +106,22 @@ def _row(s, t):
             "offset_sec": t["offset_sec"], "duration_sec": t["duration_sec"], "sr": t["sr"],
             "channels": t["channels"], "source_frames": t["source_frames"],
             "source_id": t.get("source_id"), "path": t["path"], "project_dir": s.project_dir_of(t),
-            "current": t["id"] == _mt.current_track_id(), "guide": t["id"] == s.guide}
+            "current": t["id"] == _mt.current_track_id(), "guide": t["id"] == s.guide,
+            "guide_id": t.get("guide_id"), "effective_guide_id": s.effective_guide_id(t)}
+
+
+def _guides_of(s):
+    """トラックごとのガイド（`set_track_guide`）→ {修飾の ara_id: ガイドの修飾の ara_id}（DAW の文書の外のトラックは入れない）。"""
+    out = {}
+    tracks = list(s.tracks)
+    for t in tracks:
+        gid = t.get("guide_id")
+        if not t.get("ara_id") or not gid:
+            continue
+        g = next((x for x in tracks if x["id"] == gid), None)
+        if g is not None and g.get("ara_id"):
+            out[t["ara_id"]] = g["ara_id"]
+    return out
 
 
 def _audio_sha(path):
@@ -594,6 +609,7 @@ def ara_set_modification(ara_id: str, source_path: str, source_id: str | None = 
                 if arc is not None and _mismatch(t, arc) is None:
                     _restore_into(s, t, arc)
                     cloned = True
+                    set_guide_id(t, src.get("guide_id"))     # 複製は複製元のガイドも引き継ぐ
                 elif arc is not None:
                     log.get().warning("複製元 %s と素材が違うので編集を写さない: %s", clone_of, ara_id)
     else:
@@ -655,13 +671,17 @@ def ara_remove_modification(ara_id: str) -> dict:
 
 
 @_tool
-def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str | None = None) -> dict:
+def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str | None = None,
+             guides: dict | None = None) -> dict:
     """**DAW（ARA）のプラグイン向け**: DAW の位置・名前・テンポをまとめて当てる（取り消しの履歴に入れない）。
 
     tracks: [{ara_id, offset_sec?, name?, group?}]（変わったものだけでよい）。位置は 1 サンプル未満の差なら変えない。
     tempo: {bpm, numerator, denominator, start_sec}（MusicalContext。session.tempo に source = "daw" で書く）。
     guide: ガイドにする修飾の ara_id（"" で外す。省けば今のまま）。アーカイブの document.guide を戻すとき用
       （画面のガイドの指定 set_guide_track と違い、取り消しの履歴に入れない）。
+    guides: トラックごとのガイド {修飾の ara_id: ガイドの修飾の ara_id}（"" か null でそのトラックの指定を外す）。
+      アーカイブの document.guides を戻すとき用（画面の set_track_guide と違い、取り消しの履歴に入れない）。
+      渡した修飾だけを変える（省いた修飾はそのまま）。知らない ara_id は unknown に返して、その指定は当てない。
     編集対象かガイドの位置が変わって、編集対象のガイドの重ね方が変わったら開き直す（reopened = true →
     画面は analyze_take から描き直す）。知らない ara_id は unknown に返す。
     """
@@ -714,13 +734,41 @@ def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str |
         if (g is not None or not guide) and g != s.guide:
             s.guide = g
             guide_changed = True
+    guides_changed = []
+    if guides is not None:
+        if not isinstance(guides, dict):
+            raise SessionError("guides は {ara_id: ガイドの ara_id}")
+        plan = []                                # 全部の検査が通ってから当てる（途中で失敗しても一部だけ変えない）
+        for aid, gid in guides.items():
+            t = s.find_ara(aid)
+            if t is None:
+                unknown.append(aid)
+                continue
+            want = None
+            if gid:
+                gt = s.find_ara(gid)
+                if gt is None:
+                    unknown.append(gid)
+                    continue
+                if gt["kind"] != "vocal":
+                    raise SessionError("伴奏のトラックはガイドにできない: %s" % gid)
+                if gt["id"] == t["id"]:
+                    raise SessionError("トラック自身はガイドにできない: %s" % aid)
+                want = gt["id"]
+            plan.append((t, want))
+        for t, want in plan:
+            if t.get("guide_id") != want:
+                set_guide_id(t, want)
+                guides_changed.append(t["id"])
+    guide_changed = guide_changed or bool(guides_changed)
     if changed or tempo_changed or guide_changed:
         s.save()
     reopened = _mt._reopen_if_stale(s)
     if changed or guide_changed:
         _mt._schedule(s)
     return _ok(changed=changed, unknown=unknown, tempo=copy.deepcopy(s.tempo), tempo_changed=tempo_changed,
-               guide=s.guide, guide_changed=guide_changed, reopened=bool(reopened), session=_mt.summary(s))
+               guide=s.guide, guide_changed=guide_changed, guides=_guides_of(s),
+               guides_changed=guides_changed, reopened=bool(reopened), session=_mt.summary(s))
 
 
 @_tool
@@ -872,7 +920,8 @@ def ara_revs() -> dict:
 @_tool(lock=False)
 def ara_archive(ara_ids: list | None = None) -> dict:
     """**DAW（ARA）のプラグイン向け**: 保存（ARA のアーカイブ）に入れる各修飾の編集の状態
-    `{archives: {ara_id: {name, track, archive}}, guide: <ガイドの ara_id | null>, tempo}`。
+    `{archives: {ara_id: {name, track, archive}}, guide: <共通のガイドの ara_id | null>,
+    guides: {ara_id: トラックごとのガイドの ara_id}, tempo}`。
 
     archive は `Project.to_archive()` と同じ形（素材の参照・歌詞・編集の changeset の列。解析・画面の状態は入らない。
     ガイドは入れない）。エンジンのロックを取らずにディスクの project.json から作る（解析のジョブの最中でも
@@ -894,8 +943,8 @@ def ara_archive(ara_ids: list | None = None) -> dict:
     if s.guide:
         g = next((t.get("ara_id") for t in list(s.tracks) if t["id"] == s.guide), None)
     missing = sorted(want - set(out) - set(errors)) if want is not None else []
-    return _ok(archives=out, guide=g, tempo=copy.deepcopy(s.tempo), errors=errors or None,
-               missing=missing or None)
+    return _ok(archives=out, guide=g, guides=_guides_of(s), tempo=copy.deepcopy(s.tempo),
+               errors=errors or None, missing=missing or None)
 
 
 @_tool

@@ -160,7 +160,7 @@ def test_export_tool_is_registered():
     assert all(f in m.TOOLS for f in m._mcp_ara.TOOLS) and len(m._mcp_ara.TOOLS) == 14
     assert "make_score_guide" in names                  # 譜面ガイド（ガイドとの対応 v3）
     assert {"measure_against_guide", "apply_edits"} <= set(names)           # ノートごとの残差・まとめて当てる
-    assert len(m.TOOLS) == 82
+    assert len(m.TOOLS) == 83
 
 
 @pytest.mark.parametrize("subtype", ["FLOAT", "PCM_16"])

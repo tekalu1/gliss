@@ -176,7 +176,7 @@ def track_sig(s, t):
         g = None
     if g is not None:
         c = M.as_clip(g)
-        gt = s.track(s.guide)
+        gt = s.track(s.effective_guide_id(t))
         gd = [_norm(c.source), gt.get("sha256"), int(c.offset_frames or 0), c.length_frames,
               bool(c.pad)]
     d = [PREP_VERSION, _norm(t["path"]), t.get("sha256"), t.get("clip"), t.get("source_id"), gd,
@@ -511,7 +511,7 @@ class Preparer:
         self._sdir = None
         self._items = {}                # トラック id → _Item（今の組み合わせのもの）
         self._order = []                # セッションの並び順
-        self._guide = None
+        self._guides = frozenset()      # ガイドとして使われているトラック id（先に準備する）
         self._current = None
         self._recent = []               # 最近選んだトラック（前ほど新しい）
         self._running = None
@@ -572,7 +572,7 @@ class Preparer:
         for tid, it in self._items.items():
             if tid not in want:
                 it.cancelled = True
-        self._items, self._order, self._guide = want, order, s.guide
+        self._items, self._order, self._guides = want, order, frozenset(s.guide_users())
         self._cv.notify_all()
 
     @staticmethod
@@ -589,7 +589,8 @@ class Preparer:
             for it in self._items.values():
                 it.cancelled = True
             self._items, self._order, self._recent = {}, [], []
-            self._sdir = self._current = self._guide = None
+            self._sdir = self._current = None
+            self._guides = frozenset()
             self._cv.notify_all()
 
     def release_tree(self, root, timeout=None):
@@ -608,7 +609,8 @@ class Preparer:
                 for it in self._items.values():
                     it.cancelled = True
                 self._items, self._order, self._recent = {}, [], []
-                self._sdir = self._current = self._guide = None
+                self._sdir = self._current = None
+                self._guides = frozenset()
             else:
                 for tid, it in list(self._items.items()):
                     if under(it.pdir):
@@ -915,7 +917,7 @@ class Preparer:
                 return (0, 0)
             if it.tid == self._current:
                 return (1, 0)
-            if it.tid == self._guide:
+            if it.tid in self._guides:
                 return (2, 0)
             if it.tid in self._recent:
                 return (3, self._recent.index(it.tid))
