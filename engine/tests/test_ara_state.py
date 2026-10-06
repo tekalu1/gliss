@@ -90,7 +90,31 @@ def test_restore_returns_the_state_it_restored(eng, tmp_path):
     _ok(m.shift_pitch(100, start_sec=0.5, end_sec=1.2))
     _ok(m.set_lyrics("あいうえお", start_sec=0.4, end_sec=2.2, reanalyze=False))
     arc = copy.deepcopy(_ok(a.ara_archive(["mod-2"]))["archives"]["mod-2"]["archive"])
+    assert arc["render_version"] == 2
     r = _ok(a.ara_restore("mod-2", arc))
     assert r["state"] == _state(a) and r["rev"] == _ok(a.ara_revs())["revs"]["mod-2"]
+    assert r["render_changed"] is False
     r2 = _ok(a.ara_set_modification("mod-2", m._state["session"].find_ara("mod-2")["path"]))
     assert r2["state"] == _state(a)
+
+
+def test_restore_reports_a_newer_renderer_that_this_engine_cannot_play(eng, tmp_path):
+    """このエンジンより新しい描画の版で保存したピッチ曲線は、使える最新の版で鳴らすので音が変わりうる（render_changed）。
+    前の版（版の無いアーカイブを含む）は、その版のまま鳴らすので変わらない（test_render_version.py）。"""
+    m, a, md, R = eng
+    t1, t2 = _doc(m, a, tmp_path)
+    _select(m, t2)
+    _ok(m.shift_pitch(100, start_sec=0.5, end_sec=1.2))
+    arc = copy.deepcopy(_ok(a.ara_archive(["mod-2"]))["archives"]["mod-2"]["archive"])
+    newer = dict(arc, render_version=99)
+    assert _ok(a.ara_restore("mod-2", newer))["render_changed"] is False      # ピッチ曲線が無い
+    n = _notes(m)
+    _ok(m.set_pitch_curve([[0.0, 0], [0.2, 80], [0.4, 0]], note_id=n[2]))
+    arc = copy.deepcopy(_ok(a.ara_archive(["mod-2"]))["archives"]["mod-2"]["archive"])
+    assert _ok(a.ara_restore("mod-2", arc))["render_changed"] is False        # 今の版
+    old = dict(arc)
+    old.pop("render_version")
+    assert _ok(a.ara_restore("mod-2", old))["render_changed"] is False        # 前の版はその版のまま鳴らす
+    assert m._state["project"].render_version == 1
+    r = _ok(a.ara_restore("mod-2", dict(arc, render_version=99)))
+    assert r["render_changed"] is True and m._state["project"].render_version == 2

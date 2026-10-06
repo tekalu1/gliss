@@ -29,7 +29,7 @@ from ..analysis.notes import Note, segment_notes
 from ..audio import file_sig, sha256_file
 from .. import media as M
 from ..phoneme import lyrics as LY
-from .model import Changeset, Edit, Target, now_iso
+from .model import RENDER_VERSION, Changeset, Edit, Target, now_iso
 
 def _default_projects_root():
     """旧形式のプロジェクト（`.gliss` でない）の既定の置き場。配布版（単体 exe）はインストール先の外
@@ -406,7 +406,7 @@ def _stable(analysis, drop=("analyzed_at",)):
 
 def _edit_state(doc):
     """解析要約と保存時刻を除いた、利用者の編集状態。解析だけの外部保存を見分ける。"""
-    fields = ("schema_version", "take", "guide", "lyrics", "seq", "edits", "changesets")
+    fields = ("schema_version", "take", "guide", "lyrics", "seq", "edits", "changesets", "render_version")
     return json.dumps([doc.get(k) for k in fields], sort_keys=True, ensure_ascii=False)
 
 
@@ -471,6 +471,9 @@ class Project:
         self.analysis = {}          # {"take": {...}, "guide": {...}, "alignment": {...}}
         self.lyrics = {}            # {"take": [{start_sec,end_sec,text}, ...]}（区間ごと）
         self.align_method = ALIGN_METHOD    # DTW の特徴量（段階2 から MFCC が既定）
+        # 描画の版（保存した編集から音を作る仕組みの版。model.RENDER_VERSION）。新しく作る曲は最新、前の版で作った曲
+        # （project.json・アーカイブに版の無いもの）は 1 のまま（利用者が聴いて了承した音を、版を上げただけで変えない）
+        self.render_version = RENDER_VERSION
         self._phonemes = {"take": None, "guide": None}
         # 音素アラインの失敗: role -> (入力の鍵, 例外)。同じ歌詞・音声では操作のたびにやり直さない（issue #58）
         self._phoneme_failed = {}
@@ -719,6 +722,7 @@ class Project:
             "changesets": [c.to_json() if copy else c.to_json_shallow() for c in self.changesets],
             "analysis": self.analysis,
             "f0_model_version": self.f0_model_version,
+            "render_version": self.render_version,
         }
 
     def save(self):
@@ -817,6 +821,7 @@ class Project:
         self.changesets = [Changeset.from_json(c) for c in d.get("changesets", [])]
         self.analysis = d.get("analysis", {})
         self.f0_model_version = d.get("f0_model_version")
+        self.render_version = int(d.get("render_version") or 1)     # 版の無い project.json は 0.1.0-beta.6 までの曲
         if self.f0_model_version is None and (self.analysis.get("take") or {}).get("estimator") == "gliss":
             version = self.analysis["take"].get("estimator_version")
             if version == f0mod.GLISS_F0_V2_VERSION:
@@ -840,6 +845,7 @@ class Project:
         F0 の方式（`f0_estimator`。明示した方式、無ければ前に解析した方式、未解析なら None）。
         F0 の方式が編集の「音」を決める（再合成は F0 を使う）ので、別の PC・別の作業場所で開き直しても
         同じ方式で解析するために持つ。
+        描画の版（`render_version`。保存した編集から音を作る仕組みの版。戻すとその版で鳴らす）。
         入らないもの: プロジェクトのディレクトリ、解析のキャッシュ（F0・ノート・音素。素材から作り直せる）、
         画面の状態（表示範囲・選択・ツール。画面は userData の `state.json` に別に持つ）、ログ、時刻の更新日。
         JSON にそのまま書ける（数値・文字列・真偽・None・配列・dict だけ）。
@@ -869,6 +875,7 @@ class Project:
             "align_method": self.align_method,
             "f0_estimator": estimator,
             "f0_estimator_version": version,
+            "render_version": self.render_version,
             "seq": dict(self._seq),
             "changesets": [c.to_json() for c in self.changesets],
         }
@@ -964,6 +971,9 @@ class Project:
             p.f0_model_version = None
         p._seq = dict(archive.get("seq") or {"edit": 0, "changeset": 0})
         p.changesets = [Changeset.from_json(c) for c in archive.get("changesets", [])]
+        # 描画の版: 版の無いアーカイブは 0.1.0-beta.6 までのもの（その音のまま鳴らす）。このエンジンより新しい版は、
+        # 使える最新の版で鳴らす（`ara_restore` の render_changed）
+        p.render_version = min(int(archive.get("render_version") or 1), RENDER_VERSION)
         # ノート ID に頼る編集を作った解析の記録の無い（前の版の）changeset: アーカイブの方式（保存したときにその編集を
         # 鳴らしていた解析）を記録にする。方式の記録も無いアーカイブは「分からない」（方式を替えるときに付け替えない）
         if est in f0mod.ESTIMATORS:
@@ -1854,11 +1864,20 @@ class Project:
         self.edits = _live_edits(cs for cs in self.changesets if not cs.undone)
         return self.edits
 
+    def _first_edit_takes_latest_renderer(self):
+        """編集の履歴の無い曲（前の版で作って解析だけした曲を含む）に最初の編集を足す: 最新の描画の版にする。
+        履歴のある曲の版は変えない（`set_render_version` で利用者が明示したときだけ。同じ修飾の中で前の編集と新しい編集を
+        別の描画の版で鳴らすと、つなぎ目で両方が混ざるので、修飾ごとに 1 つの版にする）。"""
+        if not self.changesets and self.render_version != RENDER_VERSION:
+            log.get().info("描画の版を %d → %d（編集の無い曲の最初の編集）", self.render_version, RENDER_VERSION)
+            self.render_version = RENDER_VERSION
+
     def apply_edits(self, specs, author="ai", label=None, origin="manual"):
         """specs = [{kind, target, params, note}] を 1 つの changeset として適用。
 
         origin: "auto"（ガイドに合わせる）/ "manual"。変わったノートに印を付ける（`project/correction.py`）。"""
         self.reload_if_changed()
+        self._first_edit_takes_latest_renderer()
         from .correction import Marker, kinds_of, TIMING_KINDS
         marker = Marker(self, kinds_of(self, specs), origin)
         cs_id = self._next_id("changeset")
@@ -1896,6 +1915,7 @@ class Project:
         `project/timing.py` の組み直しで使う（変わる範囲のタイミング編集を外して、
         正規形の stretch / crop / silence を入れ直す）。origin は `apply_edits` と同じ。"""
         from .correction import Marker, kinds_of, TIMING_KINDS
+        self._first_edit_takes_latest_renderer()
         structural = []
         for spec in specs:
             if spec.get("kind") not in ("split", "merge"):

@@ -2434,6 +2434,38 @@ def engine_info(reload_addons: bool = False) -> dict:
 
 
 @_tool
+def set_render_version(version: int = None, apply: bool = False) -> dict:
+    """選んでいる曲（トラック。ARA では選んでいる修飾）の**描画の版**（保存した編集から音を作る仕組みの版）を見る・替える。
+
+    曲は作ったときの描画の版のまま鳴る（0.1.0-beta.6 までに作った曲・その版のアーカイブは版 1。利用者が聴いて了承した音を、
+    Gliss の版を上げただけで変えない）。新しく作る曲・編集の無い曲に最初の編集を足したときは最新の版。編集のある曲に
+    編集を足しても版は変わらない（同じトラックの中で古い描画と新しい描画を混ぜない）。最新の版に上げるのはこのツールで明示したときだけ。
+    版 2: ピッチ曲線を重ねたときのつなぎ目で、隣のノートのずらし量が漏れない（版 1 は漏れることがある）。
+    version: 替える先（1 か 2。省くと最新）。apply: false（既定）は替えずに、替えたら音が変わる所だけを返す。true で替える
+      （project.json・ARA のアーカイブに残る。取り消しの履歴には入れない。戻すには version を明示して呼ぶ）。
+    返り値: render_version（今の版。apply したら替えた後）・latest・target・changes（[{start_sec, end_sec, max_cents}]。
+    ずらし量が 1 セント以上変わる区間。素材の秒。最大 50 件）・changed_sec（その合計）・applied。
+    """
+    from .project.model import RENDER_VERSION
+    from .project.pitch import render_version_changes
+    p = _project()
+    p.reload_if_changed()
+    target = RENDER_VERSION if version is None else int(version)
+    if not 1 <= target <= RENDER_VERSION:
+        raise ProjectError("version は 1〜%d" % RENDER_VERSION)
+    changes = render_version_changes(p, target)
+    applied = False
+    if apply and target != p.render_version:
+        log.get().info("描画の版を %d → %d（明示。音が変わる区間 %d）", p.render_version, target, len(changes))
+        p.render_version = target
+        p.save()
+        _invalidate_renderer()
+        applied = True
+    return _ok(render_version=p.render_version, latest=RENDER_VERSION, target=target, changes=changes[:50],
+               changed_sec=round(sum(c["end_sec"] - c["start_sec"] for c in changes), 3), applied=applied)
+
+
+@_tool
 def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict:
     """ピッチ（F0）検出の方式を選ぶ。変更範囲は scope で指定する。
 
@@ -2530,7 +2562,8 @@ TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllabl
          render_preview, render_region, render_audition, render_view, export_wav,
          export_view_data, remeasure,
          list_changes,
-         get_job, cancel_job, prep_status, pause_prep, engine_info, set_f0_estimator]
+         get_job, cancel_job, prep_status, pause_prep, engine_info, set_f0_estimator,
+         set_render_version]
 
 # トラック（セッション。issue #7）。mcp_tracks はこのモジュールの _tool などを使うので最後に読む
 from . import mcp_tracks as _mcp_tracks   # noqa: E402

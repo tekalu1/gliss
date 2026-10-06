@@ -48,6 +48,7 @@ from .project import Project, ProjectError
 from .project import document as D
 from .project.session import Session, SessionError, norm_tempo, set_guide_id
 from .project import transfer as _tr
+from .project.model import RENDER_VERSION
 from .project.store import ARCHIVE_FORMAT, dir_lock
 
 _ok = _srv._ok
@@ -439,20 +440,22 @@ def _without_estimates(lyrics, guide=True):
 
 def _state_sig(t, p):
     """保存（ARA のアーカイブ）に入る、利用者が変えた状態の署名。編集の changeset の列（取り消し・やり直しの印を含む）・
-    利用者の歌詞・トラックの F0 の方式（明示・アーカイブ・方式探しで決めたもの。session の estimator）とその版から決まる。
+    利用者の歌詞・トラックの F0 の方式（明示・アーカイブ・方式探しで決めたもの。session の estimator）とその版・
+    描画の版から決まる。
     解析だけで変わるもの（自動推定の歌詞・解析の時刻・方式を決めていないトラックの解析の方式）は入れない
     （曲を開いて解析しただけで「保存するものが変わった」にしない）。p はディスクから読んだ Project（無ければ None）。
     プラグインはホストに知らせた署名と違えば、ホストに「保存するものが変わった」と知らせる（docs/ara-plugin.md）。"""
     est = t.get("estimator")
     data = [[c.to_json() for c in p.changesets] if p is not None else [],
             _without_estimates(p.lyrics if p is not None else {}, guide=False),
-            est, p.f0_model_version if p is not None and est == "gliss" else None]
+            est, p.f0_model_version if p is not None and est == "gliss" else None,
+            p.render_version if p is not None else RENDER_VERSION]
     return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
                         .encode("utf-8")).hexdigest()[:12]
 
 
 def _rev_parts(p):
-    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式・時刻・キャッシュのファイル）と、
+    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式・時刻・キャッシュのファイル）・描画の版と、
     編集リスト・利用者の歌詞（自動推定のままの区間は除く）から決まる。
 
     `analyzed_at` は秒の単位なので、同じ秒の解析し直しはキャッシュのファイルの署名（大きさ・更新時刻）で見分ける。"""
@@ -466,7 +469,7 @@ def _rev_parts(p):
         except OSError:
             pass
     asig = hashlib.sha1(json.dumps([tk.get("sha256"), tk.get("offset_frames"), tk.get("frames"),
-                                    a.get("analyzed_at"), a.get("estimator"), cache],
+                                    a.get("analyzed_at"), a.get("estimator"), cache, getattr(p, "render_version", RENDER_VERSION)],
                                    sort_keys=True, default=str).encode("utf-8")).hexdigest()[:10]
     erev = hashlib.sha1(json.dumps([[e.to_json() for e in p.edits], _without_estimates(p.lyrics)],
                                    sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:10]
@@ -1070,7 +1073,9 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
     archive の `f0_estimator`（補正を作った F0 の方式）があれば、そのトラックの方式にする（estimator_applied。
     別の PC・別の作業場所で開き直しても同じ方式で解析する）。この PC で使えない方式（重みが無い）は当てず、
     estimator_note に理由を返す。rev・state: 戻した直後の版と保存の状態の署名（ara_revs と同じ。戻しただけの状態）。
-"""
+    描画の版（archive の render_version。無ければ 1 = 0.1.0-beta.6 までの音）はアーカイブのまま鳴らす。
+    render_changed: このエンジンより新しい描画の版で保存したピッチ曲線の編集があり、保存したときと音が変わりうる
+    （プラグインは最初の再合成をホストに知らせる）。"""
     s = _session()
     t = _track(s, ara_id)
     why = _mismatch(t, archive)
@@ -1083,6 +1088,13 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
         log.get().warning("修飾 %s の F0 の方式を当てない: %s", ara_id, note)
     p = _restore_into(s, t, archive)
     s.save()
+    # 描画の版はアーカイブのまま（版の無いアーカイブは 1 = 0.1.0-beta.6 までの音）。このエンジンより新しい版で保存した
+    # ピッチ曲線の編集は、使える最新の版で鳴らすので、保存したときと音が変わりうる
+    render_changed = (int(archive.get("render_version") or 1) > p.render_version
+                      and any(e.kind == "pitch_curve" for e in p.edits))
+    if render_changed:
+        log.get().warning("修飾 %s: このエンジンより新しい描画の版（%s）で保存したピッチ曲線の編集がある。音が変わりうる",
+                          ara_id, archive.get("render_version"))
     reopened = False
     if t["id"] == _mt.current_track_id():
         _mt._open_track(s, t)
@@ -1091,7 +1103,7 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
     rev, state = _disk_state(s, t)
     return _ok(track=t["id"], ara_id=ara_id, mismatch=False, edits=len(p.edits), changesets=len(p.changesets),
                reopened=reopened, estimator_applied=applied, estimator_note=note, rev=rev, state=state,
-               session=_mt.summary(s))
+               render_changed=render_changed, session=_mt.summary(s))
 
 
 def _note_row(n, start, end, midi):
