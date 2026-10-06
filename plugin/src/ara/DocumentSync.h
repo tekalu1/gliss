@@ -82,9 +82,12 @@ public:
     struct Callbacks
     {
         std::function<void (const juce::String& name, const juce::var& data)> event;   // engine・cache・session-changed・project-changed・test-edit
-        std::function<void (const juce::StringArray& araIds)> contentChanged;           // 再生の音が変わった修飾
-        /** ノートが変わった修飾と、解析だけのノートが変わったソース（AudioSource の persistentID）。 */
-        std::function<void (const juce::StringArray& araIds, const juce::StringArray& sourceIds)> notesChanged;
+        /** 再生の音が変わった修飾。notifyHost が false なら、登録・アーカイブから戻した状態に追いついただけ
+            （最初の再合成・解析待ちの後の再合成。ARA は「戻した状態と違うときだけ知らせる」。ホストには知らせない）。 */
+        std::function<void (const juce::StringArray& araIds, bool notifyHost)> contentChanged;
+        /** ノートが変わった修飾と、解析だけのノートが変わったソース（AudioSource の persistentID）。
+            firstContent: 登録してから初めてノートが読めるようになった（それまで読めなかった）もの。 */
+        std::function<void (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent)> notesChanged;
         std::function<void (const juce::String& line)> log;
     };
 
@@ -189,7 +192,9 @@ private:
     bool captureSource (const SyncSource&, const SyncModel&);
     bool registerModification (const SyncModification&, const SyncSource&, juce::StringArray& changed);
     void restoreIfPending (const juce::String& araId, int generation, juce::StringArray& changed);
-    bool renderModification (const SyncModification&, juce::StringArray& contentChanged);
+    bool renderModification (const SyncModification&, juce::StringArray& contentChanged, juce::StringArray& caughtUp);
+    /** ara_set_modification・ara_restore の返り値の版（rev）から、開いた時の編集の署名を覚える。 */
+    void setOpenedEdits (const juce::String& araId, const juce::var& result);
     void refreshNotes (const SyncModel&, const std::map<juce::String, juce::String>& targets);
     void applyTestEdit (const SyncModel&);
     void refreshArchivesLocked (const juce::var& args, int timeoutMs);
@@ -230,6 +235,7 @@ private:
     std::map<juce::String, Captured> captured;              // ソースの persistentID
     std::map<juce::String, Applied> applied;                // ara_id
     std::map<juce::String, juce::String> localRev;          // ara_id → 手元のキャッシュの版
+    std::map<juce::String, juce::String> openedEdits;       // ara_id → 登録・アーカイブから戻した時の編集の署名
     std::map<juce::String, juce::String> notesRev;          // ara_id → ノートの写しを取ったときの ara_revs の版
     ExternalChanges external;                               // 外部の AI の中継の番号（ara_revs の external）
 

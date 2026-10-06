@@ -15,7 +15,8 @@
 #   worktree's .venv, cwd = this worktree's engine, Praat for the pitch, a temporary work folder):
 #   7. ARA SDK TestHost, all test cases
 #   8. GlissARATest (plugin/tests/aratest): a test edit (GLISS_TEST_EDIT) -> render -> archive -> restore in another work
-#      folder -> render, compared with the engine's render_region by plugin/tests/verify_ara_engine.py
+#      folder -> render, compared with the engine's render_region by plugin/tests/verify_ara_engine.py; restoring the
+#      archive (in a new work folder, and again in the same one) does not tell the host that the document changed
 #   9. GlissHostCheck --ara-editor: a real ARA document (JUCE ARA hosting), the editor bound to it, the page's engine calls
 #   10. GlissARATest -relay: an external AI (another vocal_engine.mcp process, plugin/tests/relay_client.py) lists the open
 #       documents, attaches to the modification and shifts it by +100 cents through the relay; the plug-in picks it up

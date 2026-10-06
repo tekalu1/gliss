@@ -103,20 +103,21 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
                 onSyncEvent (name, data);
         });
     };
-    callbacks.contentChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids)
+    callbacks.contentChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, bool notifyHost)
     {
-        juce::MessageManager::callAsync ([this, token, ids]
+        juce::MessageManager::callAsync ([this, token, ids, notifyHost]
         {
             if (token.lock() != nullptr)
-                notifyContentChanged (ids);
+                notifyContentChanged (ids, notifyHost);
         });
     };
-    callbacks.notesChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, const juce::StringArray& sources)
+    callbacks.notesChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, const juce::StringArray& sources,
+                                                                            bool firstContent)
     {
-        juce::MessageManager::callAsync ([this, token, ids, sources]
+        juce::MessageManager::callAsync ([this, token, ids, sources, firstContent]
         {
             if (token.lock() != nullptr)
-                notifyNotesChanged (ids, sources);
+                notifyNotesChanged (ids, sources, firstContent);
         });
     };
     callbacks.log = [] (const juce::String& line) { diag::log (line); };
@@ -343,7 +344,7 @@ bool GlissDocumentController::isSyncSettled() const noexcept
     return sync == nullptr || sync->isSettled();
 }
 
-void GlissDocumentController::notifyContentChanged (const juce::StringArray& araIds)
+void GlissDocumentController::notifyContentChanged (const juce::StringArray& araIds, bool notifyHost)
 {
     auto* document = getDocument();
 
@@ -357,10 +358,10 @@ void GlissDocumentController::notifyContentChanged (const juce::StringArray& ara
             if (! araIds.contains (juce::String (modification->getPersistentID())))
                 continue;
 
-            modification->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), true);
+            modification->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), notifyHost);
 
             for (auto* region : modification->getPlaybackRegions<juce::ARAPlaybackRegion>())
-                region->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), true);
+                region->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), notifyHost);
         }
     }
 }
@@ -414,7 +415,7 @@ bool isActive (const ARA::PlugIn::AudioModification* m)
 }
 } // namespace
 
-std::shared_ptr<const ModificationNotes> GlissDocumentController::notesOf (const ARA::PlugIn::AudioModification* modification) const
+std::shared_ptr<const ModificationNotes> GlissDocumentController::readyNotes (const ARA::PlugIn::AudioModification* modification) const
 {
     if (! isActive (modification))
         return nullptr;
@@ -423,14 +424,36 @@ std::shared_ptr<const ModificationNotes> GlissDocumentController::notesOf (const
     return n != nullptr && n->ready ? n : nullptr;
 }
 
+std::shared_ptr<const ModificationNotes> GlissDocumentController::notesOf (const ARA::PlugIn::AudioModification* modification) const
+{
+    // ホストに「まだ無い」と答えたら覚える（読めるようになったときに知らせる相手。notifyNotesChanged）。
+    // 答えと記録を同じロックの中で行う（同期のスレッドが写しを置いた後の知らせと、すれ違わない）
+    std::lock_guard guard (hostNotesMutex);
+    auto n = readyNotes (modification);
+
+    if (n == nullptr && isActive (modification))
+        hostSawNoNotes.insert ("m:" + juce::String (modification->getPersistentID()));
+
+    return n;
+}
+
 std::shared_ptr<const ModificationNotes> GlissDocumentController::sourceNotesOf (const ARA::PlugIn::AudioSource* source) const
 {
+    std::lock_guard guard (hostNotesMutex);
+
     // 同じソースの修飾は同じ音の同じ解析を持つ。解析の済んだ最初のもの。
     for (const auto* modification : source->getAudioModifications())
-        if (auto n = notesOf (modification))
+        if (auto n = readyNotes (modification))
             return n;
 
+    hostSawNoNotes.insert ("s:" + juce::String (source->getPersistentID()));
     return nullptr;
+}
+
+bool GlissDocumentController::takeHostSawNoNotes (const juce::String& key)
+{
+    std::lock_guard guard (hostNotesMutex);
+    return hostSawNoNotes.erase (key) > 0;
 }
 
 bool GlissDocumentController::doIsAudioSourceContentAvailable (const ARA::PlugIn::AudioSource* source, ARA::ARAContentType type)
@@ -531,7 +554,7 @@ void GlissDocumentController::doRequestAudioSourceContentAnalysis (ARA::PlugIn::
     sync->requestEngine();
 }
 
-void GlissDocumentController::notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds)
+void GlissDocumentController::notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent)
 {
     auto* document = getDocument();
 
@@ -540,20 +563,30 @@ void GlissDocumentController::notifyNotesChanged (const juce::StringArray& araId
 
     const auto scope = juce::ARAContentUpdateScopes::notesAreAffected();
 
+    // 初めて読めるようになったノートは、ホストが「まだ無い」と答えられたもの（読み直すのを待っている）だけに知らせる。
+    // 聞かれていなければ、ホストが次に読むときにそのまま渡る。曲を開いた（アーカイブから戻した）だけで、ホストに
+    // 「中身が変わった」と知らせない（ARA の notifyAudioSourceContentChanged・notifyAudioModificationContentChanged）
+    const auto toHost = [this, firstContent] (const juce::String& key) { return ! firstContent || takeHostSawNoNotes (key); };
+
     for (auto* source : document->getAudioSources<juce::ARAAudioSource>())
     {
-        if (sourceIds.contains (juce::String (source->getPersistentID())))
-            source->notifyContentChanged (scope, true);
+        const auto sourceId = juce::String (source->getPersistentID());
+
+        if (sourceIds.contains (sourceId))
+            source->notifyContentChanged (scope, toHost ("s:" + sourceId));
 
         for (auto* modification : source->getAudioModifications<GlissAudioModification>())
         {
-            if (! araIds.contains (juce::String (modification->getPersistentID())))
+            const auto araId = juce::String (modification->getPersistentID());
+
+            if (! araIds.contains (araId))
                 continue;
 
-            modification->notifyContentChanged (scope, true);
+            const auto host = toHost ("m:" + araId);
+            modification->notifyContentChanged (scope, host);
 
             for (auto* region : modification->getPlaybackRegions<juce::ARAPlaybackRegion>())
-                region->notifyContentChanged (scope, true);
+                region->notifyContentChanged (scope, host);
         }
     }
 }
