@@ -135,15 +135,22 @@ def test_no_ripple_export_matches_outside(mode, case, request, tmp_path):
     if case == "gap_grow":
         b += x                                   # 隙間へ伸ばしたぶん（切り取り）
     # 出力が 20 ms（クロスフェードの長さ）に足りない伸縮の区間は、再合成のときに隣の編集していない区間から足りない分を
-    # 借りて広げる（render/pipeline.py の bundle_short_segments。つなぎ目のクリックを防ぐ）。その分も外へ出てよい
+    # 借りて広げる（render/pipeline.py の bundle_short_segments。つなぎ目のクリックを防ぐ）。その区間が編集したノートの
+    # 範囲の端にあるときだけ、その側へ足りない分も外へ出てよい
     from vocal_engine import XFADE_MS
     from vocal_engine.project.pitch import layered_segments
-    outs = [(g.end_sec - g.start_sec) * g.ratio for g in layered_segments(p)
-            if g.silence_sec <= 0 and g.end_sec > g.start_sec and abs(g.ratio - 1.0) > 1e-9]
-    borrow = max([0.0] + [XFADE_MS / 1000.0 - o for o in outs])
+    lo = hi = 0.0
+    for g in layered_segments(p):
+        if g.silence_sec > 0 or g.end_sec <= g.start_sec or abs(g.ratio - 1.0) < 1e-9:
+            continue
+        need = XFADE_MS / 1000.0 - (g.end_sec - g.start_sec) * g.ratio
+        if need > 0 and abs(g.start_sec - a) < 1e-6:
+            lo = max(lo, need)
+        if need > 0 and abs(g.end_sec - b) < 1e-6:
+            hi = max(hi, need)
     assert diff is not None
-    assert diff[0] >= a - XF - borrow and diff[1] <= b + XF + borrow, \
-        "編集したノートと隣の外でサンプルが違う: %s（許容 %.3f–%.3f）" % (diff, a - XF - borrow, b + XF + borrow)
+    assert diff[0] >= a - XF - lo and diff[1] <= b + XF + hi, \
+        "編集したノートと隣の外でサンプルが違う: %s（許容 %.3f–%.3f）" % (diff, a - XF - lo, b + XF + hi)
 
 
 def test_move_boundary_is_local_in_export(lyr, tmp_path):
