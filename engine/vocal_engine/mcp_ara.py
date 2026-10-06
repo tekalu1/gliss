@@ -671,7 +671,7 @@ def ara_set_modification(ara_id: str, source_path: str, source_id: str | None = 
         selected = _mt._reopen_if_stale(s)       # ガイドの位置が変わった
     _mt._schedule(s)
     return _ok(track=_row(s, t), created=created, source_changed=source_changed, cloned=cloned,
-               selected=bool(selected), analyzed=_analyzed(s, t), session=_mt.summary(s))
+               selected=bool(selected), analyzed=_analyzed(s, t), rev=_disk_rev(s, t), session=_mt.summary(s))
 
 
 @_tool
@@ -1020,7 +1020,8 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
         reopened = True
     _mt._schedule(s)
     return _ok(track=t["id"], ara_id=ara_id, mismatch=False, edits=len(p.edits), changesets=len(p.changesets),
-               reopened=reopened, estimator_applied=applied, estimator_note=note, session=_mt.summary(s))
+               reopened=reopened, estimator_applied=applied, estimator_note=note, rev=_disk_rev(s, t),
+               session=_mt.summary(s))
 
 
 def _note_row(n, start, end, midi):
