@@ -116,7 +116,8 @@ public:
     /** アーカイブのガイド（修飾の persistentID）。登録が済んだら ara_sync(guide=…) で当てる。 */
     void setPendingGuide (const juce::String& araId);
 
-    /** アーカイブのトラックごとのガイド（修飾 → ガイドの修飾）。両方の登録が済んだものから ara_sync(guides=…) で当てる。 */
+    /** アーカイブのトラックごとのガイド（修飾 → ガイドの修飾。値が空ならその修飾の指定を外す = アーカイブを正にする）。
+        両方の登録が済んだものから ara_sync(guides=…) で当てる。エンジンが答えたもの（当てた・断られた）は残さない。 */
     void setPendingGuides (const std::map<juce::String, juce::String>& guides);
 
     void requestSync();

@@ -9,7 +9,7 @@ juce::String write (const DocumentArchive& a)
     document->setProperty ("work_key", a.workKey);
     document->setProperty ("guide", a.guide.isNotEmpty() ? juce::var (a.guide) : juce::var());
 
-    if (! a.guides.empty())
+    if (! a.guides.empty() || ! a.modifications.empty())
     {
         auto* guides = new juce::DynamicObject();
 
@@ -64,9 +64,13 @@ bool read (const juce::String& json, DocumentArchive& out, juce::String& error)
         out.guide = guide.toString();
 
     if (auto* guides = document.getProperty ("guides", {}).getDynamicObject())
+    {
+        out.hasGuides = true;
+
         for (const auto& property : guides->getProperties())
             if (property.value.isString() && property.value.toString().isNotEmpty())
                 out.guides[property.name.toString()] = property.value.toString();
+    }
 
     if (auto* modifications = root.getProperty ("modifications", {}).getDynamicObject())
     {

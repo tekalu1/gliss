@@ -253,6 +253,15 @@ void DocumentSync::refreshArchivesLocked (const juce::var& args, int timeoutMs)
         for (const auto& p : guides->getProperties())
             if (p.value.isString() && p.value.toString().isNotEmpty())
                 latestGuides[p.name.toString()] = p.value.toString();
+
+    // エンジンにもう載っている指定は、戻し途中として持たない（以後はエンジンの値が正。外部の AI が変えても上書きしない）
+    for (auto it = pendingGuides.begin(); it != pendingGuides.end();)
+    {
+        const auto latest = latestGuides.find (it->first);
+        const auto applied = it->second.isEmpty() ? latest == latestGuides.end()
+                                                  : (latest != latestGuides.end() && latest->second == it->second);
+        it = applied ? pendingGuides.erase (it) : std::next (it);
+    }
 }
 
 juce::var DocumentSync::getArchiveForStore (const juce::String& araId) const
@@ -280,7 +289,12 @@ std::map<juce::String, juce::String> DocumentSync::getGuidesForStore() const
     auto out = latestGuides;
 
     for (const auto& [id, guideId] : pendingGuides)
-        out[id] = guideId;
+    {
+        if (guideId.isEmpty())
+            out.erase (id);
+        else
+            out[id] = guideId;
+    }
 
     return out;
 }
@@ -1033,7 +1047,7 @@ void DocumentSync::cycle()
     std::map<juce::String, juce::String> guidesReady;
 
     for (const auto& [id, guideId] : guidesToApply)
-        if (isRegistered (id) && isRegistered (guideId))
+        if (isRegistered (id) && (guideId.isEmpty() || isRegistered (guideId)))
             guidesReady[id] = guideId;
 
     if (! tracks.isEmpty() || guideReady || ! guidesReady.empty())
@@ -1074,6 +1088,12 @@ void DocumentSync::cycle()
 
             if (! guidesReady.empty())
             {
+                // エンジンが答えた組は当てた・断られた（伴奏・自分自身）・知らない、のどれでも残さない。残すと毎回送り直して詰まる。
+                if (auto* rejected = r.getProperty ("rejected", {}).getArray())
+                    for (const auto& x : *rejected)
+                        log ("sync: guide " + x.getProperty ("ara_id", {}).toString() + " -> " + x.getProperty ("guide", {}).toString()
+                             + " rejected: " + x.getProperty ("reason", {}).toString());
+
                 std::lock_guard guard (mutex);
 
                 for (const auto& [id, guideId] : guidesReady)
