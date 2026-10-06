@@ -82,7 +82,7 @@ DocumentController がエンジン（`McpClient`。`plugin/src/engine`）を **1
 1. エンジンの遅延起動（最初のソースの読み出しが許されたとき、または画面が開いたとき）→ `engine_info` → `ara_open(work_key)`。
 2. ソースの音をホストから読み（`ARAAudioSourceReader`。リーダーはメッセージスレッドで作り・壊す）、`<作業場所>\ara-src\<persistentID の FNV-1a 64 の 16 桁>.wav`（float32、ソースの周波数・チャンネルのまま）に書いて、**すぐ** `ara_set_modification`（保留のアーカイブがあれば続けて `ara_restore`）。音が変わったら読み直す。
 3. 外した修飾は `ara_remove_modification`、位置（代表のリージョン＝ソングで最初のものでソースの 0 秒が置かれる秒）・名前・DAW のトラック名の変化とアーカイブのガイドは `ara_sync`。
-4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty` → ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`）→ ノートを取った版と違う修飾に `ara_notes`（下の「DAW に返すもの」）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
+4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty` → ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`。下の「ホストに知らせないもの」）→ ノートを取った版と違う修飾に `ara_notes`（下の「DAW に返すもの」）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
 5. 画面の `engineCall` が成功したら（読むだけのもの以外）同期を予約する。途中で次の予約が来たら、終わってからもう 1 回だけ回す。
 
 エンジンが落ちたら `engine` の知らせ（`failed`）を出し、最後のキャッシュのまま鳴らす。画面の［つなぎ直す］（`restartEngine`）で起動し直し、`ara_open` → 全修飾の `ara_set_modification` → 全部の窓を取り直す。ドキュメントを閉じるとエンジンの stdin を閉じ、2 秒待って Job Object を閉じる（作業場所は消さない）。
@@ -109,7 +109,23 @@ DAW がイベントの上に音符を描く・MIDI に書き出す・ほかの�
 - 取り直し: `ara_revs` の版（`<解析の署名>:<編集の署名>`）が、ノートを取った版と違う修飾だけ `ara_notes(ara_ids)` を呼ぶ（解析が済む・編集・取り消し・アーカイブから戻す、で版が変わる）。
   中身が変わったら、メッセージスレッドで修飾と各リージョンに `notifyContentChanged(notesAreAffected)`、解析だけのノートが変わったらソースにも（ホストへは次の `notifyModelUpdates` で出る）。
   TestHost ではメッセージが回らないのでこの知らせは届かないが、TestHost は `isAudioSourceContentAnalysisIncomplete` を回して待つので、読み出しは確かめられる。
-- アーカイブから戻した直後も、解析が済んで中身が変わったところで知らせる（ARA は「戻した状態と違うときだけ知らせる」としているが、解析はアーカイブに入れていないので、戻した時点ではノートが無い）。
+- 初めて読めるようになったノート（登録・アーカイブから戻した後、pending から読めるようになった）は、ホストに「まだ無い」と答えた修飾・ソース
+  （`isAudio…ContentAvailable` などで聞かれて読めなかったもの）にだけ知らせる。聞かれていなければ、ホストが次に読むときにそのまま渡る。
+  読めていたノートが変わったとき（編集・取り消し・方式の切り替え）はいつも知らせる。
+
+### ホストに知らせないもの（曲を開いただけで「変更あり」にしない）
+
+ARA は、ホストが戻した状態（アーカイブ）と違うときだけ `notifyAudioSourceContentChanged`・`notifyAudioModificationContentChanged`・
+`notifyPlaybackRegionContentChanged` を呼ぶとしている（ホストはこれで保存の要否を決める）。Gliss が開いた直後にこれらを送っていた間、Fender Studio Pro は
+何も操作しないうちから曲を「変更あり」にし、終了時に保存を聞いた（2026-10-07。直した後の実機の確認はまだ）。Gliss は再合成の結果も解析もアーカイブに入れないので、開いた後に作り直すが、
+これは戻した状態に追いつくだけなので、ホストには知らせない（JUCE の `notifyContentChanged(…, notifyARAHost = false)`。ARA のリスナーには届く）。
+
+- 再合成: 手元に音が無い（登録・アーカイブから戻した直後・エンジンを起動し直した）か、前の版が解析待ちだった修飾の再合成で、編集の署名が
+  開いた時（`ara_set_modification`・`ara_restore` の返り値の `rev`）のままのもの（プラグインのログに `catching up`）。開いた後に編集が入って
+  いれば知らせる（知らせないとホストが保存を求めず、編集が失われる）。窓の無いまま（原音のまま）の `reset` も知らせない。
+- ノート: 上の「初めて読めるようになったノート」。
+- `GlissARATest` が、アーカイブから戻す 2 回（別の作業場所で解析し直す B・同じ作業場所で開き直す D）でホストへの知らせが 0 であること、
+  `-relay` で外部の編集の後に修飾とリージョンの「音が変わった」が届くことを確かめる（下の「自動の検証」）。
 
 #### DAW ごとに確かめること（実物の DAW。人の許可を取って）
 
@@ -376,9 +392,9 @@ ARA SDK のホスト（`ARATestHost` と `GlissARATest`）は `plugin/tests/arat
 | **GlissHostCheck**（`plugin/tests/hostcheck`、JUCE のホスト） | VST3 として見つかる・`hasARAExtension`・ARA ファクトリの ID が決めたとおり・解析の種類がノートだけ・ARA に結び付かない `processBlock` が入力を変えない・ARA に結び付かないエディタは画面を出さずに案内を出す・エディタとインスタンスを閉じて落ちない |
 | **GlissPluginTests**（`plugin/tests/unit`） | 単位ごとの単体テスト（カテゴリ `Gliss`）。エディタは `WebResources`（`/fs/` の decode と拒否・資源の振り分け・開発時のフォルダ）。ドキュメント（`AraTests.cpp`）はアーカイブの形と往復・作業場所の鍵・リージョンの時間の写し（周波数が同じときは段階 1 の計算と同じ・違うときは続きのブロックが途切れない）・再生位置・禁止のツールと同期を予約するツール・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方・float の WAV がホストの値をそのまま書く・`plugin-state.json`・エンジンの無いときの同期の待ち。DAW に返すノート（`NoteTests.cpp`）は `ara_notes` の写し・品質のラベル・時間の範囲・ソングの秒への写し・リージョンでの切り取り・知らせるかどうかの比べ方。JUCE の UnitTestRunner はこの console のアプリでは失敗の文を出さない（結果の数だけ）。失敗の中身を見たいテストは、`AraTests.cpp` の `ScopedStdoutLogger` のように間だけ stdout へ出すロガーを入れる |
 | エンジン: TestHost（全 12 項目） | エンジンにつないだまま全項目が終了コード 0（ドキュメントを作ってすぐ壊す試験でエンジンが残らない） |
-| エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る。ノート: 先に編集なしのドキュメント（リージョン 2 つ。2 つ目はソースの 1.5〜4.2 秒をソングの 10 秒）でホストとして解析を頼んで待ち、ソース・修飾・リージョンのノートがエンジンの `ara_notes` の解析だけのノートと一致して `detected`、2 つ目のリージョンは切って写したもの。編集の後は `adjusted` で、エンジンの編集後のノートと一致し、全部 1 半音上がる。アーカイブから戻した後も同じ |
+| エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る。ノート: 先に編集なしのドキュメント（リージョン 2 つ。2 つ目はソースの 1.5〜4.2 秒をソングの 10 秒）でホストとして解析を頼んで待ち、ソース・修飾・リージョンのノートがエンジンの `ara_notes` の解析だけのノートと一致して `detected`、2 つ目のリージョンは切って写したもの。編集の後は `adjusted` で、エンジンの編集後のノートと一致し、全部 1 半音上がる。アーカイブから戻した後も同じ。ホストへの知らせ（`ModelUpdateCounts.h`。`updates.json`）: アーカイブから戻した B と、同じ作業場所でもう一度戻す D（曲を開き直しただけ）で、ホストがノートを読むまで 0。D の終わりにノートが読めている |
 | エンジン: **GlissHostCheck `--ara-editor`**（`AraEditorCheck.h`） | JUCE の ARA ホスト（`juce_ARAHosting`）で Gliss.vst3 に本物のドキュメントを作り、インスタンスを全部の役で結び付けてエディタを開く。プラグインのログで、エディタがドキュメントの `DocumentBridge` を得る・画面の `ui-ready`・`bootstrap`・エンジンの起動と修飾の登録・画面の `engineCall`（`list_tracks`・`select_track`・`export_view_data`）の成功・`/fs/` を断っていないことを確かめる |
-| エンジン: **GlissARATest `-relay`** ＋ `verify_ara_relay.py` | 外部の AI の代わり（`plugin/tests/relay_client.py`。別のプロセスの `vocal_engine.mcp` を stdio で起動）が、開いているドキュメントを `ara_documents` で見つけ、`ara_attach` → `analyze_take` → `shift_pitch`（+100 セント）を中継で呼ぶ。編集の前の描画が原音・後の描画がエンジンの `render_region` とサンプル単位で同じ・保存（アーカイブ）に作者 `ai` の changeset・DAW に返すノートが adjusted で 1 半音上・プラグインのログに `sync: external edit`・ドキュメントを閉じたら中継の記録が消える |
+| エンジン: **GlissARATest `-relay`** ＋ `verify_ara_relay.py` | 外部の AI の代わり（`plugin/tests/relay_client.py`。別のプロセスの `vocal_engine.mcp` を stdio で起動）が、開いているドキュメントを `ara_documents` で見つけ、`ara_attach` → `analyze_take` → `shift_pitch`（+100 セント）を中継で呼ぶ。編集の前の描画が原音・後の描画がエンジンの `render_region` とサンプル単位で同じ・保存（アーカイブ）に作者 `ai` の changeset・DAW に返すノートが adjusted で 1 半音上・プラグインのログに `sync: external edit`・ドキュメントを閉じたら中継の記録が消える・外部の編集の後にホストへ修飾とリージョンの「音が変わった」が届く（`updates-r.json`） |
 | **GlissHostCheck `--editor`**（`EditorCheck.h`・`FakeDocumentBridge.h`） | Gliss.vst3 を読まず、エディタの画面の部品（`plugin/src/editor`）を**偽の DocumentBridge** につないでこのプロセスの中で画面の外に開く: `app/renderer` が読み込まれ `ui-ready` が来る（その前の知らせは捨てる）・`window.api` と `data-mode=ara`・user script から `/juce/index.js` の動的 import・`engineCall` の往復（`{ok:false}` も値で・別スレッドの completion も）・ほかのネイティブ関数・`/fs/`（空白・`%`・`+`・日本語の名前を読める／外・`..`・無い・フォルダ・知らない資源は拒否）・知らせ 6 種が画面の受け手に届く・F8 は窓へ渡り Space は渡らない・応答の前に閉じても落ちない・2 つ同時に 20 回開閉。`--expect-web-dir` で `GLISS_PLUGIN_WEB_DIR` から読むこと |
 
 どの検証もタイムアウトを持ち、終わりに起動したプロセス（ホスト・WebView2・エンジン）を木ごと止めて、残りが 0 であることを確かめる。
@@ -400,6 +416,8 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 - TestHost の `-file <wav>`（音声ファイルを渡す）は、**SDK 自身の TestPlugIn でも**ときどき終わらない（試験ごとに起きたり起きなかったりする）。Gliss の検証では使わず、内蔵の試験信号を使う。
 - TestHost は VST3 の `processMode` を `kRealtime` にして CPU の速さで描画する。先読みが間に合わないブロックが多く出る（普通の再生ではない）。このため、突き合わせの検証では `GLISS_ARA_READ_TIMEOUT_MS` で待たせる。待たない場合の挙動は、ブロックが欠ける（無音になる）だけで、読めた部分は正しい。同じ理由で、編集の当たった音を描かせるには `GLISS_ARA_SYNC_WAIT_MS` で同期を待たせる。
 - TestHost のメインスレッドは描画の間メッセージを回さない（眠るだけ）。プラグインの `MessageManager::callAsync`（エディタへの知らせ・ホストへの `notifyContentChanged`）はそこでは届かない。同期はメッセージスレッドに頼らずに進む作りなので、描画とアーカイブは確かめられる。
+  `GlissARATest` はホストへの知らせを数えるために、自分でメッセージを配り（`PeekMessage`）、`notifyModelUpdates` を呼ぶ（`pumpHost`）。
+  SDK の TestHost の受け口（`ARAModelUpdateController.cpp`）は TestHost が問い合わせている間だけ知らせを許すので、`GlissARATest` では数える版（`GlissModelUpdateController.cpp`）に差し替えている。
 - TestHost のホストは、ホストの音のリーダーの作成と破棄を**ドキュメントを作ったスレッドでだけ**許す（`ARA_VALIDATE_API_THREAD`）。読むのは描画のスレッド以外ならどこでもよい。プラグインは `ARAAudioSourceReader` をメッセージスレッドで作り、同期のスレッドで読む。
 - ARA のストリームに `juce::OutputStream::writeString` で書くと、文字列の後ろに NUL が 1 バイト付く（`readString` が読む印）。アーカイブを外から読むときは落とす。
 - ARA_Examples を `add_subdirectory` して自前のホストを足すとき（`plugin/tests/aratest`）、`configure_ARA_Examples_target` の `source_group(TREE …)` がターゲットのフォルダの外のソースで落ちる（関数 `ara_group_target_files` を空で定義し直す）。`ExamplesCommon\Windows\ARAExamples.rc` は版の定義が要るので外す。ARA の例は cp932 で読むので、日本語のコメントのあるファイルには `/utf-8` を付ける。
@@ -424,7 +442,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 | `plugin/src/ara/DocumentBridge.h` | エディタがドキュメントに頼む口（`GlissDocumentController` が実装する） |
 | `plugin/src/Diagnostics.*`・`ProcessUtils.*` | 検証用のログ・環境変数、プロセスの ID と生死 |
 | `plugin/tests/hostcheck/` | GlissHostCheck（`--editor` の偽の DocumentBridge、`--ara-editor` の本物の ARA ドキュメントも） |
-| `plugin/tests/aratest/` | ARA SDK のホスト（`ARATestHost`）と、その部品で作った通し試験 `GlissARATest` を 1 つのツリーで作る CMake |
+| `plugin/tests/aratest/` | ARA SDK のホスト（`ARATestHost`）と、その部品で作った通し試験 `GlissARATest` を 1 つのツリーで作る CMake。`GlissModelUpdateController.cpp`・`ModelUpdateCounts.h` はホストへの知らせを数える |
 | `plugin/tests/verify_render_trace.py` | 再生の記録を試験信号と突き合わせる（numpy が要る） |
 | `plugin/tests/verify_ara_engine.py` | `GlissARATest` の出力をエンジンの `render_region`・`ara_notes` と突き合わせる（エンジンの python・cwd は engine） |
 | `plugin/tests/relay_client.py`・`verify_ara_relay.py` | `GlissARATest -relay` が起動する外部の AI の代わりと、その出力の確かめ |

@@ -14,6 +14,11 @@
 //   B. ドキュメントを閉じ（エンジンも止まる）、作業場所を -workB に替え、GLISS_TEST_EDIT を消して、同じ永続 ID でドキュメントを作り直し、
 //      アーカイブを戻して描画 → render-b.f32（アーカイブだけから同じ音になるか）。戻した編集のノート → notes-b.json
 //   C. 同じドキュメントを別の周波数（既定 48000 Hz）で描画 → render-c.f32（周波数の変換の経路）
+//   D. 同じ作業場所（B）のまま、同じアーカイブからもう一度ドキュメントを作り直して描画し、同期が済むまで回す（曲を開き直しただけ）
+//   B・D ではホストがノートを読む前まで、プラグインからホストへの「中身が変わった」の知らせ（ARAModelUpdateControllerInterface。
+//   ModelUpdateCounts.h）が 1 つも無いこと（ARA は戻した状態と違うときだけ知らせる。Studio Pro は知らせを受けると曲を
+//   「変更あり」にする）。D の終わりにはノートが読めている（知らせが無いのは、ノートが来なかったからではない）。数は updates.json。
+//   -relay では反対に、外部の編集の後に修飾とリージョンの「音が変わった」が届くこと（updates-r.json）。
 //   ソースの音 → source.f32、ID と長さ → summary.json。比べるのは plugin/tests/verify_ara_engine.py。
 //
 // notes-*.json は {sources: {id: 中身}, modifications: {id: 中身}, regions: [{song_start, mod_start, …, content: 中身}]}、
@@ -22,6 +27,7 @@
 
 #include "TestCases.h"
 #include "TestHost.h"
+#include "ModelUpdateCounts.h"
 #include "ARAHostInterfaces/ARAAudioAccessController.h"
 
 #include "ARA_Library/Utilities/ARASamplePositionConversion.h"
@@ -135,6 +141,25 @@ void setEnv (const char* name, const char* value)
 #else
     if (value != nullptr) setenv (name, value, 1); else unsetenv (name);
 #endif
+}
+
+/** ホストのメインスレッドの仕事を ms の間回す: プラグインのメッセージ（JUCE の callAsync。プラグインはそこでホストへの知らせを
+    積む）を配り、積まれた知らせを受け取る（notifyModelUpdates）。idleThreadForDuration は眠るだけで、メッセージを配らない。 */
+void pumpHost (PlugInEntry* plugInEntry, ARADocumentController* dc, int ms)
+{
+    for (int waited { 0 }; waited < ms; waited += 20)
+    {
+#if defined (_WIN32)
+        MSG msg;
+        while (PeekMessageW (&msg, nullptr, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage (&msg);
+            DispatchMessageW (&msg);
+        }
+#endif
+        dc->getDocumentController ()->notifyModelUpdates ();
+        plugInEntry->idleThreadForDuration (20);
+    }
 }
 
 /** ドキュメントの全リージョンを PlaybackRenderer の役のインスタンスで描く（TestCases.cpp の testPlaybackRendering と同じ流し方）。
@@ -295,7 +320,7 @@ bool waitForRegionNotes (PlugInEntry* plugInEntry, ARADocumentController* dc, AR
         if (all)
             return true;
 
-        plugInEntry->idleThreadForDuration (50);
+        pumpHost (plugInEntry, dc, 50);
     }
 
     ARA_LOG ("the notes did not reach grade %i in %i ms", static_cast<int> (want), timeoutMs);
@@ -382,6 +407,8 @@ int runRelay (PlugInEntry* plugInEntry, const AudioFileList& files, const VoiceA
         auto dc { createHostAndBasicDocument (plugInEntry, testHost, "GlissARATest R", false, files) };
         render0 = renderDocument (plugInEntry, dc, voice.getSampleRate ());
 
+        pumpHost (plugInEntry, dc, 2000);           // 作った直後の知らせを流してから数える
+        modelUpdateCounts () = {};
         clientCode = runExternalClient (plugInEntry, script, outDir, 300000);
         ARA_LOG ("relay: the external client exited with %i", clientCode);
         if (clientCode != 0)
@@ -392,6 +419,16 @@ int runRelay (PlugInEntry* plugInEntry, const AudioFileList& files, const VoiceA
             return 1;
         render1 = renderDocument (plugInEntry, dc, voice.getSampleRate ());
         writeText (outDir + "/notes-r.json", describeDocumentNotes (dc));
+
+        // 外部の編集で音が変わった: ホストに知らせている（下の D で知らせが無いことの裏返し。数える仕掛けが働いている）
+        pumpHost (plugInEntry, dc, 2000);
+        const auto counts { modelUpdateCounts () };
+        writeText (outDir + "/updates-r.json", counts.toJson ());
+        if (counts.modificationSamples == 0 || counts.regionSamples == 0)
+        {
+            ARA_LOG ("relay: the host was not told that the edited modification changed: %s", counts.toJson ().c_str ());
+            return 1;
+        }
 
         if (! dc->supportsPartialPersistency () || ! dc->storeObjectsToArchive (&archive))
         {
@@ -523,6 +560,9 @@ int main (int argc, const char* argv[])
     setEnv ("GLISS_TEST_EDIT", nullptr);
 
     std::vector<float> renderB, renderC;
+    ModelUpdateCounts countsB, countsD;
+    bool notesReadyD { false };
+    modelUpdateCounts () = {};
     {
         auto testHost { std::make_unique<TestHost> () };
         auto document { testHost->addDocument ("GlissARATest B", plugInEntry.get ()) };
@@ -548,10 +588,57 @@ int main (int argc, const char* argv[])
 
         renderB = renderDocument (plugInEntry.get (), dc, voice->getSampleRate ());
         renderC = renderDocument (plugInEntry.get (), dc, otherRate);
+        pumpHost (plugInEntry.get (), dc, 3000);
+        countsB = modelUpdateCounts ();             // ホストはまだノートを読んでいない
 
         // アーカイブから戻した編集のノート（別の作業場所で解析し直した後）
         waitForRegionNotes (plugInEntry.get (), dc, ARA::kARAContentGradeAdjusted, 60000);
         writeText (outDir + "/notes-b.json", describeDocumentNotes (dc));
+    }
+
+    // ---- D: 同じ作業場所で、アーカイブから開き直すだけ（解析は B の作業場所にある。曲を同じ PC で開き直したとき） ----
+    modelUpdateCounts () = {};
+    {
+        auto testHost { std::make_unique<TestHost> () };
+        auto document { testHost->addDocument ("GlissARATest D", plugInEntry.get ()) };
+        auto dc { testHost->getDocumentController (document) };
+
+        dc->beginEditing ();
+        auto musicalContext { testHost->addMusicalContext (document, "ARA Test Musical Context", { 1.0f, 0.0f, 0.0f }) };
+        auto regionSequence { testHost->addRegionSequence (document, "Track 1", musicalContext, { 0.0f, 1.0f, 0.0f }) };
+        auto audioSource { testHost->addAudioSource (document, voice.get (), sourceID) };
+        dc->enableAudioSourceSamplesAccess (audioSource, true);
+        auto audioModification { testHost->addAudioModification (document, audioSource, "Test audio modification 0", modificationID) };
+        testHost->addPlaybackRegion (document, audioModification, ARA::kARAPlaybackTransformationNoChanges,
+                                     0.0, audioSource->getDuration (), 0.0, audioSource->getDuration (),
+                                     regionSequence, "Test playback region", { 0.0f, 0.0f, 1.0f });
+        const auto restored { dc->restoreObjectsFromArchive (&archive) };
+        dc->endEditing ();
+
+        if (! restored)
+        {
+            ARA_LOG ("restoring the archive failed (D)");
+            return 1;
+        }
+
+        renderDocument (plugInEntry.get (), dc, voice->getSampleRate ());
+        pumpHost (plugInEntry.get (), dc, 8000);     // 同期（ノート・保存用の写し）が済むまで
+        countsD = modelUpdateCounts ();
+
+        // ノートは知らせを待たずに読める（もう来ている）。読んで初めて来るなら、上の数は何も確かめていない
+        auto* hc { dc->getDocumentController () };
+        const auto r { dc->getRef (audioModification) };
+        notesReadyD = hc->isAudioModificationContentAvailable (r, ARA::kARAContentTypeNotes)
+                      && hc->getAudioModificationContentGrade (r, ARA::kARAContentTypeNotes) == ARA::kARAContentGradeAdjusted;
+    }
+
+    writeText (outDir + "/updates.json", "{\"b\": " + countsB.toJson () + ", \"d\": " + countsD.toJson ()
+                                         + ", \"d_notes_ready\": " + (notesReadyD ? "true" : "false") + "}");
+    if (countsB.changes () != 0 || countsD.changes () != 0 || ! notesReadyD)
+    {
+        ARA_LOG ("restoring told the host that the document changed (or D had no notes): B %s, D %s, D notes ready %s",
+                 countsB.toJson ().c_str (), countsD.toJson ().c_str (), notesReadyD ? "yes" : "no");
+        return 1;
     }
 
     writeFloats (outDir + "/render-a.f32", renderA);

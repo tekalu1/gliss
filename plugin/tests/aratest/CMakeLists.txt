@@ -15,11 +15,13 @@ endif()
 
 add_subdirectory("${GLISS_ARA_SDK_DIR}/ARA_Examples" ara-examples)
 
-# ARATestHost と同じソースから main.cpp だけを差し替える。
+# ARATestHost と同じソースから main.cpp と、プラグインからの知らせの受け口（ARAModelUpdateController.cpp）を差し替える
+# （GlissModelUpdateController.cpp が知らせを数える。ModelUpdateCounts.h）。
 get_target_property(_testhost_sources ARATestHost SOURCES)
 set(_sources)
 foreach(src IN LISTS _testhost_sources)
-    if(NOT src MATCHES "/main\\.cpp$" AND NOT src MATCHES "\\.rc$")   # 版の情報の .rc は ARATestHost だけの設定が要る
+    if(NOT src MATCHES "/main\\.cpp$" AND NOT src MATCHES "\\.rc$"   # 版の情報の .rc は ARATestHost だけの設定が要る
+       AND NOT src MATCHES "/ARAModelUpdateController\\.cpp$")
         list(APPEND _sources "${src}")
     endif()
 endforeach()
@@ -29,7 +31,7 @@ endforeach()
 function(ara_group_target_files target)
 endfunction()
 
-add_executable(GlissARATest ${_sources} GlissARATest.cpp)
+add_executable(GlissARATest ${_sources} GlissARATest.cpp GlissModelUpdateController.cpp ModelUpdateCounts.h)
 target_include_directories(GlissARATest PRIVATE "${GLISS_ARA_SDK_DIR}/ARA_Examples/TestHost")
 target_compile_definitions(GlissARATest PRIVATE ARA_ENABLE_VST3=1 ARA_ENABLE_CLAP=0 _USE_MATH_DEFINES)
 target_link_libraries(GlissARATest PRIVATE ARAExamplesCommon ARA_Host_Library)

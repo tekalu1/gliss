@@ -341,6 +341,8 @@ def _remove_invalid_caches(pdir, sig):
                 try:
                     data = read_json(path)
                     name = os.path.basename(path)
+                    if os.path.basename(os.path.dirname(path)) == "phonemes":
+                        name = "phonemes/" + name    # 鍵付きの音素（cache/phonemes/take-<鍵>.json）
                     if isinstance(data, dict) and (
                             (name.endswith("-analysis.json") and "f0" in data and "notes" in data)
                             or (name == "onsets.json" or name.startswith("onsets-"))

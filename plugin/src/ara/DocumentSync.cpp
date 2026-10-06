@@ -605,6 +605,7 @@ bool DocumentSync::registerModification (const SyncModification& mod, const Sync
     }
 
     a.registered = true;
+    setOpenedEdits (mod.araId, r);
     a.failed = false;
     a.everRegistered = true;
     a.sourceGeneration = c.generation;
@@ -676,6 +677,7 @@ void DocumentSync::restoreIfPending (const juce::String& araId, int generation, 
 
     if (restored)
     {
+        setOpenedEdits (araId, r);
         log ("sync: ara_restore " + araId + " ok (" + r.getProperty ("edits", 0).toString() + " edit(s))");
         changed.addIfNotAlreadyThere (araId);
         emit ("project-changed", object ({ { "track_id", trackId } }));
@@ -692,15 +694,30 @@ void DocumentSync::restoreIfPending (const juce::String& araId, int generation, 
     }
 }
 
-bool DocumentSync::renderModification (const SyncModification& mod, juce::StringArray& contentChanged)
+void DocumentSync::setOpenedEdits (const juce::String& araId, const juce::var& result)
+{
+    const auto rev = result.getProperty ("rev", {}).toString();
+
+    if (rev.isNotEmpty())
+        openedEdits[araId] = editSignature (rev);
+    else
+        openedEdits.erase (araId);
+}
+
+bool DocumentSync::renderModification (const SyncModification& mod, juce::StringArray& contentChanged, juce::StringArray& caughtUp)
 {
     if (mod.pcm == nullptr)
         return true;
 
+    auto since = localRev.count (mod.araId) != 0 ? localRev[mod.araId] : juce::String();
+    // 手元に音が無い（登録・アーカイブから戻した直後・エンジンを起動し直した）か、前の版が解析待ちだった: 編集が開いた時の
+    // ままなら、その音に追いつくだけで、ドキュメントは変わっていない（ホストには知らせない。曲を開いただけで「変更あり」に
+    // しない）。開いた後に編集が入っていれば知らせる（ホストが保存を求めないと編集が失われる）
+    const auto opened = openedEdits.find (mod.araId);
+    const bool catchingUp = (since.isEmpty() || getModStatus (mod.araId).state == "waiting") && opened != openedEdits.end();
+
     settled.store (false, std::memory_order_release);
     setModState (mod.araId, "syncing");
-
-    auto since = localRev.count (mod.araId) != 0 ? localRev[mod.araId] : juce::String();
     bool analysisPending = false;
 
     for (int i = 0; i < 10000; ++i)
@@ -724,6 +741,9 @@ bool DocumentSync::renderModification (const SyncModification& mod, juce::String
             return false;
         }
 
+        const auto before = mod.pcm->getSnapshot();
+        const bool hadWindows = before != nullptr && before->hasWindows();
+
         if (! juce::exactlyEqual (mod.pcm->getSampleRate(), u.sampleRate) || mod.pcm->getNumChannels() != u.numChannels)
         {
             mod.pcm->setFormat (u.sampleRate, u.numChannels);
@@ -743,12 +763,15 @@ bool DocumentSync::renderModification (const SyncModification& mod, juce::String
             return false;
         }
 
-        if (u.reset || ! u.restore.empty() || ! u.windows.empty())
-            contentChanged.addIfNotAlreadyThere (mod.araId);
+        const bool quiet = catchingUp && editSignature (u.rev) == opened->second;
+
+        // 窓の無いまま（原音のまま）の reset は音が変わらない（編集の無い修飾の解析が変わっただけ）
+        if ((u.reset && hadWindows) || ! u.restore.empty() || ! u.windows.empty())
+            (quiet ? caughtUp : contentChanged).addIfNotAlreadyThere (mod.araId);
 
         log ("sync: ara_render_dirty " + mod.araId + " rev " + u.rev + (u.reset ? " reset" : "") + ", "
              + juce::String ((int) u.restore.size()) + " restore, " + juce::String ((int) u.windows.size()) + " window(s)"
-             + (u.analysisPending ? ", analysis pending" : "") + (u.more ? ", more" : ""));
+             + (u.analysisPending ? ", analysis pending" : "") + (u.more ? ", more" : "") + (quiet ? ", catching up" : ""));
         localRev[mod.araId] = u.rev;
         setModTrack (mod.araId, {}, u.rev);
         since = u.rev;
@@ -780,7 +803,7 @@ void DocumentSync::refreshNotes (const SyncModel& m, const std::map<juce::String
     }
 
     auto parsed = notes::parse (r);
-    juce::StringArray changedMods, changedSources;
+    juce::StringArray changedMods, changedSources, firstMods, firstSources;
     juce::StringArray summary;
 
     for (const auto& [id, rev] : targets)
@@ -802,25 +825,35 @@ void DocumentSync::refreshNotes (const SyncModel& m, const std::map<juce::String
             slot = fresh;
         }
 
+        // 初めて読めるようになった（それまで pending か、まだ取っていない）: ホストが「まだ無い」を見ていたものだけに
+        // 知らせる（GlissDocumentController::notifyNotesChanged）。読めていたものが変わったら、いつも知らせる
+        const bool first = fresh->ready && (old == nullptr || ! old->ready);
         const bool modChanged = old != nullptr ? ! old->sameContent (*fresh) : fresh->ready;
         const bool sourceChanged = old != nullptr ? ! old->sameSourceContent (*fresh) : fresh->ready;
 
         if (modChanged)
-            changedMods.add (id);
+            (first ? firstMods : changedMods).add (id);
 
         if (sourceChanged)
             for (const auto& mod : m.modifications)
                 if (mod.araId == id)
-                    changedSources.addIfNotAlreadyThere (mod.sourceId);
+                    (first ? firstSources : changedSources).addIfNotAlreadyThere (mod.sourceId);
 
         summary.add (id + " " + (fresh->ready ? juce::String ((int) fresh->notes.size()) + (fresh->edited ? " adjusted" : " detected")
                                               : juce::String ("pending")));
     }
 
-    log ("sync: ara_notes " + summary.joinIntoString (", ") + (changedMods.isEmpty() ? juce::String() : " (changed)"));
+    log ("sync: ara_notes " + summary.joinIntoString (", ") + (changedMods.isEmpty() ? juce::String() : " (changed)")
+         + (firstMods.isEmpty() ? juce::String() : " (first)"));
 
-    if ((! changedMods.isEmpty() || ! changedSources.isEmpty()) && callbacks.notesChanged)
-        callbacks.notesChanged (changedMods, changedSources);
+    if (! callbacks.notesChanged)
+        return;
+
+    if (! firstMods.isEmpty() || ! firstSources.isEmpty())
+        callbacks.notesChanged (firstMods, firstSources, true);
+
+    if (! changedMods.isEmpty() || ! changedSources.isEmpty())
+        callbacks.notesChanged (changedMods, changedSources, false);
 }
 
 void DocumentSync::applyTestEdit (const SyncModel& m)
@@ -1110,7 +1143,7 @@ void DocumentSync::cycle()
         workLeft = true;
 
     // 6. 版が変わった修飾の差分の再合成と、DAW に返すノート
-    juce::StringArray contentChanged;
+    juce::StringArray contentChanged, caughtUp;          // 音が変わった修飾・戻した状態に追いついただけの修飾
     std::map<juce::String, juce::String> notesTargets;   // ノートを取り直す修飾 → ara_revs の版
     const auto revs = call ("ara_revs", object ({}), 60000);
     ExternalChanges::Result externalChange;
@@ -1140,6 +1173,8 @@ void DocumentSync::cycle()
             if (target.isEmpty())
                 continue;
 
+            openedEdits.emplace (mod.araId, editSignature (target));   // 返り値に版の無いエンジン: 登録の後に最初に見た編集
+
             if (const auto n = notesRev.find (mod.araId); n == notesRev.end() || n->second != target)
                 notesTargets[mod.araId] = target;
 
@@ -1168,15 +1203,24 @@ void DocumentSync::cycle()
                 continue;
             }
 
-            if (! renderModification (mod, contentChanged))
+            if (! renderModification (mod, contentChanged, caughtUp))
                 workLeft = true;
 
             changed.addIfNotAlreadyThere (mod.araId);
         }
     }
 
-    if (! contentChanged.isEmpty() && callbacks.contentChanged)
-        callbacks.contentChanged (contentChanged);
+    if (callbacks.contentChanged)
+    {
+        if (! contentChanged.isEmpty())
+            callbacks.contentChanged (contentChanged, true);
+
+        for (const auto& id : contentChanged)
+            caughtUp.removeString (id);
+
+        if (! caughtUp.isEmpty())
+            callbacks.contentChanged (caughtUp, false);
+    }
 
     if (externalChange.projectChanged || externalChange.sessionChanged)
     {

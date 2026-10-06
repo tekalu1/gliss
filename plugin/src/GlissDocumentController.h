@@ -11,6 +11,8 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 
 namespace gliss
 {
@@ -143,10 +145,14 @@ private:
     void pushModel();
     void ensureReader (juce::ARAAudioSource*, SourceEntry&);
     void dropSourceEntry (juce::ARAAudioSource*);
-    void notifyContentChanged (const juce::StringArray& araIds);
-    void notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds);
+    /** notifyHost が false なら、ARA のリスナーにだけ知らせる（ホストには知らせない）。 */
+    void notifyContentChanged (const juce::StringArray& araIds, bool notifyHost = true);
+    void notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent);
+    /** ホストに渡すノート（読めなければ nullptr。ホストに「まだ無い」と答えたことを覚える）。 */
     std::shared_ptr<const ModificationNotes> notesOf (const ARA::PlugIn::AudioModification*) const;
     std::shared_ptr<const ModificationNotes> sourceNotesOf (const ARA::PlugIn::AudioSource*) const;
+    std::shared_ptr<const ModificationNotes> readyNotes (const ARA::PlugIn::AudioModification*) const;
+    bool takeHostSawNoNotes (const juce::String& key);
     void postEvent (const juce::String& name, const juce::var& data);
     void sendEvent (const juce::String& name, const juce::var& data);
     void onSyncEvent (const juce::String& name, const juce::var& data);
@@ -166,6 +172,10 @@ private:
     std::shared_ptr<PreviewAudio> previewAudio = std::make_shared<PreviewAudio>();
     std::atomic<std::uint64_t> previewGeneration { 0 };
     std::atomic<bool> compare { false };
+
+    // ホストにノートを「まだ無い」と答えた修飾（m:<ID>）・ソース（s:<ID>）。ホストの読み出しのスレッドとメッセージスレッドが触る
+    mutable std::mutex hostNotesMutex;
+    mutable std::set<juce::String> hostSawNoNotes;
 
     std::map<juce::ARAAudioSource*, SourceEntry> sourceEntries;
     std::vector<std::unique_ptr<juce::ARAAudioSourceReader>> retiredReaders;

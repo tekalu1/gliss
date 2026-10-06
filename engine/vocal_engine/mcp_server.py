@@ -70,10 +70,15 @@ def _invalidate_renderer():
     _state["region"] = {}
 
 
-def _renderer(backend="praat"):
+def _renderer(backend="praat", p=None):
     # キーは実際に使うバックエンド名（praat が使えず psola に落ちたとき、"praat" と "psola" を
     # 交互に頼まれても同じレンダラを使い回し、prepare をやり直さない）
+    # p: 再合成するプロジェクト（ジョブが呼ぶとき）。編集対象でなければ使い回さずに作る（`_region_renderer`）
     name = resolve_backend_name(backend)
+    if p is not None and _state.get("project") is not p:
+        x, sr = p.audio("take")
+        f0r = p.take_f0
+        return Renderer(x, sr, f0r.f0, f0r.voiced, f0r.hop_s, backend=name)
     p = _project()
     if isinstance(p, Project):
         p._check_audio_versions()
@@ -88,6 +93,23 @@ def _renderer(backend="praat"):
         _state["renderer_backend"] = name
         _state["renderer_audio_sig"] = audio_sig
     return _state["renderer"]
+
+
+def _region_renderer(p, backend="praat", channels="mono"):
+    """p の区間の再合成器（`RegionRenderer`）。p が編集対象なら `_state["region"]` のものを使い回す。
+
+    ジョブはツールを呼んだ時の p を持って後で走る。中継（`ara_relay.execute`）は修飾を切り替えてツールを呼び、
+    すぐ画面の編集対象に戻すので、ジョブが走る時の `_state` は別の修飾のものになっている。そのときは使い回しを
+    見ずに作り、`_state` にも入れない（別の修飾の音と F0 で再合成して測らない）。"""
+    from .render.region import RegionRenderer
+    key = (resolve_backend_name(backend), channels)
+    mine = _state.get("project") is p
+    rr = _state["region"].get(key) if mine else None
+    if rr is None:
+        rr = RegionRenderer.for_project(p, backend=backend, channels=channels)
+        if mine:
+            _state["region"] = {key: rr}
+    return rr
 
 
 def _range(start_sec=None, end_sec=None):
@@ -1935,7 +1957,7 @@ def render_preview(start_sec: float = None, end_sec: float = None, backend: str 
 
 def _preview(p, backend, t0, t1, name):
     """render_preview の中身。"""
-    r = _renderer(backend)
+    r = _renderer(backend, p)
     segs = segments_for(p)
     y, info = r.render_range(t0, t1, segs)
     out = os.path.join(p.sub("renders"),
@@ -1965,12 +1987,8 @@ def render_region(start_sec: float = None, end_sec: float = None, backend: str =
     p = _project()
     p.reload_if_changed()                   # 画面など外で足された編集も当てる
     t0, t1 = _range(start_sec, end_sec)
-    from .render.region import RegionRenderer, render_region as _rr
-    key = (resolve_backend_name(backend), channels)
-    rr = _state["region"].get(key)
-    if rr is None:
-        rr = RegionRenderer.for_project(p, backend=backend, channels=channels)
-        _state["region"] = {key: rr}
+    from .render.region import render_region as _rr
+    rr = _region_renderer(p, backend, channels)
     with _prep_yield():
         y, info = _rr(p, t0, t1, renderer=rr)
     out = path or os.path.join(p.sub("renders"), "region-%s-%s.wav"
@@ -2192,7 +2210,7 @@ def remeasure(start_sec: float = None, end_sec: float = None, backend: str = "pr
 
     def work():
         from .analysis.notes import segment_notes
-        r = _renderer(backend)
+        r = _renderer(backend, p)
         segs = segments_for(p)
         y, info = r.render_range(t0, t1, segs)
         sr = p.take["sr"]
