@@ -198,6 +198,9 @@ export async function analyzeTake({ hold = null, label = 'トラックを準備�
 export async function viewData(range) {
   const r = await call('export_view_data', range || {});
   const vd = await window.api.readJson(r.path);
+  // The view file name also includes export range arguments; the unqualified
+  // revision is returned explicitly by both export_view_data and render_audition.
+  vd.view_rev = r.view_rev || null;
   // 曲の取り消しの履歴（セッション。issue #16）は結果に付いてくる。プロジェクトの changeset の一覧はそのまま
   if (r.history) vd.history = { ...(vd.history || {}), ...r.history };
   // 書き出しの既定のパスは結果の値が今のもの（描画データは前に作ったものを使い回すことがある。issue #63）

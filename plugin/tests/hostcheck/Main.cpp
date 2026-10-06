@@ -61,7 +61,7 @@ public:
         if (args.size() >= 2 && args[0] == "--editor")
             return runEditorCheck (args);
 
-        if (args.size() >= 4 && args[0] == "--ara-editor")
+        if (args.size() >= 4 && (args[0] == "--ara-editor" || args[0] == "--ara-audition"))
             return runAraEditorCheck (args);
 
         if (args.size() < 2)
@@ -143,10 +143,17 @@ private:
 
         const auto timeoutIndex = args.indexOf ("--timeout");
         const auto timeoutSec = timeoutIndex >= 0 ? args[timeoutIndex + 1].getIntValue() : 180;
+        const auto modsIndex = args.indexOf ("--mods");
+        const auto mods = modsIndex >= 0 ? args[modsIndex + 1].getIntValue() : 1;
+        const auto voiceIndex = args.indexOf ("--voice-sec");
+        const auto voiceSec = voiceIndex >= 0 ? args[voiceIndex + 1].getIntValue() : 6;
+        const auto auditionsIndex = args.indexOf ("--auditions");
+        const auto auditions = auditionsIndex >= 0 ? args[auditionsIndex + 1].getIntValue() : 1;
 
         araEditorCheck = std::make_unique<AraEditorCheck> ([this] (const juce::String& line) { report (line); },
                                                            [this] (bool ok, const juce::String& what) { return check (ok, what); },
-                                                           juce::File (args[2]), juce::File (args[3]), timeoutSec);
+                                                           juce::File (args[2]), juce::File (args[3]), timeoutSec,
+                                                           args[0] == "--ara-audition", mods, voiceSec, auditions);
         araEditorCheck->start ([this]
         {
             report (failures == 0 ? "RESULT OK" : "RESULT FAILED (" + juce::String (failures) + ")");

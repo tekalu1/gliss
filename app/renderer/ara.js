@@ -39,6 +39,8 @@ let H = {};                 // main.js から渡される画面の部品（araBo
 export const araFeatures = () => ({ transport: A.transport, fileGuide: A.fileGuide, compare: A.compare });
 export const araEngine = () => ({ ...A.engine });
 export const araCacheOf = (id) => (ARA ? A.cache.get(id) || null : null);
+export const araSelectedModification = () => (ARA && A.sel
+  ? { track_id: A.sel.track_id, ara_id: A.sel.ara_id } : null);
 export const araRegions = (t) => (ARA ? A.regions.get(t.id) || null : null);
 /** ピアノロールだけで使う表示秒 + S.off。上段と時計の S.head はソング秒。リージョン外は null。 */
 export function araEditorHead() {
@@ -231,7 +233,13 @@ const isVocal = (id) => S.tracks.some((t) => t.id === id && t.kind === 'vocal');
 
 /** DAW で選ばれたリージョンのトラックに切り替える。ドラッグ中・開いている途中・編集の確定中は最後の 1 件だけ覚えて、静かになってから当てる。 */
 async function onSelection(sel) {
+  const before = A.sel;
   A.sel = sel && sel.track_id ? sel : null;
+  if (before?.track_id !== A.sel?.track_id || before?.ara_id !== A.sel?.ara_id) {
+    window.dispatchEvent(new CustomEvent('gliss-ara-selection', {
+      detail: A.sel ? { track_id: A.sel.track_id, ara_id: A.sel.ara_id } : null,
+    }));
+  }
   if (!A.sel) return;
   selPending = A.sel;
   if (selWaiting) return;
@@ -280,7 +288,7 @@ export function pullHostState() {
         H.render?.();
         H.renderTracks?.();
         updateChip();
-        if (h.selection && h.selection.track_id && JSON.stringify(h.selection) !== JSON.stringify(A.sel)) onSelection(h.selection);
+        if (JSON.stringify(h.selection ?? null) !== JSON.stringify(A.sel)) onSelection(h.selection);
       } catch (err) {
         console.error('[ara] hostState:', err);
       } finally { pulling = null; }

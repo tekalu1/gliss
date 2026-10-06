@@ -793,10 +793,18 @@ void GlissDocumentController::engineCall (const juce::String& tool, const juce::
         return;
     }
 
-    bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), tool, args, done = std::move (done)]
+    const auto requested = juce::Time::getMillisecondCounter();
+    if (tool == "render_audition")
+        diag::log ("audition-latency stage=request ms=" + juce::String (requested));
+    bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), tool, args, done = std::move (done), requested]
     {
         const auto started = juce::Time::getMillisecondCounter();
+        if (tool == "render_audition")
+            diag::log ("audition-latency stage=engine-call ms=" + juce::String (started)
+                       + " queueMs=" + juce::String ((int) (started - requested)));
         auto result = sync->callTool (tool, args, 300000);
+        if (tool == "render_audition")
+            diag::log ("audition-latency stage=engine-result ms=" + juce::String (juce::Time::getMillisecondCounter()));
         diag::log ("bridge: engineCall " + tool + (isFailure (result) ? " failed: " + failureReason (result) : juce::String (" ok"))
                    + " (" + juce::String ((int) (juce::Time::getMillisecondCounter() - started)) + " ms)");
 
@@ -977,10 +985,12 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
     }
 
     const auto generation = previewGeneration.fetch_add (1) + 1;
+    diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
     const auto audio = previewAudio;
     const auto cancellationEpoch = audio->getCancellationEpoch();
     bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), file, generation, cancellationEpoch, audio, done = std::move (done)]
     {
+        diag::log ("audition-latency stage=decode-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
         std::unique_ptr<PreviewAudio::Clip> clip;
         juce::WavAudioFormat wav;
         std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (file.createInputStream().release(), true));
@@ -1002,6 +1012,7 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
             }
         }
 
+        diag::log ("audition-latency stage=decode-end ms=" + juce::String (juce::Time::getMillisecondCounter()));
         auto pending = std::make_shared<std::unique_ptr<PreviewAudio::Clip>> (std::move (clip));
         juce::MessageManager::callAsync ([this, token, audio, generation, cancellationEpoch, pending, done]() mutable
         {
@@ -1012,6 +1023,7 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
             if (playheadState.read().playing) { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
             if (! audio->publish (std::move (*pending), cancellationEpoch))
             { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
+            diag::log ("audition-latency stage=published ms=" + juce::String (juce::Time::getMillisecondCounter()));
             done (object ({ { "ok", true } }));
         });
     });

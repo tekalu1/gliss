@@ -31,7 +31,7 @@ import {
   wake,
 } from './edits.js';
 import { G, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
-import { previewEnabled, previewState, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
+import { preparePreview, previewEnabled, previewState, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
 import { ARA, araLoopEditor, araSeekEditor, pullHostState } from './ara.js';
 import { status } from './engine.js';
 import { closeMenu, editorMenu, menuOpen } from './menus.js';
@@ -71,7 +71,7 @@ function onPreviewState(e) {
 function beginAudition(id) {
   if (!id || !S.byId.get(id)?.pitch_editable) return;
   if (auditionNote === id) return;
-  endAudition();
+  if (auditionNote) endAudition();
   auditionNote = id;
   auditionRestore = previewEnabled();
   if (!auditionRestore) setPreviewEnabled(true, { save: false });
@@ -81,9 +81,10 @@ function beginAudition(id) {
 }
 
 function scheduleNoteHold(dr, id) {
+  preparePreview(id);
   dr.holdTimer = setTimeout(() => {
     if (S.drag === dr && !dr.moved && dr.trackId === S.session?.current) beginAudition(id);
-  }, 450);
+  }, 250);
 }
 
 export function beginSelectedAudition({ once = false } = {}) {
@@ -124,7 +125,8 @@ export function install(svgEl, rootEl, onViewChanged) {
   });
   // Alt を押したまま別のウィンドウへ移ると keyup が来ない: 予告を残さない
   window.addEventListener('blur', () => { if (S.alt) { S.alt = false; render(); } });
-  window.addEventListener('blur', endAudition);     // ほかのウィンドウへ移った（離したことが届かないことがある）
+  window.addEventListener('blur', () => { clearTimeout(S.drag?.holdTimer); endAudition(); });
+  window.addEventListener('gliss-host-play', () => { clearTimeout(S.drag?.holdTimer); endAudition(); });
   svg.addEventListener('pointermove', onMove);
   svg.addEventListener('pointerup', endDrag);
   svg.addEventListener('pointercancel', endDrag);
@@ -360,7 +362,7 @@ function onMove(e) {
       // 子音・息は横だけ（音程が無い。issue #35）
       dr.axis = dr.nop || Math.abs(dx) > Math.abs(dy) ? 'time' : 'pitch';
       clearTimeout(dr.holdTimer);
-      if (dr.axis === 'time') planFor(dr, { op: 'move', note_ids: dr.ids });
+      if (dr.axis === 'time') { stopPreview(); planFor(dr, { op: 'move', note_ids: dr.ids }); }
       else if (ARA) beginAudition(dr.anchor?.id);
     }
     dr.moved = true;
