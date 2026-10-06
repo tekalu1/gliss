@@ -86,6 +86,46 @@ def remember_estimator(p, est):
         reschedule_prep()
 
 
+def estimators_now(s, p, track_ids=None):
+    """方式を替える前後で比べる、トラックごとの (Project, 実効の F0 の方式)。{トラック id: (q, 方式)}。
+    セッションが無ければ開いている曲だけ（鍵 "project"）。まだ解析していない・プロジェクトの無いトラックは入れない。"""
+    out = {}
+    if s is None:
+        if p is not None:
+            out["project"] = (p, p.f0_estimator())
+        return out
+    for t in s.vocal_tracks():
+        if track_ids is not None and t["id"] not in track_ids:
+            continue
+        q, _ = _track_project(s, t)
+        if q is None or not (q.analysis or {}).get("take"):
+            continue
+        q.estimator_pref = t.get("estimator")
+        try:
+            out[t["id"]] = (q, q.f0_estimator())
+        except Exception:                            # noqa: BLE001  使えない方式（重みが無い）: 比べない
+            continue
+    return out
+
+
+def retarget_switched(s, p, before, track_ids=None):
+    """方式を替えた後: 実効の方式が替わったトラックの、ノートの ID を対象にした編集を、替える前の解析での区間の
+    範囲対象に付け替える（`Project.retarget_note_targets`。音は変わらない。次の解析で同じ番号の別のノートに当たらない）。
+    before = 替える前の `estimators_now`。{トラック id: 付け替えの結果}（付け替える編集の無いトラックは入れない）。"""
+    after = estimators_now(s, p, track_ids)
+    res = {}
+    for key, (_q, old) in before.items():
+        if key not in after:
+            continue
+        q, new = after[key]
+        if new == old:
+            continue
+        r = q.retarget_note_targets(basis=old)
+        if r["retargeted"] or r["history"] or r["unresolved"] or r["skipped"]:
+            res[key] = r
+    return res
+
+
 def forget_track_estimators():
     """`set_f0_estimator` で選び直した: トラックごとに明示した方式をすべて外す。外したものがあれば True。"""
     p = _srv._state.get("project")
@@ -170,6 +210,15 @@ def _restore_estimator_history(s, state):
             t = s.track(tid)
         except ProjectError:
             continue
+        q, _ = _track_project(s, t)
+        if q is not None and (q.analysis or {}).get("take") and row.get("effective"):
+            # 方式が替わる: 今の解析のうちにノート対象の編集を区間の範囲対象へ付け替える（音は変わらない）
+            q.estimator_pref = t.get("estimator")
+            try:
+                if q.f0_estimator() != row["effective"]:
+                    q.retarget_note_targets()
+            except Exception as e:                   # noqa: BLE001  使えない方式: 付け替えずに戻す
+                log.get().warning("方式の履歴を戻す前の付け替えを飛ばした: %s", e)
         pref = row.get("pref")
         if pref is None:
             t.pop("estimator", None)

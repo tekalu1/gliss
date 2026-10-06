@@ -33,6 +33,7 @@ from .analysis.phonemes import get_phonemes as _get_phonemes
 from .audio import write_wav
 from .project import Project, ProjectError, ProjectConflict
 from .project.model import Target
+from .project.store import recorded_estimator
 from .render.base import resolve_backend_name
 from .render.pipeline import Renderer, segments_for
 from .view import render_view as _render_view
@@ -692,6 +693,13 @@ def analyze_take(force: bool = False, estimator: str = None,
     # Gliss の第 2 版で解析した曲を最新版で解析し直すのは、force と estimator を両方明示したときだけ
     # （force だけでは版を保つ。ノートの区切りと ID が変わり、ノート対象の編集の当たり方が変わるため）
     latest = bool(force and estimator is not None)
+    # 方式・版が替わる（ノートの区切りと ID が変わる）: 解析し直す前に、ノート対象の編集を今の解析の区間の
+    # 範囲対象へ付け替える（音は変わらない。替えた後に同じ番号の別のノートへ当たらないように）
+    retarget = None
+    ta = (p.analysis or {}).get("take") or {}
+    if ta and not p._same_take_estimator(recorded_estimator(p.analysis), ta.get("estimator_version"),
+                                         est, latest):
+        retarget = p.retarget_note_targets()
     est_sec = p.duration_sec * (0.45 * (13 if confidence_sweep else 1))
     if p.guide:
         est_sec += p.duration_sec * 1.2      # DTW の分
@@ -749,7 +757,12 @@ def analyze_take(force: bool = False, estimator: str = None,
         t2 = mcp_tracks.prep_target(q)
         if default and t2 is not None:
             prep.mark_ready(t2[0], t2[1], q)
-        return _summary_of_analysis(q)
+        out = _summary_of_analysis(q)
+        if retarget is not None:
+            ids = sorted({nid for _e, nid in q._missing_note_targets()})
+            out.update(retargeted=retarget["retargeted"], retarget=retarget,
+                       missing_note_targets={"count": len(ids), "ids": ids[:20]})
+        return out
 
     def joined(cancel, report, commit):
         for attempt in range(4):
@@ -2424,6 +2437,10 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
         if scope == "current" and (tid is None or s.track(tid)["kind"] != "vocal"):
             raise ProjectError("方式を変更するボーカルトラックが選ばれていない")
         before, chosen = now(), f0mod.chosen_estimator()
+        # 実効の方式が替わるトラックは、次の解析でノートの ID が振り直される。替える前の解析を覚えておき、
+        # 替えた後にノート対象の編集をその区間の範囲対象へ付け替える（音は変わらない）
+        eff_before = (_mcp_tracks.estimators_now(s, p, track_ids) if scope != "default" else {})
+        retarget = {}
         history_before = (_mcp_tracks.estimator_snapshot(s, track_ids) if s is not None and
                           (scope == "current" or not s.ara) else None)
         old_tracks = copy.deepcopy(s.tracks) if history_before is not None else None
@@ -2446,6 +2463,8 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
                     p.estimator_pref = estimator
                 cleared = old_tracks != s.tracks
             effective = now()
+            if eff_before:
+                retarget = _mcp_tracks.retarget_switched(s, p, eff_before, track_ids)
             if effective != before or f0mod.chosen_estimator() != chosen or cleared:
                 if history_before is not None:
                     history_after = _mcp_tracks.estimator_snapshot(s, track_ids)
@@ -2467,7 +2486,8 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
     return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
                estimators=list(f0mod.ESTIMATORS),
                rmvpe_model_found=f0mod.rmvpe_available(),
-               changed=effective != before)
+               changed=effective != before,
+               retargeted=sum(r["retargeted"] for r in retarget.values()), retarget=retarget or None)
 
 TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllable,
          inspect_lyrics_score, import_lyrics, analyze_take, get_pitch, list_notes, list_deviations,

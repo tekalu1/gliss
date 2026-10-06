@@ -1841,31 +1841,7 @@ class Project:
 
     def _replay(self):
         """取り消されていない changeset を順に適用して、有効な編集リストを作る。"""
-        by_id = {}
-        order = []
-        for cs in self.changesets:
-            if cs.undone:
-                continue
-            for op in cs.ops:
-                if op.get("op") == "add":
-                    e = Edit.from_json(op["edit"])
-                    by_id[e.id] = e
-                    # 置き換え（分割で範囲対象に直す・オリジナルに戻すで切る等）は元の編集の位置へ入れる。
-                    # 編集リストの順は意味を持つ（pitch_curve は後勝ち、鉛筆は「後から入ったピッチ編集」
-                    # だけを描いた線に足す）ので、末尾へ回すと音が変わる
-                    at = op.get("in_place_of")
-                    if at and at in order:
-                        order.insert(order.index(at), e.id)
-                    else:
-                        order.append(e.id)
-                elif op.get("op") == "remove":
-                    by_id.pop(op["edit_id"], None)
-        seen = set()
-        self.edits = []
-        for eid in order:
-            if eid in by_id and eid not in seen:
-                seen.add(eid)
-                self.edits.append(by_id[eid])
+        self.edits = _live_edits(cs for cs in self.changesets if not cs.undone)
         return self.edits
 
     def apply_edits(self, specs, author="ai", label=None, origin="manual"):
@@ -2015,6 +1991,67 @@ class Project:
         ids = {n.id for n in self.take_notes}
         return [(e, e.target.note_id) for e in self.edits
                 if e.target.type == "note" and e.target.note_id not in ids]
+
+    def retarget_note_targets(self, basis=None):
+        """F0 の方式・モデルの版を替える**前に**: ノートの ID を対象にした編集（target = note）を、今の解析での
+        そのノートの区間の範囲対象に書き換える（`notes_edit._retarget` と同じ書き換え。区間が同じなので音は変わらない）。
+
+        ノートの ID は解析ごとの通し番号なので、方式・版を替えた後の解析では同じ番号が別のノートを指す
+        （無声・息のこともある）。替える前に区間へ直しておけば、替えた後も同じ区間に同じ量が掛かる。
+        changeset の中の `add` を書き換えるので、編集の id・author・changeset・並び・取り消しの単位は変わらない
+        （人の編集も中身はそのまま）。取り消した changeset の編集は、その changeset を当てた状態のノートの区間で書き換える。
+
+        basis: 編集を作った F0 の方式（省くと `f0_estimator()`）。保存した解析がその方式のものでなければ
+        （未解析・アーカイブを戻した直後で解析が別の方式のまま）区間が分からないので書き換えない（`skipped` に理由）。
+        返り値 {"retargeted": 書き換えた有効な編集の数, "history": 履歴の中だけの編集の数,
+                 "unresolved": [区間が分からなかった編集の id], "skipped": 理由 | None}"""
+        out = {"retargeted": 0, "history": 0, "unresolved": [], "skipped": None}
+        self.reload_if_changed()
+        found = [(i, op) for i, cs in enumerate(self.changesets) for op in cs.ops
+                 if op.get("op") == "add" and (op["edit"].get("target") or {}).get("type") == "note"]
+        if not found:
+            return out
+        ta = self.analysis.get("take") or {}
+        basis = self.f0_estimator(basis)
+        if not ta or not os.path.exists(self._cache_path("take-analysis.json")):
+            out["skipped"] = "テイクがまだ解析されていない"
+            return out
+        if ta.get("estimator") is not None and not self._same_take_estimator(
+                ta["estimator"], ta.get("estimator_version"), basis):
+            out["skipped"] = "保存した解析（%s）が編集を作った方式（%s）のものでない" % (ta["estimator"], basis)
+            return out
+        self.ensure_analyzed()
+        live = {e.id for e in self.edits}
+        now = {n.id: n for n in self.take_notes}
+        states = {}
+
+        def notes_at(i):
+            """changeset i を当てた状態（i より前の有効な changeset ＋ i）のノート。"""
+            if i not in states:
+                from .notes_edit import apply_note_edits
+                eds = _live_edits(cs for j, cs in enumerate(self.changesets[:i + 1])
+                                  if j == i or not cs.undone)
+                ops = [e for e in eds if e.kind in ("split", "merge")]
+                ns = apply_note_edits(self._take_notes or [], ops, self._take_f0) if ops else (self._take_notes or [])
+                states[i] = {n.id: n for n in ns}
+            return states[i]
+
+        for i, op in found:
+            d = op["edit"]
+            nid = d["target"].get("note_id")
+            n = now.get(nid) if d["id"] in live else (notes_at(i).get(nid) or now.get(nid))
+            if n is None:
+                out["unresolved"].append(d["id"])
+                continue
+            op["edit"] = dict(d, target=Target.range(n.start_sec, n.end_sec).to_json())
+            out["retargeted" if d["id"] in live else "history"] += 1
+        if out["retargeted"] or out["history"]:
+            self._replay()
+            self._notes_cache = None
+            self.save()
+            log.get().info("F0 の方式を替える前に、ノート対象の編集 %d 件（履歴の中だけ %d 件）を範囲対象に付け替えた"
+                           "（区間が分からない %d 件）", out["retargeted"], out["history"], len(out["unresolved"]))
+        return out
 
     def missing_note_targets_with(self, estimator):
         """テイクを `estimator` で解析したとしたとき、ノート対象の編集の対象になるノートが無いもの（ノート ID の一覧）。
@@ -2416,6 +2453,34 @@ class Project:
             return r.boundary(boundary_id)
         except KeyError as e:
             raise ProjectError(str(e))
+
+
+def _live_edits(changesets):
+    """changeset の列を順に適用した、有効な編集リスト（`Project._replay`）。"""
+    by_id = {}
+    order = []
+    for cs in changesets:
+        for op in cs.ops:
+            if op.get("op") == "add":
+                e = Edit.from_json(op["edit"])
+                by_id[e.id] = e
+                # 置き換え（分割で範囲対象に直す・オリジナルに戻すで切る等）は元の編集の位置へ入れる。
+                # 編集リストの順は意味を持つ（pitch_curve は後勝ち、鉛筆は「後から入ったピッチ編集」
+                # だけを描いた線に足す）ので、末尾へ回すと音が変わる
+                at = op.get("in_place_of")
+                if at and at in order:
+                    order.insert(order.index(at), e.id)
+                else:
+                    order.append(e.id)
+            elif op.get("op") == "remove":
+                by_id.pop(op["edit_id"], None)
+    seen = set()
+    out = []
+    for eid in order:
+        if eid in by_id and eid not in seen:
+            seen.add(eid)
+            out.append(by_id[eid])
+    return out
 
 
 def _shift_guide_lyrics(old, new, entries):
