@@ -134,9 +134,16 @@ def test_no_ripple_export_matches_outside(mode, case, request, tmp_path):
     a, b = min(a, min(mv)), max(b, max(mv))
     if case == "gap_grow":
         b += x                                   # 隙間へ伸ばしたぶん（切り取り）
+    # 出力が 20 ms（クロスフェードの長さ）に足りない伸縮の区間は、再合成のときに隣の編集していない区間から足りない分を
+    # 借りて広げる（render/pipeline.py の bundle_short_segments。つなぎ目のクリックを防ぐ）。その分も外へ出てよい
+    from vocal_engine import XFADE_MS
+    from vocal_engine.project.pitch import layered_segments
+    outs = [(g.end_sec - g.start_sec) * g.ratio for g in layered_segments(p)
+            if g.silence_sec <= 0 and g.end_sec > g.start_sec and abs(g.ratio - 1.0) > 1e-9]
+    borrow = max([0.0] + [XFADE_MS / 1000.0 - o for o in outs])
     assert diff is not None
-    assert diff[0] >= a - XF and diff[1] <= b + XF, \
-        "編集したノートと隣の外でサンプルが違う: %s（許容 %.3f–%.3f）" % (diff, a - XF, b + XF)
+    assert diff[0] >= a - XF - borrow and diff[1] <= b + XF + borrow, \
+        "編集したノートと隣の外でサンプルが違う: %s（許容 %.3f–%.3f）" % (diff, a - XF - borrow, b + XF + borrow)
 
 
 def test_move_boundary_is_local_in_export(lyr, tmp_path):
