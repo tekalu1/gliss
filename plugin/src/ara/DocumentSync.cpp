@@ -119,6 +119,22 @@ void DocumentSync::setPendingGuides (const std::map<juce::String, juce::String>&
     requestSync();
 }
 
+void DocumentSync::setHostGuides (const std::map<juce::String, juce::String>& guides, const juce::String& guide, bool known)
+{
+    {
+        std::lock_guard guard (mutex);
+        hostGuides.clear();
+
+        for (const auto& [id, guideId] : guides)
+            if (guideId.isNotEmpty())
+                hostGuides[id] = guideId;
+
+        hostGuide = guide;
+        hostGuidesKnown = known;
+    }
+    requestSync();
+}
+
 void DocumentSync::requestSync()
 {
     dirty = true;
@@ -244,13 +260,17 @@ void DocumentSync::refreshArchivesLocked (const juce::var& args, int timeoutMs)
         for (const auto& p : archives->getProperties())
             latestArchives[p.name.toString()] = p.value.getProperty ("archive", {});
 
-    const auto guide = r.getProperty ("guide", {});
+    takeGuidesLocked (r.getProperty ("guide", {}), r.getProperty ("guides", {}));
+}
+
+void DocumentSync::takeGuidesLocked (const juce::var& guide, const juce::var& guides)
+{
     latestGuide = guide.isString() ? guide.toString() : juce::String();
 
     latestGuides.clear();
 
-    if (auto* guides = r.getProperty ("guides", {}).getDynamicObject())
-        for (const auto& p : guides->getProperties())
+    if (auto* g = guides.getDynamicObject())
+        for (const auto& p : g->getProperties())
             if (p.value.isString() && p.value.toString().isNotEmpty())
                 latestGuides[p.name.toString()] = p.value.toString();
 
@@ -262,6 +282,79 @@ void DocumentSync::refreshArchivesLocked (const juce::var& args, int timeoutMs)
                                                   : (latest != latestGuides.end() && latest->second == it->second);
         it = applied ? pendingGuides.erase (it) : std::next (it);
     }
+}
+
+juce::StringArray DocumentSync::guidesChangedSinceHost (const SyncModel& m, bool ready)
+{
+    // 保存に書くのは、文書にある修飾どうしの指定だけ（doStoreObjectsToStream）。比べるのも同じ範囲
+    std::set<juce::String> present;
+
+    for (const auto& mod : m.modifications)
+        present.insert (mod.araId);
+
+    const auto within = [&present] (const std::map<juce::String, juce::String>& g)
+    {
+        std::map<juce::String, juce::String> out;
+
+        for (const auto& [id, guideId] : g)
+            if (guideId.isNotEmpty() && present.count (id) > 0 && present.count (guideId) > 0)
+                out[id] = guideId;
+
+        return out;
+    };
+
+    std::lock_guard guard (mutex);
+    auto stored = latestGuides;   // getGuidesForStore と同じ（戻し途中の指定を重ねる）
+
+    for (const auto& [id, guideId] : pendingGuides)
+    {
+        if (guideId.isEmpty())
+            stored.erase (id);
+        else
+            stored[id] = guideId;
+    }
+
+    const auto now = within (stored);
+    const auto commonNow = guidePending ? pendingGuide : latestGuide;
+    const auto common = present.count (commonNow) > 0 ? commonNow : juce::String();
+
+    if (! hostGuidesKnown)
+    {
+        // ガイドの指定を書いていない古いアーカイブ: 戻し終えた後の指定を、ホストが持っているものとする
+        if (ready)
+        {
+            hostGuides = now;
+            hostGuide = common;
+            hostGuidesKnown = true;
+        }
+
+        return {};
+    }
+
+    const auto host = within (hostGuides);
+    const auto hostCommon = present.count (hostGuide) > 0 ? hostGuide : juce::String();
+    juce::StringArray changed;
+
+    for (const auto& [id, guideId] : now)
+        if (const auto h = host.find (id); h == host.end() || h->second != guideId)
+            changed.addIfNotAlreadyThere (id);
+
+    for (const auto& [id, guideId] : host)
+        if (now.count (id) == 0)
+            changed.addIfNotAlreadyThere (id);
+
+    if (common != hostCommon)
+        for (const auto& id : { common, hostCommon })
+            if (id.isNotEmpty())
+                changed.addIfNotAlreadyThere (id);
+
+    if (! changed.isEmpty())
+    {
+        hostGuides = now;
+        hostGuide = common;
+    }
+
+    return changed;
 }
 
 juce::var DocumentSync::getArchiveForStore (const juce::String& araId) const
@@ -605,7 +698,7 @@ bool DocumentSync::registerModification (const SyncModification& mod, const Sync
     }
 
     a.registered = true;
-    setOpenedEdits (mod.araId, r);
+    setOpenedEdits (mod.araId, r, false);
     a.failed = false;
     a.everRegistered = true;
     a.sourceGeneration = c.generation;
@@ -677,8 +770,9 @@ void DocumentSync::restoreIfPending (const juce::String& araId, int generation, 
 
     if (restored)
     {
-        setOpenedEdits (araId, r);
-        log ("sync: ara_restore " + araId + " ok (" + r.getProperty ("edits", 0).toString() + " edit(s))");
+        setOpenedEdits (araId, r, true);
+        log ("sync: ara_restore " + araId + " ok (" + r.getProperty ("edits", 0).toString() + " edit(s))"
+             + ((bool) r.getProperty ("render_changed", false) ? ", saved with a newer renderer (the sound may change)" : ""));
         changed.addIfNotAlreadyThere (araId);
         emit ("project-changed", object ({ { "track_id", trackId } }));
     }
@@ -694,7 +788,7 @@ void DocumentSync::restoreIfPending (const juce::String& araId, int generation, 
     }
 }
 
-void DocumentSync::setOpenedEdits (const juce::String& araId, const juce::var& result)
+void DocumentSync::setOpenedEdits (const juce::String& araId, const juce::var& result, bool restored)
 {
     const auto rev = result.getProperty ("rev", {}).toString();
 
@@ -702,19 +796,46 @@ void DocumentSync::setOpenedEdits (const juce::String& araId, const juce::var& r
         openedEdits[araId] = editSignature (rev);
     else
         openedEdits.erase (araId);
+
+    // 保存の状態: 戻したらそれがホストの持っているもの。登録（し直し）では、前に覚えたものを保つ（エンジンを起動し直しても、
+    // まだ知らせていない変更を「ホストが持っている」にしない）。返り値に無いエンジンでは ara_revs で最初に見たもの
+    const auto state = result.getProperty ("state", {}).toString();
+
+    if (restored)
+    {
+        if (state.isNotEmpty())
+            hostStates[araId] = state;
+        else
+            hostStates.erase (araId);
+
+        // このエンジンより新しい描画の版で保存した編集（render_changed）: 戻した状態に追いつくだけでも、保存したときと
+        // 音が変わりうる（ホストに知らせる）。前の版の編集はその版のまま鳴らす（エンジンが変えない）
+        if ((bool) result.getProperty ("render_changed", false))
+            renderChanged.insert (araId);
+        else
+            renderChanged.erase (araId);
+    }
+    else if (state.isNotEmpty())
+    {
+        hostStates.emplace (araId, state);
+    }
 }
 
-bool DocumentSync::renderModification (const SyncModification& mod, juce::StringArray& contentChanged, juce::StringArray& caughtUp)
+bool DocumentSync::renderModification (const SyncModification& mod, bool stateChanged, juce::StringArray& contentChanged,
+                                       juce::StringArray& caughtUp)
 {
     if (mod.pcm == nullptr)
         return true;
 
     auto since = localRev.count (mod.araId) != 0 ? localRev[mod.araId] : juce::String();
-    // 手元に音が無い（登録・アーカイブから戻した直後・エンジンを起動し直した）か、前の版が解析待ちだった: 編集が開いた時の
-    // ままなら、その音に追いつくだけで、ドキュメントは変わっていない（ホストには知らせない。曲を開いただけで「変更あり」に
-    // しない）。開いた後に編集が入っていれば知らせる（ホストが保存を求めないと編集が失われる）
+    // 手元に音が無い（登録・アーカイブから戻した直後・エンジンを起動し直した）か、前の版が解析待ちだった: 編集がホストの
+    // 持っているもの（開いた時・最後に音の変化を知らせた時）のままで、保存の状態も変わっていなければ、その音に追いつくだけで、
+    // ドキュメントは変わっていない（ホストには知らせない。曲を開いただけで「変更あり」にしない）。変わっていれば知らせる
+    // （ホストが保存を求めないと編集が失われる）。エンジンが保存したときの音を出せないと言った（render_changed）編集は、
+    // 追いつくだけでも音が変わりうるので知らせる
     const auto opened = openedEdits.find (mod.araId);
-    const bool catchingUp = (since.isEmpty() || getModStatus (mod.araId).state == "waiting") && opened != openedEdits.end();
+    const bool catchingUp = (since.isEmpty() || getModStatus (mod.araId).state == "waiting") && opened != openedEdits.end()
+                            && ! stateChanged && renderChanged.count (mod.araId) == 0;
 
     settled.store (false, std::memory_order_release);
     setModState (mod.araId, "syncing");
@@ -767,7 +888,16 @@ bool DocumentSync::renderModification (const SyncModification& mod, juce::String
 
         // 窓の無いまま（原音のまま）の reset は音が変わらない（編集の無い修飾の解析が変わっただけ）
         if ((u.reset && hadWindows) || ! u.restore.empty() || ! u.windows.empty())
+        {
             (quiet ? caughtUp : contentChanged).addIfNotAlreadyThere (mod.araId);
+
+            // ホストに知らせた: 以後の「追いつくだけ」はこの編集と比べる（取り消して開いた時の編集に戻ったら、また知らせる）
+            if (! quiet)
+            {
+                openedEdits[mod.araId] = editSignature (u.rev);
+                renderChanged.erase (mod.araId);
+            }
+        }
 
         log ("sync: ara_render_dirty " + mod.araId + " rev " + u.rev + (u.reset ? " reset" : "") + ", "
              + juce::String ((int) u.restore.size()) + " restore, " + juce::String ((int) u.windows.size()) + " window(s)"
@@ -1144,6 +1274,9 @@ void DocumentSync::cycle()
 
     // 6. 版が変わった修飾の差分の再合成と、DAW に返すノート
     juce::StringArray contentChanged, caughtUp;          // 音が変わった修飾・戻した状態に追いついただけの修飾
+    juce::StringArray stateDirty;                        // 保存の状態がホストの持っているものと違ってきた修飾
+    std::map<juce::String, juce::String> currentStates;  // ara_revs の保存の状態の署名
+    bool statesKnown = false;
     std::map<juce::String, juce::String> notesTargets;   // ノートを取り直す修飾 → ara_revs の版
     const auto revs = call ("ara_revs", object ({}), 60000);
     ExternalChanges::Result externalChange;
@@ -1157,6 +1290,13 @@ void DocumentSync::cycle()
     {
         // 外部の AI（中継。engine/vocal_engine/ara_relay.py）が曲を変えた: 版の変わった修飾は下で取り直し、画面には後で知らせる
         externalChange = external.update (revs);
+        statesKnown = revs.hasProperty ("states");   // 前の版のエンジンは保存の状態を返さない（知らせは音とノートだけ）
+
+        if (revs.hasProperty ("guides"))
+        {
+            std::lock_guard guard (mutex);
+            takeGuidesLocked (revs.getProperty ("guide", {}), revs.getProperty ("guides", {}));
+        }
 
         for (const auto& mod : m.modifications)
         {
@@ -1179,6 +1319,7 @@ void DocumentSync::cycle()
                 notesTargets[mod.araId] = target;
 
             // 素材違いで当てていないアーカイブは、利用者がこの修飾を編集したら捨てる（エンジンの編集を保存する）。
+            bool restorePending = false;
             {
                 std::lock_guard guard (mutex);
 
@@ -1189,6 +1330,23 @@ void DocumentSync::cycle()
                     else if (p->second.editSignature != editSignature (target))
                         pendingRestores.erase (p);
                 }
+
+                restorePending = pendingRestores.count (mod.araId) > 0;
+            }
+
+            // 保存の状態（アーカイブに入るもの）がホストの持っているものと違ってきたか。戻し途中・素材違いで当てていない
+            // アーカイブがあれば、保存に書くのはそのアーカイブ（変わっていない）
+            if (const auto state = revs.getProperty ("states", {}).getProperty (juce::Identifier (mod.araId), {}).toString();
+                state.isNotEmpty())
+            {
+                currentStates[mod.araId] = state;
+
+                if (restorePending)
+                    hostStates[mod.araId] = state;
+                else if (const auto h = hostStates.find (mod.araId); h == hostStates.end())
+                    hostStates.emplace (mod.araId, state);
+                else if (h->second != state)
+                    stateDirty.addIfNotAlreadyThere (mod.araId);
             }
 
             const auto current = localRev.find (mod.araId);
@@ -1203,7 +1361,7 @@ void DocumentSync::cycle()
                 continue;
             }
 
-            if (! renderModification (mod, contentChanged, caughtUp))
+            if (! renderModification (mod, stateDirty.contains (mod.araId), contentChanged, caughtUp))
                 workLeft = true;
 
             changed.addIfNotAlreadyThere (mod.araId);
@@ -1220,6 +1378,58 @@ void DocumentSync::cycle()
 
         if (! caughtUp.isEmpty())
             callbacks.contentChanged (caughtUp, false);
+    }
+
+    // 保存するものだけが変わった（音の変化は知らせていない）修飾と、ガイドの指定: ホストに知らせる（知らせないとホストが
+    // 保存を求めず、ガイドの指定・歌詞・方式・取り消しが失われる）。音の変化を知らせた修飾は、ホストがそれで保存し直す
+    if (statesKnown && ! isFailure (revs))
+    {
+        juce::StringArray stateOnly;
+
+        for (const auto& id : stateDirty)
+            if (! contentChanged.contains (id))
+                stateOnly.add (id);
+
+        for (const auto& id : contentChanged)
+            if (const auto c = currentStates.find (id); c != currentStates.end())
+                hostStates[id] = c->second;
+
+        for (const auto& id : stateDirty)
+            hostStates[id] = currentStates[id];
+
+        // 戻し終えたか（ガイドの指定を書いていない古いアーカイブは、戻し終えた後の指定をホストの持っているものにする）
+        bool ready = true;
+        {
+            std::lock_guard guard (mutex);
+            ready = ! guidePending && pendingGuides.empty()
+                    && std::none_of (pendingRestores.begin(), pendingRestores.end(), [] (const auto& p) { return ! p.second.mismatch; });
+        }
+
+        for (const auto& mod : m.modifications)
+        {
+            const auto* s = findSource (mod.sourceId);
+            const auto a = applied.find (mod.araId);
+
+            if (s != nullptr && s->samplesAvailable && (a == applied.end() || ! a->second.registered)
+                && getModStatus (mod.araId).state != "failed")
+                ready = false;
+        }
+
+        const auto guideMods = guidesChangedSinceHost (m, ready);
+
+        for (const auto& id : guideMods)
+            if (! contentChanged.contains (id))
+                stateOnly.addIfNotAlreadyThere (id);
+
+        if ((! stateOnly.isEmpty() || ! guideMods.isEmpty()) && callbacks.stateChanged)
+        {
+            log ("sync: saved state changed: " + stateOnly.joinIntoString (", ")
+                 + (guideMods.isEmpty() ? juce::String() : " (guides: " + guideMods.joinIntoString (", ") + ")"));
+            callbacks.stateChanged (stateOnly, ! guideMods.isEmpty());
+        }
+
+        for (const auto& id : stateOnly)
+            changed.addIfNotAlreadyThere (id);   // 保存用の写しも取り直す
     }
 
     if (externalChange.projectChanged || externalChange.sessionChanged)

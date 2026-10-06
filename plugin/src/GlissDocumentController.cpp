@@ -120,6 +120,14 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
                 notifyNotesChanged (ids, sources, firstContent);
         });
     };
+    callbacks.stateChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, bool documentData)
+    {
+        juce::MessageManager::callAsync ([this, token, ids, documentData]
+        {
+            if (token.lock() != nullptr)
+                notifyStateChanged (ids, documentData);
+        });
+    };
     callbacks.log = [] (const juce::String& line) { diag::log (line); };
 
     const auto disabled = options.engineDisabled;
@@ -154,6 +162,21 @@ void GlissDocumentController::didEndEditing (juce::ARADocument*)
 {
     editing = false;
     processBlockLock.exitWrite();
+
+    if (! hostLogged)
+    {
+        // 保存するものだけが変わったときの知らせの届き方（notifyStateChanged）。ホストの ARA の版と、文書の知らせ
+        // （notifyDocumentDataChanged。ARA 2.3）を受ける口があるか
+        hostLogged = true;
+        auto* dc = getDocumentController();
+        auto* updates = dc->getHostModelUpdateController();
+        const auto documentData = updates != nullptr
+            && updates->getInterface().implements<ARA_STRUCT_MEMBER (ARAModelUpdateControllerInterface, notifyDocumentDataChanged)>();
+        diag::log ("document: host ARA API generation " + juce::String ((int) dc->getUsedApiGeneration())
+                   + ", model updates " + (updates != nullptr ? "yes" : "no")
+                   + ", document data notification " + (documentData ? "yes" : "no"));
+    }
+
     pushModel();
 }
 
@@ -364,6 +387,26 @@ void GlissDocumentController::notifyContentChanged (const juce::StringArray& ara
                 region->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), notifyHost);
         }
     }
+}
+
+void GlissDocumentController::notifyStateChanged (const juce::StringArray& araIds, bool documentData)
+{
+    auto* document = getDocument();
+
+    if (document == nullptr)
+        return;
+
+    // 音もノートも変わらない（nothingIsAffected）が、保存するもの（アーカイブ）が変わった。ARA はプラグインに、保存の状態が
+    // 変わったら確実に知らせることを求める（ホストは知らせを受けたものだけを保存し直すことがある。ARAInterface.h）。
+    // 修飾ごとの知らせ（ARA 2.0）と、文書の知らせ（ガイドの指定。ARA 2.3 の notifyDocumentDataChanged。ホストに口が無ければ
+    // 何もしない）の両方を送る
+    for (auto* source : document->getAudioSources<juce::ARAAudioSource>())
+        for (auto* modification : source->getAudioModifications<GlissAudioModification>())
+            if (araIds.contains (juce::String (modification->getPersistentID())))
+                modification->notifyContentChanged (juce::ARAContentUpdateScopes::nothingIsAffected(), true);
+
+    if (documentData)
+        getDocumentController()->notifyDocumentDataChanged();
 }
 
 //==============================================================================
@@ -690,6 +733,18 @@ bool GlissDocumentController::doRestoreObjectsFromStream (juce::ARAInputStream& 
 
     if (! restoredGuides.empty())
         sync->setPendingGuides (restoredGuides);
+
+    // ホストが持っているガイドの指定（保存に書く指定がこれと違ってきたら知らせる）。ガイドの指定を書いていない古い
+    // アーカイブは、戻し終えた後の指定をホストが持っているものとする
+    {
+        juce::String guide;
+
+        if (a.guide.isNotEmpty())
+            if (auto* g = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (a.guide.toRawUTF8()))
+                guide = juce::String (g->getPersistentID());
+
+        sync->setHostGuides (restoredGuides, guide, a.hasGuides);
+    }
 
     diag::log ("archive: restore " + juce::String ((int) a.modifications.size()) + " entr(ies), " + juce::String (restored)
                + " matched, work key " + workKey);

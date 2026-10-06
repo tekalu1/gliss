@@ -148,6 +148,8 @@ private:
     /** notifyHost が false なら、ARA のリスナーにだけ知らせる（ホストには知らせない）。 */
     void notifyContentChanged (const juce::StringArray& araIds, bool notifyHost = true);
     void notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent);
+    /** 保存するもの（アーカイブ）だけが変わった: 修飾には音・ノートの変わらない知らせを、documentData なら文書の知らせも送る。 */
+    void notifyStateChanged (const juce::StringArray& araIds, bool documentData);
     /** ホストに渡すノート（読めなければ nullptr。ホストに「まだ無い」と答えたことを覚える）。 */
     std::shared_ptr<const ModificationNotes> notesOf (const ARA::PlugIn::AudioModification*) const;
     std::shared_ptr<const ModificationNotes> sourceNotesOf (const ARA::PlugIn::AudioSource*) const;
@@ -165,6 +167,7 @@ private:
 
     juce::ReadWriteLock processBlockLock;
     bool editing = false;
+    bool hostLogged = false;
 
     juce::String workKey;
     std::unique_ptr<DocumentSync> sync;

@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace gliss
@@ -88,6 +89,10 @@ public:
         /** ノートが変わった修飾と、解析だけのノートが変わったソース（AudioSource の persistentID）。
             firstContent: 登録してから初めてノートが読めるようになった（それまで読めなかった）もの。 */
         std::function<void (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent)> notesChanged;
+        /** 保存するもの（アーカイブ）が、ホストに知らせた後に変わった（音・ノートの知らせは出していない）。araIds: 修飾の
+            保存の状態（編集の履歴・歌詞・F0 の方式）が変わった修飾と、ガイドの指定が変わった修飾。documentData: 文書の
+            保存の状態（ガイドの指定）が変わった。ホストが保存を求めないと失われる（ARA は確実に知らせることを求める）。 */
+        std::function<void (const juce::StringArray& araIds, bool documentData)> stateChanged;
         std::function<void (const juce::String& line)> log;
     };
 
@@ -122,6 +127,11 @@ public:
     /** アーカイブのトラックごとのガイド（修飾 → ガイドの修飾。値が空ならその修飾の指定を外す = アーカイブを正にする）。
         両方の登録が済んだものから ara_sync(guides=…) で当てる。エンジンが答えたもの（当てた・断られた）は残さない。 */
     void setPendingGuides (const std::map<juce::String, juce::String>& guides);
+
+    /** ホストが持っている文書のガイドの指定（アーカイブから戻したもの。修飾 → ガイドの修飾・共通のガイド）。保存に書く
+        指定がこれと違ってきたら、ホストに知らせる（Callbacks::stateChanged）。known = false（ガイドの指定を書いていない
+        古いアーカイブ）なら、戻し終えて最初に見た指定をホストの持っているものとする。新しい文書は空（known）。 */
+    void setHostGuides (const std::map<juce::String, juce::String>& guides, const juce::String& guide, bool known);
 
     void requestSync();
     void requestEngine();
@@ -192,9 +202,17 @@ private:
     bool captureSource (const SyncSource&, const SyncModel&);
     bool registerModification (const SyncModification&, const SyncSource&, juce::StringArray& changed);
     void restoreIfPending (const juce::String& araId, int generation, juce::StringArray& changed);
-    bool renderModification (const SyncModification&, juce::StringArray& contentChanged, juce::StringArray& caughtUp);
-    /** ara_set_modification・ara_restore の返り値の版（rev）から、開いた時の編集の署名を覚える。 */
-    void setOpenedEdits (const juce::String& araId, const juce::var& result);
+    bool renderModification (const SyncModification&, bool stateChanged, juce::StringArray& contentChanged, juce::StringArray& caughtUp);
+    /** ara_set_modification・ara_restore の返り値の版（rev）・保存の状態の署名（state）を、ホストが持っている
+        （開いた・戻した）ものとして覚える。restored: アーカイブから戻した（ホストの持っているものはそれ。登録し直しでは
+        前に覚えた保存の状態を保つ）。エンジンが保存したときの音を出せない（render_changed。このエンジンより新しい描画の版）
+        なら、最初の再合成も知らせる。 */
+    void setOpenedEdits (const juce::String& araId, const juce::var& result, bool restored);
+    /** ara_revs のガイドの指定を、保存に書く写しに入れる（refreshArchivesLocked と同じ。mutex を持って呼ぶ）。 */
+    void takeGuidesLocked (const juce::var& guide, const juce::var& guides);
+    /** 保存に書くガイドの指定がホストの持っているものと違ってきた修飾（違わなければ空。mutex を持たずに呼ぶ）。
+        ready: 登録と戻しが済んでいる（ホストの持っているものが分からない古いアーカイブは、ここで覚える）。 */
+    juce::StringArray guidesChangedSinceHost (const SyncModel&, bool ready);
     void refreshNotes (const SyncModel&, const std::map<juce::String, juce::String>& targets);
     void applyTestEdit (const SyncModel&);
     void refreshArchivesLocked (const juce::var& args, int timeoutMs);
@@ -220,6 +238,9 @@ private:
     juce::String latestGuide;
     std::map<juce::String, juce::String> pendingGuides;   // 戻している途中のトラックごとのガイド（当てたものから外す）
     std::map<juce::String, juce::String> latestGuides;
+    std::map<juce::String, juce::String> hostGuides;     // ホストが持っているガイドの指定（setHostGuides・知らせた後）
+    juce::String hostGuide;
+    bool hostGuidesKnown = true;
     EngineStatus engineStatus;
     std::map<juce::String, ModStatus> modStatus;
     std::map<juce::String, std::shared_ptr<const ModificationNotes>> notesByMod;
@@ -235,7 +256,9 @@ private:
     std::map<juce::String, Captured> captured;              // ソースの persistentID
     std::map<juce::String, Applied> applied;                // ara_id
     std::map<juce::String, juce::String> localRev;          // ara_id → 手元のキャッシュの版
-    std::map<juce::String, juce::String> openedEdits;       // ara_id → 登録・アーカイブから戻した時の編集の署名
+    std::map<juce::String, juce::String> openedEdits;       // ara_id → ホストの持っている編集の署名（開いた・戻した・音の変化を知らせた時）
+    std::map<juce::String, juce::String> hostStates;        // ara_id → ホストの持っている保存の状態の署名（ara_revs の states）
+    std::set<juce::String> renderChanged;                   // 保存したときの音を出せない編集を戻した修飾（最初の再合成も知らせる）
     std::map<juce::String, juce::String> notesRev;          // ara_id → ノートの写しを取ったときの ara_revs の版
     ExternalChanges external;                               // 外部の AI の中継の番号（ara_revs の external）
 
