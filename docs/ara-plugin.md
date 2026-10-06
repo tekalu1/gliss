@@ -147,8 +147,10 @@ ARA は、ホストが戻した状態（アーカイブ）と違うときだけ 
 - エンジンの `ara_revs` が修飾ごとの**保存の状態の署名**（`states`。編集の changeset の列・利用者の歌詞・トラックの F0 の方式とその版・描画の版。
   解析だけで変わるもの＝自動推定の歌詞・方式を決めていないトラックの解析の方式は入れない）と、ガイドの指定（`guide`・`guides`）を返す。
 - プラグインはホストの持っている署名（戻した時の `ara_restore`・登録した時の `ara_set_modification` の返り値の `state`、知らせた後の値）と比べ、
-  違えば知らせる。音の変化を知らせた修飾はそれで足りる（ホストが保存し直す）。残りは修飾に音もノートも変わらない知らせ
-  （`notifyAudioModificationContentChanged`、`nothingIsAffected`）を送る。ガイドの指定は、保存に書く指定（`getGuidesForStore`）がホストの
+  違えば修飾に音もノートも変わらない知らせ（`notifyAudioModificationContentChanged`、`nothingIsAffected`）を送る。
+  **再合成より先に**送り（再合成は長いことがあり、その間に保存・閉じると「変更あり」が間に合わない）、再合成の合間
+  （`ara_render_dirty` の続きの前と、修飾の間。1 秒に 1 回まで）にも `ara_revs` を見直して、再合成の最中に入った変更を知らせる。
+  音が変わる修飾には、再合成の後に音の知らせも送る。ガイドの指定は、保存に書く指定（`getGuidesForStore`）がホストの
   持っているもの（戻したアーカイブの指定）と違えば、文書の知らせ（ARA 2.3 の `notifyDocumentDataChanged`。ホストに口が無ければ何もしない）と、
   指定の変わった修飾への同じ知らせを送る。ガイドの指定を書いていない古いアーカイブは、戻し終えた後の指定をホストの持っているものとする。
 - 戻し途中・素材違いで当てていないアーカイブがある修飾は、保存に書くのがそのアーカイブなので知らせない。
@@ -427,7 +429,7 @@ ARA SDK のホスト（`ARATestHost` と `GlissARATest`）は `plugin/tests/arat
 | エンジン: TestHost（全 12 項目） | エンジンにつないだまま全項目が終了コード 0（ドキュメントを作ってすぐ壊す試験でエンジンが残らない） |
 | エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る。ノート: 先に編集なしのドキュメント（リージョン 2 つ。2 つ目はソースの 1.5〜4.2 秒をソングの 10 秒）でホストとして解析を頼んで待ち、ソース・修飾・リージョンのノートがエンジンの `ara_notes` の解析だけのノートと一致して `detected`、2 つ目のリージョンは切って写したもの。編集の後は `adjusted` で、エンジンの編集後のノートと一致し、全部 1 半音上がる。アーカイブから戻した後も同じ。ホストへの知らせ（`ModelUpdateCounts.h`。`updates.json`）: アーカイブから戻した B と、同じ作業場所でもう一度戻す D（曲を開き直しただけ）で、ホストがノートを読むまで 0。D の終わりにノートが読めている |
 | エンジン: **GlissHostCheck `--ara-editor`**（`AraEditorCheck.h`） | JUCE の ARA ホスト（`juce_ARAHosting`）で Gliss.vst3 に本物のドキュメントを作り、インスタンスを全部の役で結び付けてエディタを開く。プラグインのログで、エディタがドキュメントの `DocumentBridge` を得る・画面の `ui-ready`・`bootstrap`・エンジンの起動と修飾の登録・画面の `engineCall`（`list_tracks`・`select_track`・`export_view_data`）の成功・`/fs/` を断っていないことを確かめる |
-| エンジン: **GlissARATest `-changes`** | 修飾 2 つの文書で、保存するものが変わる操作のたびにホストへ知らせが届くこと（画面の操作はプラグインの試験用の口 `GLISS_TEST_BRIDGE_DIR` から画面と同じ `engineCall` で: 編集・歌詞だけ・F0 の方式だけ・トラックごとのガイド・取り消し／やり直し、外部の AI は `relay_client.py edit / guide` で）、編集対象の切り替えだけでは届かないこと、保存した文書を同じ作業場所・別の作業場所で戻しただけでは届かないこと、描画の版 1 のアーカイブを戻しても届かず（beta.6 の音のまま）、画面から版を上げると届くこと。操作ごとの数は `changes.json` |
+| エンジン: **GlissARATest `-changes`** | 修飾 2 つの文書で、保存するものが変わる操作のたびにホストへ知らせが届くこと（画面の操作はプラグインの試験用の口 `GLISS_TEST_BRIDGE_DIR` から画面と同じ `engineCall` で: 編集・歌詞だけ・F0 の方式だけ・トラックごとのガイド・取り消し／やり直し、外部の AI は `relay_client.py edit / guide` で）、編集対象の切り替えだけでは届かないこと、保存した文書を同じ作業場所・別の作業場所で戻しただけでは届かないこと、描画の版 1 のアーカイブを戻しても届かず（beta.6 の音のまま）、画面から版を上げると届くこと、再合成が長い間（3 秒ずつ 3 回）に外したガイドの指定の知らせが、再合成が終わる前に届くこと。操作ごとの数は `changes.json` |
 | エンジン: **GlissARATest `-relay`** ＋ `verify_ara_relay.py` | 外部の AI の代わり（`plugin/tests/relay_client.py`。別のプロセスの `vocal_engine.mcp` を stdio で起動）が、開いているドキュメントを `ara_documents` で見つけ、`ara_attach` → `analyze_take` → `shift_pitch`（+100 セント）を中継で呼ぶ。編集の前の描画が原音・後の描画がエンジンの `render_region` とサンプル単位で同じ・保存（アーカイブ）に作者 `ai` の changeset・DAW に返すノートが adjusted で 1 半音上・プラグインのログに `sync: external edit`・ドキュメントを閉じたら中継の記録が消える・外部の編集の後にホストへ修飾とリージョンの「音が変わった」が届く（`updates-r.json`） |
 | **GlissHostCheck `--editor`**（`EditorCheck.h`・`FakeDocumentBridge.h`） | Gliss.vst3 を読まず、エディタの画面の部品（`plugin/src/editor`）を**偽の DocumentBridge** につないでこのプロセスの中で画面の外に開く: `app/renderer` が読み込まれ `ui-ready` が来る（その前の知らせは捨てる）・`window.api` と `data-mode=ara`・user script から `/juce/index.js` の動的 import・`engineCall` の往復（`{ok:false}` も値で・別スレッドの completion も）・ほかのネイティブ関数・`/fs/`（空白・`%`・`+`・日本語の名前を読める／外・`..`・無い・フォルダ・知らない資源は拒否）・知らせ 6 種が画面の受け手に届く・F8 は窓へ渡り Space は渡らない・応答の前に閉じても落ちない・2 つ同時に 20 回開閉。`--expect-web-dir` で `GLISS_PLUGIN_WEB_DIR` から読むこと |
 

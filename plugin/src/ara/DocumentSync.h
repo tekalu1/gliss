@@ -202,7 +202,12 @@ private:
     bool captureSource (const SyncSource&, const SyncModel&);
     bool registerModification (const SyncModification&, const SyncSource&, juce::StringArray& changed);
     void restoreIfPending (const juce::String& araId, int generation, juce::StringArray& changed);
-    bool renderModification (const SyncModification&, bool stateChanged, juce::StringArray& contentChanged, juce::StringArray& caughtUp);
+    /** between: 続きの再合成（more）の前に呼ぶ（保存の状態の変化を再合成の合間にも知らせる）。 */
+    bool renderModification (const SyncModification&, bool stateChanged, juce::StringArray& contentChanged, juce::StringArray& caughtUp,
+                             const std::function<void()>& between);
+    /** ara_revs の保存の状態の署名・ガイドの指定を、ホストの持っているものと比べ、違えば Callbacks::stateChanged で知らせて
+        ホストの持っているものを更新する（再合成の前と合間に呼ぶ）。changed: 保存用の写しを取り直す修飾に足す。 */
+    void noticeSavedState (const SyncModel&, const juce::var& revs, juce::StringArray& changed);
     /** ara_set_modification・ara_restore の返り値の版（rev）・保存の状態の署名（state）を、ホストが持っている
         （開いた・戻した）ものとして覚える。restored: アーカイブから戻した（ホストの持っているものはそれ。登録し直しでは
         前に覚えた保存の状態を保つ）。エンジンが保存したときの音を出せない（render_changed。このエンジンより新しい描画の版）
@@ -259,6 +264,8 @@ private:
     std::map<juce::String, juce::String> openedEdits;       // ara_id → ホストの持っている編集の署名（開いた・戻した・音の変化を知らせた時）
     std::map<juce::String, juce::String> hostStates;        // ara_id → ホストの持っている保存の状態の署名（ara_revs の states）
     std::set<juce::String> renderChanged;                   // 保存したときの音を出せない編集を戻した修飾（最初の再合成も知らせる）
+    std::set<juce::String> stateMoved;                      // 保存の状態の変化を知らせた後、まだ再合成していない修飾
+    double lastStateCheck = 0.0;                            // 再合成の合間に保存の状態を見直した時刻
     std::map<juce::String, juce::String> notesRev;          // ara_id → ノートの写しを取ったときの ara_revs の版
     ExternalChanges external;                               // 外部の AI の中継の番号（ara_revs の external）
 

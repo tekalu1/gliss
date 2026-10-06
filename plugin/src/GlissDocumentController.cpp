@@ -142,6 +142,11 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
     DocumentSync::Options options;
     options.engineDisabled = env ("GLISS_ENGINE_DISABLED").isNotEmpty() && env ("GLISS_ENGINE_DISABLED") != "0";
     options.testEdit = TestEdit::parse (env ("GLISS_TEST_EDIT"));
+#if GLISS_TEST_HOOKS
+    // 試験用: 1 回の ara_render_dirty で再合成する長さ（GlissARATest -changes が再合成を何回かに分けるのに使う）
+    if (const auto maxSec = env ("GLISS_TEST_MAX_RENDER_SEC").getDoubleValue(); maxSec > 0.0)
+        options.maxRenderSec = maxSec;
+#endif
 
     if (env ("GLISS_TEST_EDIT").isNotEmpty() && ! options.testEdit.has_value())
         diag::log ("document: GLISS_TEST_EDIT could not be read: " + env ("GLISS_TEST_EDIT"));

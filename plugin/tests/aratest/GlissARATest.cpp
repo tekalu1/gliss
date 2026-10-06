@@ -514,7 +514,8 @@ struct TestBridgeCalls
                 std::stringstream text;
                 text << in.rdbuf ();
                 const auto result { text.str () };
-                const bool ok { result.find ("\"ok\": false") == std::string::npos };
+                const bool ok { result.find ("\"ok\": false") == std::string::npos
+                                && result.find ("\"isError\": true") == std::string::npos };
                 ARA_LOG ("bridge: %s %s -> %s", tool.c_str (), argsJson.c_str (), ok ? "ok" : result.substr (0, 300).c_str ());
                 return ok;
             }
@@ -556,7 +557,9 @@ bool waitForUpdates (PlugInEntry* plugInEntry, ARADocumentController* dc, const 
       11. 画面: 編集対象の切り替え・一覧だけ（保存するものは変わらない: 何も届かない）
       保存 → 12. 同じ作業場所で戻す（何も届かない）・13. 別の作業場所で戻す（解析し直しても何も届かない）
       14. 描画の版を 1（0.1.0-beta.6 までの曲）にしたアーカイブを戻す（その版の音のまま鳴らす: 何も届かない）
-      15. その文書で、画面から描画の版を上げる（set_render_version。保存するものが変わる: 知らせが届く） */
+      15. その文書で、画面から描画の版を上げる（set_render_version。保存するものが変わる: 知らせが届く）
+      16. 再合成が長い間（エンジンの GLISS_TEST_RENDER_DELAY_SEC・プラグインの GLISS_TEST_MAX_RENDER_SEC で、修飾 1 の
+          再合成を 3 秒ずつ何回かに分ける）に画面からガイドの指定を外す: 再合成が終わって音の知らせが届く前に、文書の知らせが届く */
 int runChanges (PlugInEntry* plugInEntry, VoiceAudioFile& voice, const ARA::ARAFactory* factory,
                 const std::string& script, const std::string& outDir, const std::string& workOther)
 {
@@ -709,6 +712,42 @@ int runChanges (PlugInEntry* plugInEntry, VoiceAudioFile& voice, const ARA::ARAF
     setEnv ("VOCAL_ENGINE_WORK_DIR", workOther.c_str ());
     MemoryArchive other { archiveData, factory->documentArchiveID };
     restoreOnly ("13 restore in another work folder (nothing)", other, nothing);
+
+    {
+        setEnv ("GLISS_TEST_RENDER_DELAY_SEC", "3");
+        setEnv ("GLISS_TEST_MAX_RENDER_SEC", "0.3");
+        MemoryArchive slow { archiveData, factory->documentArchiveID };
+        std::unique_ptr<TestHost> testHost;
+        auto dc { createTwoModificationDocument (plugInEntry, testHost, "GlissARATest X 16", &voice, &slow) };
+        bool passed { false };
+        if (dc != nullptr)
+        {
+            renderDocument (plugInEntry, dc, voice.getSampleRate ());
+            pumpHost (plugInEntry, dc, 3000);
+            modelUpdateCounts () = {};
+            // 修飾 1 の離れた 3 か所（窓が 3 つ = 再合成が 3 回）
+            const bool edited { bridge.call (plugInEntry, dc, "select_track", "{\"track_id\": " + m1 + "}")
+                                && bridge.call (plugInEntry, dc, "apply_edits", "{\"edits\": ["
+                                    "{\"op\": \"shift_pitch\", \"cents\": 30, \"start_sec\": 0.5, \"end_sec\": 1.05},"
+                                    "{\"op\": \"shift_pitch\", \"cents\": 30, \"start_sec\": 2.8, \"end_sec\": 3.35},"
+                                    "{\"op\": \"shift_pitch\", \"cents\": 30, \"start_sec\": 5.1, \"end_sec\": 5.65}]}") };
+            const bool guided { edited && bridge.call (plugInEntry, dc, "set_track_guide",
+                                                       "{\"track_id\": " + m0 + "}") };
+            int samplesAtDocument { -1 };
+            for (int waited { 0 }; guided && waited < 30000 && samplesAtDocument < 0; waited += 100)
+            {
+                pumpHost (plugInEntry, dc, 100);
+                if (modelUpdateCounts ().documentData > 0)
+                    samplesAtDocument = modelUpdateCounts ().modificationSamples;
+            }
+            const bool rendered { waitForUpdates (plugInEntry, dc, [] (const ModelUpdateCounts& c) { return c.modificationSamples > 0; }, 60000) };
+            ARA_LOG ("changes: 16 samples when the document notice came: %i", samplesAtDocument);
+            passed = guided && samplesAtDocument == 0 && rendered;
+        }
+        record ("16 guide during a long render (told before the render ends)", passed);
+        setEnv ("GLISS_TEST_RENDER_DELAY_SEC", nullptr);
+        setEnv ("GLISS_TEST_MAX_RENDER_SEC", nullptr);
+    }
 
     writeText (outDir + "/changes.json", "{" + report + "}");
     plugInEntry->uninitializeARA ();

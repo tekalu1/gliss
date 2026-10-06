@@ -28,7 +28,7 @@ juce::File pythonForTests()
 }
 
 // 偽のエンジン: 呼ばれるたびに state.json を読み、修飾ごとに {rev, state, windows, pending} を返す。
-// ara_render_dirty は since が前に返した版と違えば reset、windows なら 100 フレームの窓（中身は 0.5）。
+// ara_render_dirty は since が前に返した版と違えば reset、windows なら 100 フレームの窓（中身は 0.5。delay 秒かかる）。
 const char* fakeEngine = R"PY(import json, os, sys, time
 d = os.path.dirname(os.path.abspath(__file__))
 pcm = os.path.join(d, 'win.f32')
@@ -79,6 +79,8 @@ for line in sys.stdin:
         reset = args.get('since') is None or args.get('since') != last.get(aid)
         last[aid] = m['rev']
         win = [{'start_frame': 0, 'frames': 100, 'byte_offset': 0}] if m.get('windows') and not m.get('pending') else []
+        if win:
+            time.sleep(float(m.get('delay') or 0))     # 再合成が長いとき
         reply(msg['id'], {'ok': True, 'rev': m['rev'], 'reset': reset, 'more': False, 'restore': [], 'windows': win,
                           'path': pcm if win else None, 'sr': 44100, 'channels': 1, 'source_frames': 1000,
                           'analysis_pending': bool(m.get('pending'))})
@@ -108,6 +110,13 @@ struct Recorder
     std::mutex m;
     std::vector<std::pair<juce::String, bool>> content;   // (ara_id, notifyHost)
     std::vector<std::pair<juce::String, bool>> state;     // (ara_id, documentData)。ara_id が空なら文書だけ
+    juce::StringArray order;                              // 届いた順（"content:<id>"・"state:<id>"）
+
+    int firstIndex (const juce::String& entry)
+    {
+        std::lock_guard g (m);
+        return order.indexOf (entry);
+    }
 
     int count (const std::vector<std::pair<juce::String, bool>>& v, const juce::String& id, bool flag)
     {
@@ -123,6 +132,7 @@ struct Recorder
         std::lock_guard g (m);
         content.clear();
         state.clear();
+        order.clear();
     }
 
     DocumentSync::Callbacks callbacks()
@@ -132,13 +142,19 @@ struct Recorder
         {
             std::lock_guard g (m);
             for (const auto& id : ids)
+            {
                 content.emplace_back (id, notifyHost);
+                order.add ("content:" + id);
+            }
         };
         c.stateChanged = [this] (const juce::StringArray& ids, bool documentData)
         {
             std::lock_guard g (m);
             for (const auto& id : ids)
+            {
                 state.emplace_back (id, documentData);
+                order.add ("state:" + id);
+            }
             if (ids.isEmpty())
                 state.emplace_back (juce::String(), documentData);
         };
@@ -244,13 +260,14 @@ public:
             settle (sync);
             expectEquals (sync.getGuidesForStore().at ("mod"), juce::String ("mod2"));
 
-            // 編集（音が変わる）: 音の知らせだけ（保存の状態の知らせは重ねない）
+            // 編集（音が変わる）: 保存の状態の知らせを再合成の前に 1 回、音の知らせを後に 1 回
             rec.clear();
             write ("a0:e1", "s2", "a0:f0", "t0", { { "mod", "mod2" } });
             sync.requestSync();
             expect (waitUntil ([&] { return rec.count (rec.content, "mod", true) > 0; }, 10000), "edit reported");
             settle (sync);
-            expectEquals (rec.count (rec.state, "mod", false), 0);
+            expectEquals (rec.count (rec.state, "mod", false), 1);
+            expect (rec.firstIndex ("state:mod") < rec.firstIndex ("content:mod"), rec.order.joinIntoString (","));
 
             // 解析待ちにしてから、編集を開いた時のもの（e0）へ取り消す: 開いた時の署名ではなく、最後に知らせた署名（e1）と
             // 比べるので知らせる（保存の状態はわざと同じにして、編集の署名の比べ方だけを見る）
@@ -285,6 +302,38 @@ public:
             sync.shutdown();
         }
 
+        beginTest ("a saved-state change is reported before a long render, and one made during it before the render ends");
+        {
+            write ("a0:e0", "s0", "b0:f0", "t0", {}, false, false, 0.0, true);
+            Recorder rec;
+            DocumentSync sync (config, options, rec.callbacks());
+            sync.setModel (twoModifications());
+            expect (waitUntil ([&] { return rec.count (rec.content, "mod2", false) > 0; }, 15000), "first render caught up");
+            settle (sync);
+
+            // 修飾 1 の再合成（2 秒）と、修飾 2 の保存の状態だけの変化が同じ周に見える: 状態の知らせが先
+            rec.clear();
+            write ("a0:e1", "s1", "b0:f0", "t1", {}, false, false, 2.0, true);
+            sync.requestSync();
+            expect (waitUntil ([&] { return rec.count (rec.content, "mod", true) > 0; }, 15000), "edit rendered");
+            settle (sync);
+            expect (rec.firstIndex ("state:mod2") >= 0 && rec.firstIndex ("state:mod2") < rec.firstIndex ("content:mod"),
+                    rec.order.joinIntoString (","));
+
+            // 修飾 1・2 の再合成（各 1.5 秒）の最中に入ったガイドの指定: 再合成の合間に見直して、再合成が終わる前に知らせる
+            rec.clear();
+            write ("a0:e2", "s1", "b0:f1", "t2", {}, false, false, 1.5, true, 1.5);
+            sync.requestSync();
+            juce::Thread::sleep (500);
+            write ("a0:e2", "s1", "b0:f1", "t2", { { "mod", "mod2" } }, false, false, 1.5, true, 1.5);
+            expect (waitUntil ([&] { return rec.count (rec.content, "mod2", true) > 0; }, 15000), "both rendered");
+            settle (sync);
+            expect (rec.count (rec.state, "mod", true) == 1, rec.order.joinIntoString (","));
+            expect (rec.firstIndex ("state:mod") >= 0 && rec.firstIndex ("state:mod") < rec.firstIndex ("content:mod"),
+                    rec.order.joinIntoString (","));
+            sync.shutdown();
+        }
+
         beginTest ("an old archive without guides takes the restored guides as the host's");
         {
             write ("a0:e0", "s0", "a0:f0", "t0", { { "mod", "mod2" } });
@@ -313,25 +362,27 @@ private:
     static juce::var parseArchive() { return juce::JSON::parse ("{\"changesets\": [{\"id\": \"c001\"}]}"); }
 
     void write (const char* rev, const char* state, const char* rev2, const char* state2,
-                const std::map<juce::String, juce::String>& guides, bool pending = false, bool renderChanged = false)
+                const std::map<juce::String, juce::String>& guides, bool pending = false, bool renderChanged = false,
+                double delay = 0.0, bool windows2 = false, double delay2 = 0.0)
     {
         auto* g = new juce::DynamicObject();
         for (const auto& [k, v] : guides)
             g->setProperty (juce::Identifier (k), v);
 
-        const auto mod = [] (const char* r, const char* s, bool windows, bool p)
+        const auto mod = [] (const char* r, const char* s, bool windows, bool p, double d)
         {
             auto* o = new juce::DynamicObject();
             o->setProperty ("rev", r);
             o->setProperty ("state", s);
             o->setProperty ("windows", windows);
             o->setProperty ("pending", p);
+            o->setProperty ("delay", d);
             return juce::var (o);
         };
 
         auto* mods = new juce::DynamicObject();
-        mods->setProperty ("mod", mod (rev, state, true, pending));
-        mods->setProperty ("mod2", mod (rev2, state2, false, false));
+        mods->setProperty ("mod", mod (rev, state, true, pending, delay));
+        mods->setProperty ("mod2", mod (rev2, state2, windows2, false, delay2));
 
         auto* root = new juce::DynamicObject();
         root->setProperty ("mods", juce::var (mods));

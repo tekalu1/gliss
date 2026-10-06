@@ -58,6 +58,7 @@ OUT_DIR = "ara-out"             # 差分の再合成の PCM（.f32）の置き�
 KEEP_OUT = 4                    # 修飾ごとに残す .f32 の数（プラグインが読み終える前に消さない）
 RENDERERS_MAX = 4               # 下ごしらえ（RegionRenderer）を持っておく修飾の数（LRU）
 DEFAULT_MAX_SEC = 10.0          # ara_render_dirty が 1 回で再合成する窓の長さの上限（秒）
+TEST_DELAY_ENV = "GLISS_TEST_RENDER_DELAY_SEC"   # 試験用: ara_render_dirty が窓を作る呼び出しの前に待つ秒
 EMPTY_REV = "empty"             # プロジェクト（project.json）がまだ無い修飾の版
 NOTE_FLOOR_DB = -60.0           # ara_notes の音量: この dB を 0、0 dB を 1 にする（ARA の volume は dB に近い尺度）
 # アーカイブの素材の参照に入れるキー（`Project.to_archive` の ref と同じ）
@@ -955,6 +956,8 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     done, out_windows, chunks, total = [], [], [], 0.0
     prep_sec = rr.prepare_sec if rr is not None else 0.0
     t_render = time.perf_counter()
+    if todo and os.environ.get(TEST_DELAY_ENV):
+        time.sleep(float(os.environ[TEST_DELAY_ENV]))     # 試験用: 再合成が長いとき（plugin/tests/aratest の -changes）
     if todo:
         with _srv._prep_yield():
             byte = 0

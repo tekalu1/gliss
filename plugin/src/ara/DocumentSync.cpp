@@ -823,7 +823,7 @@ void DocumentSync::setOpenedEdits (const juce::String& araId, const juce::var& r
 }
 
 bool DocumentSync::renderModification (const SyncModification& mod, bool stateChanged, juce::StringArray& contentChanged,
-                                       juce::StringArray& caughtUp)
+                                       juce::StringArray& caughtUp, const std::function<void()>& between)
 {
     if (mod.pcm == nullptr)
         return true;
@@ -910,6 +910,9 @@ bool DocumentSync::renderModification (const SyncModification& mod, bool stateCh
 
         if (! u.more)
             break;
+
+        if (between)
+            between();   // 続きの再合成の前に、保存の状態の変化を知らせる
     }
 
     mod.pcm->releaseUnusedSnapshots();
@@ -1014,6 +1017,91 @@ void DocumentSync::applyTestEdit (const SyncModel& m)
     emit ("test-edit", object ({ { "ok", ! isFailure (result) }, { "ara_id", first.araId }, { "result", result } }));
 }
 
+void DocumentSync::noticeSavedState (const SyncModel& m, const juce::var& revs, juce::StringArray& changed)
+{
+    if (! revs.hasProperty ("states"))
+        return;   // 前の版のエンジンは保存の状態を返さない（知らせは音とノートだけ）
+
+    if (revs.hasProperty ("guides"))
+    {
+        std::lock_guard guard (mutex);
+        takeGuidesLocked (revs.getProperty ("guide", {}), revs.getProperty ("guides", {}));
+    }
+
+    // 保存の状態（アーカイブに入るもの）がホストの持っているものと違ってきた修飾。戻し途中・素材違いで当てていない
+    // アーカイブがあれば、保存に書くのはそのアーカイブ（変わっていない）
+    juce::StringArray stateOnly;
+
+    for (const auto& mod : m.modifications)
+    {
+        const auto a = applied.find (mod.araId);
+
+        if (a == applied.end() || ! a->second.registered)
+            continue;
+
+        const auto state = revs.getProperty ("states", {}).getProperty (juce::Identifier (mod.araId), {}).toString();
+
+        if (state.isEmpty())
+            continue;
+
+        bool restorePending = false;
+        {
+            std::lock_guard guard (mutex);
+            restorePending = pendingRestores.count (mod.araId) > 0;
+        }
+
+        if (restorePending)
+        {
+            hostStates[mod.araId] = state;
+        }
+        else if (const auto h = hostStates.find (mod.araId); h == hostStates.end())
+        {
+            hostStates.emplace (mod.araId, state);
+        }
+        else if (h->second != state)
+        {
+            h->second = state;
+            stateOnly.add (mod.araId);
+            stateMoved.insert (mod.araId);   // 次の再合成は「追いつくだけ」にしない（音の変化もあれば知らせる）
+        }
+    }
+
+    // 戻し終えたか（ガイドの指定を書いていない古いアーカイブは、戻し終えた後の指定をホストの持っているものにする）
+    bool ready = true;
+    {
+        std::lock_guard guard (mutex);
+        ready = ! guidePending && pendingGuides.empty()
+                && std::none_of (pendingRestores.begin(), pendingRestores.end(), [] (const auto& p) { return ! p.second.mismatch; });
+    }
+
+    for (const auto& mod : m.modifications)
+    {
+        const auto source = std::find_if (m.sources.begin(), m.sources.end(), [&] (const auto& x) { return x.id == mod.sourceId; });
+        const auto a = applied.find (mod.araId);
+
+        if (source != m.sources.end() && source->samplesAvailable && (a == applied.end() || ! a->second.registered)
+            && getModStatus (mod.araId).state != "failed")
+            ready = false;
+    }
+
+    const auto guideMods = guidesChangedSinceHost (m, ready);
+
+    for (const auto& id : guideMods)
+        stateOnly.addIfNotAlreadyThere (id);
+
+    if (stateOnly.isEmpty())
+        return;
+
+    log ("sync: saved state changed: " + stateOnly.joinIntoString (", ")
+         + (guideMods.isEmpty() ? juce::String() : " (guides: " + guideMods.joinIntoString (", ") + ")"));
+
+    if (callbacks.stateChanged)
+        callbacks.stateChanged (stateOnly, ! guideMods.isEmpty());
+
+    for (const auto& id : stateOnly)
+        changed.addIfNotAlreadyThere (id);   // 保存用の写しも取り直す
+}
+
 void DocumentSync::cycle()
 {
     dirty = false;
@@ -1098,6 +1186,10 @@ void DocumentSync::cycle()
         log ("sync: ara_remove_modification " + araId + (isFailure (r) ? " failed: " + failureReason (r) : juce::String()));
         localRev.erase (araId);
         notesRev.erase (araId);
+        openedEdits.erase (araId);   // 足し直したら登録・戻しで覚え直す（古い署名を残さない）
+        hostStates.erase (araId);
+        renderChanged.erase (araId);
+        stateMoved.erase (araId);
 
         {
             std::lock_guard guard (mutex);
@@ -1275,9 +1367,6 @@ void DocumentSync::cycle()
 
     // 6. 版が変わった修飾の差分の再合成と、DAW に返すノート
     juce::StringArray contentChanged, caughtUp;          // 音が変わった修飾・戻した状態に追いついただけの修飾
-    juce::StringArray stateDirty;                        // 保存の状態がホストの持っているものと違ってきた修飾
-    std::map<juce::String, juce::String> currentStates;  // ara_revs の保存の状態の署名
-    bool statesKnown = false;
     std::map<juce::String, juce::String> notesTargets;   // ノートを取り直す修飾 → ara_revs の版
     const auto revs = call ("ara_revs", object ({}), 60000);
     ExternalChanges::Result externalChange;
@@ -1291,13 +1380,7 @@ void DocumentSync::cycle()
     {
         // 外部の AI（中継。engine/vocal_engine/ara_relay.py）が曲を変えた: 版の変わった修飾は下で取り直し、画面には後で知らせる
         externalChange = external.update (revs);
-        statesKnown = revs.hasProperty ("states");   // 前の版のエンジンは保存の状態を返さない（知らせは音とノートだけ）
-
-        if (revs.hasProperty ("guides"))
-        {
-            std::lock_guard guard (mutex);
-            takeGuidesLocked (revs.getProperty ("guide", {}), revs.getProperty ("guides", {}));
-        }
+        std::vector<const SyncModification*> toRender;
 
         for (const auto& mod : m.modifications)
         {
@@ -1320,7 +1403,6 @@ void DocumentSync::cycle()
                 notesTargets[mod.araId] = target;
 
             // 素材違いで当てていないアーカイブは、利用者がこの修飾を編集したら捨てる（エンジンの編集を保存する）。
-            bool restorePending = false;
             {
                 std::lock_guard guard (mutex);
 
@@ -1331,23 +1413,6 @@ void DocumentSync::cycle()
                     else if (p->second.editSignature != editSignature (target))
                         pendingRestores.erase (p);
                 }
-
-                restorePending = pendingRestores.count (mod.araId) > 0;
-            }
-
-            // 保存の状態（アーカイブに入るもの）がホストの持っているものと違ってきたか。戻し途中・素材違いで当てていない
-            // アーカイブがあれば、保存に書くのはそのアーカイブ（変わっていない）
-            if (const auto state = revs.getProperty ("states", {}).getProperty (juce::Identifier (mod.araId), {}).toString();
-                state.isNotEmpty())
-            {
-                currentStates[mod.araId] = state;
-
-                if (restorePending)
-                    hostStates[mod.araId] = state;
-                else if (const auto h = hostStates.find (mod.araId); h == hostStates.end())
-                    hostStates.emplace (mod.araId, state);
-                else if (h->second != state)
-                    stateDirty.addIfNotAlreadyThere (mod.araId);
             }
 
             const auto current = localRev.find (mod.araId);
@@ -1362,10 +1427,37 @@ void DocumentSync::cycle()
                 continue;
             }
 
-            if (! renderModification (mod, stateDirty.contains (mod.araId), contentChanged, caughtUp))
+            toRender.push_back (&mod);
+        }
+
+        // 保存するものが変わった修飾・ガイドの指定は、再合成より先に知らせる（再合成は長いことがあり、その間に保存・閉じると
+        // 「変更あり」が間に合わない）。再合成の合間にも ara_revs を見直して知らせる（再合成の最中に入った変更）
+        noticeSavedState (m, revs, changed);
+        lastStateCheck = juce::Time::getMillisecondCounterHiRes();
+        const auto between = [this, &m, &changed]
+        {
+            if (juce::Time::getMillisecondCounterHiRes() - lastStateCheck < 1000.0 || threadShouldExit() || engineDied)
+                return;
+
+            lastStateCheck = juce::Time::getMillisecondCounterHiRes();
+            const auto again = call ("ara_revs", object ({}), 60000);
+
+            if (! isFailure (again))
+                noticeSavedState (m, again, changed);
+        };
+
+        for (const auto* mod : toRender)
+        {
+            if (threadShouldExit() || engineDied)
+                return;
+
+            const bool moved = stateMoved.erase (mod->araId) > 0;
+
+            if (! renderModification (*mod, moved, contentChanged, caughtUp, between))
                 workLeft = true;
 
-            changed.addIfNotAlreadyThere (mod.araId);
+            changed.addIfNotAlreadyThere (mod->araId);
+            between();
         }
     }
 
@@ -1379,58 +1471,6 @@ void DocumentSync::cycle()
 
         if (! caughtUp.isEmpty())
             callbacks.contentChanged (caughtUp, false);
-    }
-
-    // 保存するものだけが変わった（音の変化は知らせていない）修飾と、ガイドの指定: ホストに知らせる（知らせないとホストが
-    // 保存を求めず、ガイドの指定・歌詞・方式・取り消しが失われる）。音の変化を知らせた修飾は、ホストがそれで保存し直す
-    if (statesKnown && ! isFailure (revs))
-    {
-        juce::StringArray stateOnly;
-
-        for (const auto& id : stateDirty)
-            if (! contentChanged.contains (id))
-                stateOnly.add (id);
-
-        for (const auto& id : contentChanged)
-            if (const auto c = currentStates.find (id); c != currentStates.end())
-                hostStates[id] = c->second;
-
-        for (const auto& id : stateDirty)
-            hostStates[id] = currentStates[id];
-
-        // 戻し終えたか（ガイドの指定を書いていない古いアーカイブは、戻し終えた後の指定をホストの持っているものにする）
-        bool ready = true;
-        {
-            std::lock_guard guard (mutex);
-            ready = ! guidePending && pendingGuides.empty()
-                    && std::none_of (pendingRestores.begin(), pendingRestores.end(), [] (const auto& p) { return ! p.second.mismatch; });
-        }
-
-        for (const auto& mod : m.modifications)
-        {
-            const auto* s = findSource (mod.sourceId);
-            const auto a = applied.find (mod.araId);
-
-            if (s != nullptr && s->samplesAvailable && (a == applied.end() || ! a->second.registered)
-                && getModStatus (mod.araId).state != "failed")
-                ready = false;
-        }
-
-        const auto guideMods = guidesChangedSinceHost (m, ready);
-
-        for (const auto& id : guideMods)
-            if (! contentChanged.contains (id))
-                stateOnly.addIfNotAlreadyThere (id);
-
-        if ((! stateOnly.isEmpty() || ! guideMods.isEmpty()) && callbacks.stateChanged)
-        {
-            log ("sync: saved state changed: " + stateOnly.joinIntoString (", ")
-                 + (guideMods.isEmpty() ? juce::String() : " (guides: " + guideMods.joinIntoString (", ") + ")"));
-            callbacks.stateChanged (stateOnly, ! guideMods.isEmpty());
-        }
-
-        for (const auto& id : stateOnly)
-            changed.addIfNotAlreadyThere (id);   // 保存用の写しも取り直す
     }
 
     if (externalChange.projectChanged || externalChange.sessionChanged)
