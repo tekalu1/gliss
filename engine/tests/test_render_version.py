@@ -125,3 +125,32 @@ def test_first_edit_of_an_old_song_without_edits_takes_the_latest_renderer(eng, 
     _ok(m.shift_pitch(100, start_sec=0.5, end_sec=1.0))
     assert m._state["project"].render_version == 2
     assert _ok(m.set_render_version())["changes"] == []             # もう最新
+
+
+def test_lyrics_only_history_still_takes_the_latest_renderer_on_the_first_edit(eng, tmp_path):
+    """歌詞だけの changeset（音を作らない）がある古い曲でも、最初の音の編集で最新の描画の版にする。"""
+    m, a, md, R = eng
+    _song(m, md, tmp_path)
+    _ok(m.analyze_take(background=False))
+    p = m._state["project"]
+    p.render_version = 1                                            # beta.6 で解析だけした曲
+    p.save()
+    _ok(m.set_lyrics("あいうえお", start_sec=0.4, end_sec=2.2, reanalyze=False))
+    q = m._state["project"]
+    assert q.changesets and q.render_version == 1                   # 歌詞だけでは版を変えない（音が無い）
+    _ok(m.set_pitch_curve([[0.0, 0], [0.2, 80], [0.4, 0]], start_sec=0.5, end_sec=0.9))
+    assert m._state["project"].render_version == 2
+
+
+def test_old_song_with_an_undone_edit_keeps_its_renderer(eng, tmp_path):
+    """取り消した音の編集も履歴（やり直すと前の版の音で鳴る）: 版は変えない。"""
+    m, a, md, R = eng
+    _song(m, md, tmp_path)
+    _ok(m.analyze_take(background=False))
+    _ok(m.shift_pitch(100, start_sec=0.5, end_sec=1.0))
+    p = m._state["project"]
+    p.render_version = 1
+    p.save()
+    _ok(m.undo())
+    _ok(m.shift_pitch(50, start_sec=2.6, end_sec=3.0))
+    assert m._state["project"].render_version == 1

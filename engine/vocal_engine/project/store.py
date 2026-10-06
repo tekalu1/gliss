@@ -1865,10 +1865,12 @@ class Project:
         return self.edits
 
     def _first_edit_takes_latest_renderer(self):
-        """編集の履歴の無い曲（前の版で作って解析だけした曲を含む）に最初の編集を足す: 最新の描画の版にする。
-        履歴のある曲の版は変えない（`set_render_version` で利用者が明示したときだけ。同じ修飾の中で前の編集と新しい編集を
-        別の描画の版で鳴らすと、つなぎ目で両方が混ざるので、修飾ごとに 1 つの版にする）。"""
-        if not self.changesets and self.render_version != RENDER_VERSION:
+        """音の編集の履歴の無い曲（前の版で作って解析だけした曲・歌詞だけを入れた曲を含む）に最初の編集を足す: 最新の描画の
+        版にする（歌詞の changeset は音を作らない）。音の編集の履歴がある曲の版は変えない（`set_render_version` で利用者が
+        明示したときだけ。同じ修飾の中で前の編集と新しい編集を別の描画の版で鳴らすと、つなぎ目で両方が混ざるので、修飾ごとに
+        1 つの版にする）。取り消した編集も履歴に数える（やり直すと前の版の音で鳴らす編集なので）。"""
+        if self.render_version != RENDER_VERSION and not any(
+                op.get("op") in ("add", "remove") for cs in self.changesets for op in cs.ops):
             log.get().info("描画の版を %d → %d（編集の無い曲の最初の編集）", self.render_version, RENDER_VERSION)
             self.render_version = RENDER_VERSION
 
