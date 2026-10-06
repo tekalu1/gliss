@@ -1,7 +1,7 @@
 {
   "name": "gliss",
   "productName": "Gliss",
-  "version": "0.1.0-beta.5",
+  "version": "0.1.0-beta.6",
   "private": true,
   "description": "Gliss（歌声のピッチ・タイミング編集ツール）の画面（Electron）。Python エンジンに MCP（stdio）でつなぐ。",
   "license": "GPL-3.0-or-later",
