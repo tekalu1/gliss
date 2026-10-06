@@ -118,6 +118,34 @@ public:
             expect (b.guide.isEmpty() && b.modifications.empty());
         }
 
+        beginTest ("archive keeps the per-track guides and an old archive without them reads empty");
+        {
+            DocumentArchive a;
+            a.workKey = "k";
+            a.guide = "shared";
+            a.guides["mod A"] = "mod \"B\"";
+            a.guides["mod C"] = "mod \"B\"";
+            const auto json = archive::write (a);
+            const auto guides = juce::JSON::parse (json).getProperty ("document", {}).getProperty ("guides", {});
+            expectEquals (guides.getProperty ("mod A", {}).toString(), juce::String ("mod \"B\""));
+            DocumentArchive b;
+            juce::String error;
+            expect (archive::read (json, b, error), error);
+            expect (b.guides == a.guides);
+            expectEquals (b.guide, juce::String ("shared"));
+
+            // guides は無ければ書かない（古いプラグインが読んだときと同じ形）。guides の無い古いアーカイブは空として読む
+            a.guides.clear();
+            const auto plain = archive::write (a);
+            expect (! juce::JSON::parse (plain).getProperty ("document", {}).hasProperty ("guides"));
+            DocumentArchive c;
+            expect (archive::read (plain, c, error), error);
+            expect (c.guides.empty());
+            DocumentArchive d;
+            expect (archive::read (R"({"format":"gliss-ara","version":1,"document":{"work_key":"k","guide":null},"modifications":{}})", d, error), error);
+            expect (d.guides.empty() && d.guide.isEmpty());
+        }
+
         beginTest ("archive refuses other formats and newer versions");
         {
             DocumentArchive out;
@@ -824,6 +852,9 @@ public:
             expectEquals (juce::JSON::toString (sync.getArchiveForStore ("mod"), true), juce::JSON::toString (archive, true));
             expect (sync.getArchiveForStore ("other").isVoid());
             expectEquals (sync.getGuideForStore(), juce::String ("guide-mod"));
+            expect (sync.getGuidesForStore().empty());
+            sync.setPendingGuides ({ { "mod", "guide-mod" } });
+            expect (sync.getGuidesForStore() == (std::map<juce::String, juce::String> { { "mod", "guide-mod" } }));
 
             // エンジンが動いていなければ、取り直しは何もしない（待たない）
             const auto start = juce::Time::getMillisecondCounter();

@@ -350,7 +350,7 @@ def test_undo_guide_change_reschedules(env):
     _until(_ready(prep, tb))
     assert fake.calls["dtw"].count((440, 660)) == 1
     _ok(m.undo())                                # ガイドの指定を取り消す → g1 に戻る
-    assert prep.PREPARER._guide == _tid(r, "g1")
+    assert prep.PREPARER._guides == {_tid(r, "g1")}
     _until(_ready(prep, tb))
     assert fake.calls["dtw"].count((440, 330)) == 1           # 前の組み合わせは鍵付きで残っている
 

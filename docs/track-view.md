@@ -59,7 +59,8 @@ issue #7。
 | `add_track` | ファイルを足す（`kind` 省略時はファイル名から推す。`guide` / `select` も一緒に） |
 | `remove_track` | 外す（ファイル・編集は消さない。ボーカルが 0 本になる外し方はできない） |
 | `set_track` | 名前・種類・ミュート／ソロ・**音量・パン**（§3.1）・**位置**（§4） |
-| `set_guide_track` | ガイドを 1 本指定（null で外す） |
+| `set_guide_track` | 共通のガイドを 1 本指定（null で外す） |
+| `set_track_guide` | トラックごとのガイドを指定（`guide_track_id` 省略で共通のガイドに戻す。`guide_id` / `effective_guide_id` / `is_guide` が一覧に付く） |
 | `track_overview` | 画面向け: 全体の波形（20 ms ごとの \|振幅\| の最大、チャンネルごと）の JSON |
 | `render_tracks` | 画面の再生向け: トラックごとの音のファイル（§2） |
 

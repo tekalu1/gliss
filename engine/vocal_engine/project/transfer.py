@@ -108,6 +108,10 @@ def _not_transferred(t, doc):
     if (doc.get("session") or {}).get("guide"):
         out.append({"item": "guide", "note": "ガイドの指定。ARA の文書では DAW の別の修飾（set_guide_track）。"
                                               "編集は計算済みの値なので取り込みには要らない"})
+    if t.get("guide_id"):
+        out.append({"item": "guide_id", "value": t["guide_id"],
+                    "note": "このトラックに明示したガイド。ARA の文書では DAW の別の修飾（set_track_guide）。"
+                            "編集は計算済みの値なので取り込みには要らない"})
     return out
 
 

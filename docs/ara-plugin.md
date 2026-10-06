@@ -35,10 +35,14 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 
 ```json
 { "format": "gliss-ara", "version": 1,
-  "document": { "work_key": "<作業場所の鍵>", "guide": "<ガイドの修飾の persistentID>" | null },
+  "document": { "work_key": "<作業場所の鍵>", "guide": "<共通のガイドの修飾の persistentID>" | null,
+                "guides": { "<修飾の persistentID>": "<その修飾のガイドの修飾の persistentID>" } },
   "modifications": { "<persistentID>": { "name": "…", "archive": { …Project.to_archive()… } | null } } }
 ```
 
+  - `guide` は共通のガイド（`set_guide_track`）、`guides` はトラックごとのガイド（`set_track_guide`。無ければ書かない。古いアーカイブは `guides` 無しで読める）。
+    どちらも `ara_archive` が返し、プラグインは保存でそのまま書く。開き直すと、フィルターが対応させた今の修飾の ID に直して、両方の修飾が登録できたものから
+    `ara_sync(guide=…, guides=…)` で戻す（取り消しの履歴に入れない）。ガイドにした修飾を DAW で消すと、その指定は外れる。
   - `work_key` は作業場所 `%LOCALAPPDATA%\Gliss\work\ara\<work_key>` の名前。新しいドキュメントで UUID を作り、アーカイブにあれば（まだエンジンで開いていなければ）それを使う（同じ PC なら前の解析のキャッシュが使える）。
   - `archive` の `f0_estimator` は、補正を作った F0 の方式（`rmvpe`・`gliss`・`praat`。未解析で明示も無ければ `null`）。
     再合成は F0 を使うので、方式が違うと音が変わる（実測: gliss で補正した編集を rmvpe で解析し直すと約 19 秒分が変わる）。
@@ -186,7 +190,7 @@ AI からの手順:
   （`ara_relay.py` は worktree のエンジンにしか無い）ことで分かる。
 - 1 音: `shift_pitch(+100)` は約 1 秒で `ara_render_dirty`・`sync: external edit`・`ara_notes … adjusted` がログに出て、画面は「外部の変更を読み込んだ」で
   描き直した。Export Selection で測ると、そのノートだけ +99.9 セント（前後のノート 0.0）。`undo` で書き出しは元とサンプル単位でほぼ同じ（差 3e-6）。
-- ガイドに合わせる: 主旋律のガイドと録り直しを別のトラックの同じ位置に置き、どちらにも Gliss を挿す。外部から `set_guide_track`（中継でそのまま使える。
+- ガイドに合わせる: 主旋律のガイドと録り直しを別のトラックの同じ位置に置き、どちらにも Gliss を挿す。外部から `set_guide_track`（共通のガイド。トラックごとに変えるなら `set_track_guide`。どちらも中継でそのまま使える。
   ARA 用の別のツールは要らない）→ 範囲 40–55 秒に `correct_to_guide`（タイミング 1.0 → 音程 1.0・`pitch_mode="contour"`）。`measure_against_guide` で
   区間の音程の残差 45.3 → 4.5 セント（±10 以内 12.5% → 83.3%）、発音の頭 19.9 → 0.2 ms（再合成して測り直した値）。Studio Pro の書き出しが変わったのは
   40–54 秒だけ（範囲外は −121 dB）で、Gliss の再合成した窓（`ara-out` の `.f32`）と ±0.3 セントで同じ。

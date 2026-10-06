@@ -569,6 +569,7 @@ bool GlissDocumentController::doStoreObjectsToStream (juce::ARAOutputStream& out
     a.workKey = sync->hasOpened() ? sync->getOpenedWorkKey() : workKey;
 
     const auto guide = sync->getGuideForStore();
+    const auto guides = sync->getGuidesForStore();
     int withEdits = 0;
 
     for (const auto* modification : filter->getAudioModificationsToStore<GlissAudioModification>())
@@ -583,6 +584,11 @@ bool GlissDocumentController::doStoreObjectsToStream (juce::ARAOutputStream& out
         if (id == guide)
             a.guide = guide;
     }
+
+    // トラックごとのガイドは、修飾もガイドの修飾も保存するものだけ書く（外した修飾を指す指定は残さない）。
+    for (const auto& [id, guideId] : guides)
+        if (a.modifications.count (id) > 0 && a.modifications.count (guideId) > 0)
+            a.guides[id] = guideId;
 
     const auto json = archive::write (a);
     diag::log ("archive: store " + juce::String ((int) a.modifications.size()) + " modification(s), " + juce::String (withEdits)
@@ -630,6 +636,21 @@ bool GlissDocumentController::doRestoreObjectsFromStream (juce::ARAInputStream& 
     if (a.guide.isNotEmpty())
         if (auto* guide = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (a.guide.toRawUTF8()))
             sync->setPendingGuide (juce::String (guide->getPersistentID()));
+
+    // トラックごとのガイド（フィルターが対応させた今の修飾の ID に直す）。
+    std::map<juce::String, juce::String> restoredGuides;
+
+    for (const auto& [id, guideId] : a.guides)
+    {
+        auto* modification = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (id.toRawUTF8());
+        auto* guide = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (guideId.toRawUTF8());
+
+        if (modification != nullptr && guide != nullptr)
+            restoredGuides[juce::String (modification->getPersistentID())] = juce::String (guide->getPersistentID());
+    }
+
+    if (! restoredGuides.empty())
+        sync->setPendingGuides (restoredGuides);
 
     diag::log ("archive: restore " + juce::String ((int) a.modifications.size()) + " entr(ies), " + juce::String (restored)
                + " matched, work key " + workKey);

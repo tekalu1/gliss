@@ -41,7 +41,8 @@ EDIT_TOOLS = frozenset({
     "shift_pitch", "set_pitch_curve", "move_note", "stretch", "move_boundary", "correct_to_guide",
     "set_transition", "split_note", "merge_notes", "apply_plan", "set_connection",
     "mute_notes", "unmute_notes", "set_fade", "reset_to_original", "undo", "redo", "apply_edits",
-    "add_track", "remove_track", "set_track", "set_guide_track", "make_score_guide", "set_tempo",
+    "add_track", "remove_track", "set_track", "set_guide_track", "set_track_guide", "make_score_guide",
+    "set_tempo",
     "split_track", "join_track", "mute_track_range", "import_edits",
 })
 # 保存・書き出し: ユーザーのファイルを書く（プロジェクトの中の一時ファイル = render_preview などは対象外）。

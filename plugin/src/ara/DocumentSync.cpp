@@ -108,6 +108,17 @@ void DocumentSync::setPendingGuide (const juce::String& araId)
     requestSync();
 }
 
+void DocumentSync::setPendingGuides (const std::map<juce::String, juce::String>& guides)
+{
+    {
+        std::lock_guard guard (mutex);
+
+        for (const auto& [id, guideId] : guides)
+            pendingGuides[id] = guideId;
+    }
+    requestSync();
+}
+
 void DocumentSync::requestSync()
 {
     dirty = true;
@@ -235,6 +246,13 @@ void DocumentSync::refreshArchivesLocked (const juce::var& args, int timeoutMs)
 
     const auto guide = r.getProperty ("guide", {});
     latestGuide = guide.isString() ? guide.toString() : juce::String();
+
+    latestGuides.clear();
+
+    if (auto* guides = r.getProperty ("guides", {}).getDynamicObject())
+        for (const auto& p : guides->getProperties())
+            if (p.value.isString() && p.value.toString().isNotEmpty())
+                latestGuides[p.name.toString()] = p.value.toString();
 }
 
 juce::var DocumentSync::getArchiveForStore (const juce::String& araId) const
@@ -254,6 +272,17 @@ juce::String DocumentSync::getGuideForStore() const
 {
     std::lock_guard guard (mutex);
     return guidePending ? pendingGuide : latestGuide;
+}
+
+std::map<juce::String, juce::String> DocumentSync::getGuidesForStore() const
+{
+    std::lock_guard guard (mutex);
+    auto out = latestGuides;
+
+    for (const auto& [id, guideId] : pendingGuides)
+        out[id] = guideId;
+
+    return out;
 }
 
 std::shared_ptr<const ModificationNotes> DocumentSync::getNotes (const juce::String& araId) const
@@ -830,12 +859,14 @@ void DocumentSync::cycle()
     SyncModel m;
     juce::String guideToApply;
     bool applyGuide = false;
+    std::map<juce::String, juce::String> guidesToApply;
 
     {
         std::lock_guard guard (mutex);
         m = model;
         guideToApply = pendingGuide;
         applyGuide = guidePending;
+        guidesToApply = pendingGuides;
     }
 
     const auto findSource = [&m] (const juce::String& id) -> const SyncSource*
@@ -993,13 +1024,35 @@ void DocumentSync::cycle()
         guideReady = guideToApply.isEmpty() || (a != applied.end() && a->second.registered);
     }
 
-    if (! tracks.isEmpty() || guideReady)
+    // トラックごとのガイド: 修飾とガイドの修飾の両方が登録できたものだけ当てる（残りは次の同期で）。
+    const auto isRegistered = [this] (const juce::String& id)
+    {
+        const auto a = applied.find (id);
+        return a != applied.end() && a->second.registered;
+    };
+    std::map<juce::String, juce::String> guidesReady;
+
+    for (const auto& [id, guideId] : guidesToApply)
+        if (isRegistered (id) && isRegistered (guideId))
+            guidesReady[id] = guideId;
+
+    if (! tracks.isEmpty() || guideReady || ! guidesReady.empty())
     {
         auto* args = new juce::DynamicObject();
         args->setProperty ("tracks", tracks);
 
         if (guideReady)
             args->setProperty ("guide", guideToApply);
+
+        if (! guidesReady.empty())
+        {
+            auto* guides = new juce::DynamicObject();
+
+            for (const auto& [id, guideId] : guidesReady)
+                guides->setProperty (juce::Identifier (id), guideId);
+
+            args->setProperty ("guides", juce::var (guides));
+        }
 
         const auto r = call ("ara_sync", juce::var (args), 120000);
 
@@ -1017,6 +1070,15 @@ void DocumentSync::cycle()
 
                 if (pendingGuide == guideToApply)
                     guidePending = false;
+            }
+
+            if (! guidesReady.empty())
+            {
+                std::lock_guard guard (mutex);
+
+                for (const auto& [id, guideId] : guidesReady)
+                    if (const auto p = pendingGuides.find (id); p != pendingGuides.end() && p->second == guideId)
+                        pendingGuides.erase (p);
             }
         }
     }

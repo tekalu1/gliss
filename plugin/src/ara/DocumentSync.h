@@ -116,6 +116,9 @@ public:
     /** アーカイブのガイド（修飾の persistentID）。登録が済んだら ara_sync(guide=…) で当てる。 */
     void setPendingGuide (const juce::String& araId);
 
+    /** アーカイブのトラックごとのガイド（修飾 → ガイドの修飾）。両方の登録が済んだものから ara_sync(guides=…) で当てる。 */
+    void setPendingGuides (const std::map<juce::String, juce::String>& guides);
+
     void requestSync();
     void requestEngine();
     void restartEngine();
@@ -146,6 +149,9 @@ public:
 
     /** 保存に書くガイドの修飾（無ければ空）。 */
     juce::String getGuideForStore() const;
+
+    /** 保存に書くトラックごとのガイド: エンジンの最新に、まだ当てていない戻し途中の指定を重ねたもの。 */
+    std::map<juce::String, juce::String> getGuidesForStore() const;
 
     /** DAW に返すノートの写し（まだ無ければ nullptr）。エンジンを待たない（ARA の content reader が呼ぶ）。 */
     std::shared_ptr<const ModificationNotes> getNotes (const juce::String& araId) const;
@@ -206,6 +212,8 @@ private:
     bool guidePending = false;
     std::map<juce::String, juce::var> latestArchives;
     juce::String latestGuide;
+    std::map<juce::String, juce::String> pendingGuides;   // 戻している途中のトラックごとのガイド（当てたものから外す）
+    std::map<juce::String, juce::String> latestGuides;
     EngineStatus engineStatus;
     std::map<juce::String, ModStatus> modStatus;
     std::map<juce::String, std::shared_ptr<const ModificationNotes>> notesByMod;

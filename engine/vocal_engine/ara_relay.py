@@ -61,7 +61,7 @@ READ_ONLY = frozenset({"export_view_data", "track_overview", "prep_status", "eng
                        "cancel_job", "render_region", "render_preview", "render_view", "remeasure",
                        "transcribe", "pause_prep", "select_track", "get_job"})
 # セッション（トラックの一覧・ガイド・テンポ）を変えうるもの: 画面に session-changed も知らせる
-SESSION_TOOLS = frozenset({"set_track", "set_guide_track", "set_tempo", "undo", "redo"})
+SESSION_TOOLS = frozenset({"set_track", "set_guide_track", "set_track_guide", "set_tempo", "undo", "redo"})
 LEVELS = ("off", "read", "edit", "save")
 # 外部のツールが走る間、編集対象を切り替えるので一緒に退避する mcp_server._state のキー
 _STATE_KEYS = ("project", "track", "renderer", "renderer_backend", "renderer_audio_sig", "region")
@@ -329,6 +329,11 @@ def _session():
 
 def _track_row(s, t, editing=None):
     from . import prep
+    guide_users = s.guide_users()
+
+    def ara_of(tid):
+        g = next((x for x in s.tracks if x["id"] == tid), None) if tid else None
+        return g.get("ara_id") if g is not None else None
     pdir = s.project_dir_of(t)
     st = None
     try:
@@ -340,6 +345,8 @@ def _track_row(s, t, editing=None):
             "daw_track": t.get("group"), "kind": t.get("kind"),
             "duration_sec": t.get("duration_sec"), "sr": t.get("sr"), "channels": t.get("channels"),
             "offset_sec": t.get("offset_sec"), "guide": t["id"] == s.guide,
+            "guide_id": t.get("guide_id"), "effective_guide_id": s.effective_guide_id(t),
+            "guide_ara_id": ara_of(s.effective_guide_id(t)), "is_guide": t["id"] in guide_users,
             "analyzed": analyzed, "prep": st, "editing_in_plugin": t["id"] == editing}
 
 
