@@ -689,6 +689,9 @@ def analyze_take(force: bool = False, estimator: str = None,
     p = _project()
     p.reload_if_changed()
     est = p.f0_estimator(estimator)
+    # Gliss の第 2 版で解析した曲を最新版で解析し直すのは、force と estimator を両方明示したときだけ
+    # （force だけでは版を保つ。ノートの区切りと ID が変わり、ノート対象の編集の当たり方が変わるため）
+    latest = bool(force and estimator is not None)
     est_sec = p.duration_sec * (0.45 * (13 if confidence_sweep else 1))
     if p.guide:
         est_sec += p.duration_sec * 1.2      # DTW の分
@@ -734,7 +737,7 @@ def analyze_take(force: bool = False, estimator: str = None,
                     ctx = prep.exclusive(q.dir) if tgt is not None else contextlib.nullcontext()
                     with ctx:
                         q.analyze(force=force, estimator=est, sweep=confidence_sweep,
-                                  cancel=cancel, progress=report, commit=commit)
+                                  cancel=cancel, progress=report, commit=commit, latest=latest)
                         # 明示した方式をそのトラックの方式にする（準備が譲っている間に。ここを出たら準備が再開する）
                         mcp_tracks.remember_estimator(q, est)
                 break

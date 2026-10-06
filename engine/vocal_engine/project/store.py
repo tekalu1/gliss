@@ -520,8 +520,10 @@ class Project:
             estimator = self.estimator_pref
         return f0mod.resolve_estimator(estimator, recorded=recorded_estimator(self.analysis))
 
-    def _gliss_version_for(self, estimator, force=False):
-        if estimator != "gliss" or force:
+    def _gliss_version_for(self, estimator, latest=False):
+        """Gliss で解析し直すときに使う旧モデルの版（第 2 版の曲なら第 2 版。それ以外は None = 同梱の最新版）。
+        latest: 記録した版を無視して最新版にする（利用者が `analyze_take(force=true, estimator="gliss")` を明示したときだけ）。"""
+        if estimator != "gliss" or latest:
             return None
         take = self.analysis.get("take") or {}
         version = self.f0_model_version or (take.get("estimator_version") if take.get("estimator") == "gliss" else None)
@@ -529,8 +531,8 @@ class Project:
             raise f0mod.ModelMissingError("保存された Gliss F0 モデルの版を復元できない: %s" % version)
         return version if version == f0mod.GLISS_F0_V2_VERSION else None
 
-    def _same_take_estimator(self, result_estimator, result_version, wanted, force=False):
-        old = self._gliss_version_for(wanted, force)
+    def _same_take_estimator(self, result_estimator, result_version, wanted, latest=False):
+        old = self._gliss_version_for(wanted, latest)
         if old is not None:
             return result_estimator == "gliss" and result_version == old
         return f0mod.same_estimator(result_estimator, result_version, wanted)
@@ -1210,12 +1212,15 @@ class Project:
         return t
 
     def analyze(self, force=False, estimator=None, sweep=False, with_guide=True,
-                cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None):
+                cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None, latest=None):
         """F0 → 音符 → （ガイドがあれば）DTW。結果は cache/ に保存する。
 
         estimator: F0 の方式。省くと `f0_estimator()`（画面の「ピッチ検出の方式」で選んだ方式 → この曲を前に
         解析した方式 → 既定）。保存した解析が別の方式のものなら、テイクの F0 から解析し直す（ガイドの解析は
         方式ごとの鍵付きの保存）。
+
+        latest: Gliss の第 2 版で解析した曲も最新版で解析し直す。省くと「force かつ estimator を渡した」とき
+        （`analyze_take` は利用者が estimator を明示したときだけ True を渡す。force だけ・素材の差し替えでは版を保つ）。
 
         stage: 段の名前（"take_f0" / "lyrics" / "guide_f0" / "alignment" / "onsets" / "phonemes"）を
         段に入る前に受け取る関数（裏の準備の進み具合と、段の境目での取り消し。`prep.py`）。
@@ -1244,6 +1249,8 @@ class Project:
             else:
                 self._save_analysis()
 
+        if latest is None:
+            latest = bool(force and estimator is not None)
         estimator = self.f0_estimator(estimator)
         publish = not self.background   # 今の組み合わせを指す写しを書くか（裏の準備では書かない）
         advance(0.0)
@@ -1255,12 +1262,12 @@ class Project:
                 self._load_take_analysis(take_cache)     # 同じファイルをもう読んでいれば読み直さない
             # 方式を替えた（画面の「ピッチ検出の方式」・MCP の estimator）: 解析し直す
             reuse = self._same_take_estimator(self._take_f0.estimator,
-                                              self._take_f0.meta.get("version"), estimator, force)
+                                              self._take_f0.meta.get("version"), estimator, latest)
         if not reuse:
             enter("take_f0")
             x, sr = self.audio("take")
             kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
-            old_version = self._gliss_version_for(estimator, force)
+            old_version = self._gliss_version_for(estimator, latest)
             if old_version:
                 kwargs["gliss_version"] = old_version
             f0r = estimate_f0(**kwargs)
@@ -1319,7 +1326,7 @@ class Project:
                 if gf0 is None:
                     gx, gsr = self.audio("guide")
                     kwargs = {"x": gx, "sr": gsr, "estimator": estimator, "sweep": sweep}
-                    old_version = self._gliss_version_for(estimator, force)
+                    old_version = self._gliss_version_for(estimator, latest)
                     if old_version:
                         kwargs["gliss_version"] = old_version
                     gf0 = estimate_f0(**kwargs)
