@@ -15,6 +15,7 @@ import {
 } from './grid.js';
 import { renderTempo } from './tempo.js';
 import { bandColor, desat, lineColorer } from './corr.js';
+import { createFollower } from './follow.js';
 import { ARA, araEditorHead, araEditorRegion, araEditorTrack, araRegions, araScale } from './ara.js';
 
 const { KEYS_W, SCALE_H, LANE_H, EDGE } = LAYOUT;
@@ -65,6 +66,8 @@ let W = 1200;
 let H = 396;
 // 描き直し・再生位置の移動のたびに呼ぶもの（トラックビュー。上下で白枠・再生位置・ループを合わせる）
 const hooks = { render: [], head: [] };
+const lowerFollow = createFollower();   // 下のピアノロールの追従の規則（follow.js）
+let locateNext = false;                  // follow({ locate }) が movePlayhead の上の表示へ渡す
 export function onRender(fn) { hooks.render.push(fn); }
 export function onPlayhead(fn) { hooks.head.push(fn); }
 
@@ -1225,21 +1228,26 @@ export function movePlayhead() {
   }
   const c = document.querySelector('#clock');
   if (c) c.textContent = fmtTime(S.head);
-  for (const fn of hooks.head) fn();
+  const locate = locateNext;
+  locateNext = false;
+  for (const fn of hooks.head) fn({ locate });
 }
 
-/** 再生中、再生位置がピアノロールの表示範囲を出たら画面送りする（モックと同じ。上の白枠も追従する）。
- * ヘッダーの「再生位置に追従」（F。issue #40）がオフなら送らない。 */
-export function follow() {
-  if (!S.vd || S.drag || !G.follow) return;
+/** 再生位置がピアノロールの表示範囲を出たら画面送りする（モックと同じ。上の白枠も追従する）。規則は follow.js:
+ * 停止中は送らない（locate: DAW 側で再生位置が動いた知らせのときだけ 1 回寄せる）。再生中に利用者が表示を動かしたら、再生位置が
+ * 範囲に戻るか次の再生まで送らない。ヘッダーの「再生位置に追従」（F。issue #40）がオフなら送らない。 */
+export function follow({ locate = false } = {}) {
+  locateNext = locate;
+  if (!S.vd) return;
   const head = araEditorHead();
-  if (head == null) return;
-  const t = head - S.off;
+  const t = head == null ? null : head - S.off;
   const total = totalSec();
-  if (t < 0 || t > total) return;                   // 編集中のトラックの外（他のトラックだけ鳴っている）
+  // 編集中のトラックの外（他のトラックだけ鳴っている）は対象外
+  const go = lowerFollow.check({ playing: S.playing, locate, view: S.view, head: t, valid: t != null && t >= 0 && t <= total });
+  if (!go || S.drag || !G.follow) return;
   const v = S.view;
-  if (t >= v.t0 && t <= v.t0 + v.span) return;
   v.t0 = clamp(t - v.span * 0.02, 0, Math.max(0, total - v.span));
+  lowerFollow.placed(v);
   render();
 }
 

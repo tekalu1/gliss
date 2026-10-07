@@ -216,7 +216,10 @@ export function onPlayhead(p) {
   const loopChanged = A.transport && performance.now() > A.loopHold
     && JSON.stringify(loop) !== JSON.stringify(S.loop);
   if (loopChanged) { S.loop = loop; S.araLoopDraft = null; H.render?.(); }
-  H.follow?.();
+  // 停止中は追従しない。ただし DAW 側で再生位置が動いた（ロケート・シーク。1 ms 以上。再生から止まったときは、再生位置の見積もりと
+  // 0.15 秒以上離れた戻り）ときだけ、表示外なら 1 回寄せる（draw.js の follow・follow.js）
+  const locate = !playing && Number.isFinite(delta) && Math.abs(delta) > (was ? 0.15 : 0.001);
+  H.follow?.({ locate });
   H.movePlayhead?.();
   if (was !== playing) {
     H.renderToolbar?.();
@@ -475,8 +478,11 @@ export async function araAfterSession() {
 }
 
 /** 起動（main.js の boot の最後）。host: 画面の部品、b: bootstrap の返り値。 */
+/** 画面の部品を渡す（araBoot が使う。単体試験も使う）。 */
+export function araSetHost(host) { H = host; }
+
 export async function araBoot(host, b) {
-  H = host;
+  araSetHost(host);
   A.transport = b.hostCanTransport !== false;
   A.fileGuide = b.fileGuide === true;
   A.compare = !!b.compare;

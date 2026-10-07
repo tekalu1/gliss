@@ -50,6 +50,7 @@ import { dropBuffers, play, setGains, stop } from './audio.js';
 import { CUT_MIN_EDGE, covered, joinAt, normCuts, paintPiece, pieces } from './clipedit.js';
 import { closeMenu, justClosed, menuOpen, openClipMenu, openGuideMenu, openRulerMenu, openTrackMenu } from './menus.js';
 import { wheelAction } from './commands.js';
+import { createFollower } from './follow.js';
 import { G, currentDiv, snapStep, snapTime, tempo, ticks, timeSnapOn } from './grid.js';
 import { ARA, araCacheOf, araExtent, araLoop, araLoopHold, araRegions, araScale, araSeek, araSig, araToRep } from './ara.js';
 import {
@@ -643,12 +644,18 @@ function drawRuler() {
   ruler.innerHTML = s;
 }
 
-function moveHead() {
-  // 再生位置に追従（issue #40）: ズームしている上の表示も、再生位置が出たら送る（全体表示なら要らない）
-  if (S.playing && G.follow && tvView && !dr && !hd && (S.head < range[0] || S.head > range[1])) {
+const upperFollow = createFollower();     // 上の表示の追従の規則（follow.js。下のピアノロールとは別に覚える）
+
+function moveHead({ locate = false } = {}) {
+  // 再生位置に追従（issue #40）: ズームしている上の表示も、再生位置が出たら送る（全体表示なら要らない）。
+  // 停止中は送らない（DAW 側で再生位置が動いたときだけ 1 回）。再生中に利用者が動かしたら、位置が戻るか次の再生まで送らない
+  if (!tvView) upperFollow.forget();
+  else {
     const w = worldRange();
-    if (S.head >= w[0] && S.head <= w[1]) {
+    const go = upperFollow.check({ playing: S.playing, locate, view: tvView, head: S.head, valid: S.head >= w[0] && S.head <= w[1] });
+    if (go && G.follow && !dr && !hd) {
       tvView = clampTv({ t0: S.head - tvView.span * 0.02, span: tvView.span });
+      if (tvView) upperFollow.placed(tvView);
       renderTracks();
       return;                       // renderTracks が再生位置も描く
     }
