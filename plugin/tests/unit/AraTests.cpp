@@ -8,6 +8,7 @@
 #include "ara/PluginState.h"
 #include "ara/PreviewAudio.h"
 #include "ara/RegionMapping.h"
+#include "ara/SelectionPolicy.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_core/juce_core.h>
@@ -974,6 +975,127 @@ public:
     }
 };
 
+class AraSelectionTests final : public juce::UnitTest
+{
+public:
+    AraSelectionTests() : juce::UnitTest ("ARA selection policy", "Gliss") {}
+
+    using P = SelectionPolicy;
+
+    static P::Region reg (const char* id, const char* mod, double a = 0.0, double b = 10.0)
+    {
+        P::Region r;
+        r.id = id;
+        r.modification = mod;
+        r.songStart = a;
+        r.songEnd = b;
+        return r;
+    }
+
+    static P::Input input (const void* view, std::vector<P::Region> regions, std::vector<P::Sequence> sequences = {}, double playhead = 0.0)
+    {
+        P::Input in;
+        in.view = view;
+        in.regions = std::move (regions);
+        in.sequences = std::move (sequences);
+        in.playheadSec = playhead;
+        return in;
+    }
+
+    void runTest() override
+    {
+        int viewA = 0, viewB = 0;
+
+        beginTest ("the first selection is adopted; a click on another region switches");
+        {
+            P p;
+            auto d = p.decide (input (&viewA, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modA" && d.reason == "first-selection", d.reason);
+            d = p.decide (input (&viewA, { reg ("r2", "modB") }));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modB", "clicking another track's region must switch");
+            expect (p.currentModification() == "modB");
+        }
+
+        beginTest ("the same selection again (or a selection that still holds the current modification) changes nothing");
+        {
+            P p;
+            p.decide (input (&viewA, { reg ("r1", "modA") }));
+            auto d = p.decide (input (&viewA, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::ignore && d.reason == "unchanged", d.reason);
+            // 別のリージョンも選ばれたが、今の修飾のリージョンが残っている: 最初のリージョンへ行かない
+            d = p.decide (input (&viewA, { reg ("r9", "modC"), reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::ignore && d.reason == "same-region" && p.currentModification() == "modA", d.reason);
+            // 今の修飾の別のリージョンが選ばれた: 修飾は同じ、リージョンだけ更新（画面へ知らせる）
+            d = p.decide (input (&viewA, { reg ("r5", "modA", 20.0, 30.0) }));
+            expect (d.kind == P::Kind::adopt && d.region.id == "r5" && d.region.modification == "modA", d.reason);
+            // リージョン列（トラック）を選んだ: 今の修飾のリージョンがその中にあれば保つ
+            P::Sequence q;
+            q.id = "q1";
+            q.regions = { reg ("r7", "modZ", 0.0, 5.0), reg ("r5", "modA", 20.0, 30.0) };
+            d = p.decide (input (&viewA, {}, { q }, 1.0));
+            expect (d.kind == P::Kind::ignore && p.currentModification() == "modA", d.reason);
+        }
+
+        beginTest ("an empty selection changes nothing and is not remembered as the last selection");
+        {
+            P p;
+            p.decide (input (&viewA, { reg ("r1", "modA") }));
+            auto d = p.decide (input (&viewA, {}));
+            expect (d.kind == P::Kind::ignore && d.reason == "empty");
+            expect (p.currentModification() == "modA");
+            d = p.decide (input (&viewA, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::ignore);                 // 同じ選択に戻っただけ
+            // リージョンの無い（修飾の無い）選択も変えない
+            d = p.decide (input (&viewA, { reg ("r3", "") }));
+            expect (d.kind == P::Kind::ignore && d.reason == "no-modification" && p.currentModification() == "modA", d.reason);
+        }
+
+        beginTest ("a track selection picks the region nearest the playhead only when the current modification is not in it");
+        {
+            P p;
+            P::Sequence q;
+            q.id = "q1";
+            q.regions = { reg ("r1", "modA", 0.0, 10.0), reg ("r2", "modB", 20.0, 30.0), reg ("r3", "modC", 40.0, 50.0) };
+            auto d = p.decide (input (&viewA, {}, { q }, 42.0));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modC" && d.reason == "first-selection", d.reason);
+            P::Sequence other;
+            other.id = "q2";
+            other.regions = { reg ("r8", "modX", 0.0, 10.0), reg ("r9", "modY", 100.0, 110.0) };
+            d = p.decide (input (&viewA, {}, { other }, 99.0));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modY" && d.reason == "nearest-in-sequence", d.reason);
+        }
+
+        beginTest ("hidden or other editors do not overwrite the selection while an editor is showing");
+        {
+            P p;
+            p.decide (input (&viewA, { reg ("r1", "modA") }));
+            p.setViewShowing (&viewA, true);
+            auto d = p.decide (input (&viewB, { reg ("r2", "modB") }));      // 隠れた別のエディタの選択
+            expect (d.kind == P::Kind::ignore && d.reason == "hidden-editor" && p.currentModification() == "modA", d.reason);
+            // 見えているエディタの選択は受ける
+            d = p.decide (input (&viewA, { reg ("r2", "modB") }));
+            expect (d.kind == P::Kind::adopt && p.currentModification() == "modB");
+            // 別のエディタが見えるようになれば、そちらも受ける（見えているエディタが 1 つも無ければ全部受ける）
+            p.setViewShowing (&viewB, true);
+            p.setViewShowing (&viewA, false);
+            d = p.decide (input (&viewB, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::adopt && p.currentModification() == "modA");
+            p.setViewShowing (&viewB, false);
+            expect (p.showingCount() == 0);
+            d = p.decide (input (&viewA, { reg ("r4", "modD") }));
+            expect (d.kind == P::Kind::adopt && p.currentModification() == "modD", "with no showing editor every view is accepted");
+        }
+
+        beginTest ("signature lists regions and sequences in the order the DAW sent them");
+        {
+            P::Sequence q;
+            q.id = "q1";
+            expectEquals (P::signatureOf (input (&viewA, { reg ("r1", "a"), reg ("r2", "b") }, { q })), juce::String ("r:r1,r:r2,s:q1"));
+            expectEquals (P::signatureOf (input (&viewA, {})), juce::String());
+        }
+    }
+};
+
 static AraArchiveTests araArchiveTests;
 static AraRegionTests araRegionTests;
 static AraPlayheadTests araPlayheadTests;
@@ -981,5 +1103,6 @@ static AraPreviewTests araPreviewTests;
 static AraEngineCallTests araEngineCallTests;
 static AraFilesTests araFilesTests;
 static AraDocumentSyncTests araDocumentSyncTests;
+static AraSelectionTests araSelectionTests;
 
 } // namespace gliss

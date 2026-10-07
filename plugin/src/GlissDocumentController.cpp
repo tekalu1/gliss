@@ -925,47 +925,88 @@ juce::var GlissDocumentController::describeSelection() const
                      { "region", selectionRegion.toVar() } });
 }
 
-void GlissDocumentController::editorSelectionChanged (const juce::ARAViewSelection& selection)
+void GlissDocumentController::editorVisibilityChanged (const void* view, bool showing)
 {
-    const juce::ARAPlaybackRegion* chosen = nullptr;
+    selectionPolicy.setViewShowing (view, showing);
+    diag::logAlways ("selection: editor view " + juce::String::toHexString ((juce::pointer_sized_int) view)
+                     + (showing ? " shown" : " hidden") + " (showing editors " + juce::String (selectionPolicy.showingCount()) + ")");
+}
+
+void GlissDocumentController::editorSelectionChanged (const void* view, const juce::ARAViewSelection& selection)
+{
+    // 選択の中身を ARA の型を使わない形に写す。リージョン・リージョン列には persistentID が無いので、同じ文書の中で変わらない
+    // 識別（リージョン = regionId、リージョン列 = オブジェクトの番地）と、リージョンの修飾の persistentID を使う
+    SelectionPolicy::Input in;
+    in.view = view;
+    in.playheadSec = playheadState.read().songSec;
+    const auto toRegion = [] (const juce::ARAPlaybackRegion* r)
+    {
+        SelectionPolicy::Region out;
+        out.id = regionId (r);
+        out.songStart = r->getStartInPlaybackTime();
+        out.songEnd = r->getEndInPlaybackTime();
+
+        if (auto* m = r->getAudioModification())
+            out.modification = juce::String (m->getPersistentID());
+
+        return out;
+    };
+    std::map<juce::String, const juce::ARAPlaybackRegion*> byId;
 
     for (auto* region : selection.getPlaybackRegions<juce::ARAPlaybackRegion>())
     {
-        chosen = region;
-        break;
+        in.regions.push_back (toRegion (region));
+        byId[regionId (region)] = region;
     }
 
-    // リージョンを選んでいなければ、選んだ DAW のトラックの、再生位置に近いリージョン。
-    if (chosen == nullptr)
+    for (auto* sequence : selection.getRegionSequences<juce::ARARegionSequence>())
     {
-        const auto songSec = playheadState.read().songSec;
-        double best = std::numeric_limits<double>::max();
+        SelectionPolicy::Sequence s;
+        s.id = "q" + juce::String::toHexString ((juce::pointer_sized_int) sequence);
 
-        for (auto* sequence : selection.getRegionSequences<juce::ARARegionSequence>())
+        for (auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
         {
-            for (auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
-            {
-                const auto start = region->getStartInPlaybackTime();
-                const auto end = region->getEndInPlaybackTime();
-                const auto distance = songSec < start ? start - songSec : (songSec > end ? songSec - end : 0.0);
-
-                if (distance < best)
-                {
-                    best = distance;
-                    chosen = region;
-                }
-            }
-
-            if (chosen != nullptr)
-                break;
+            s.regions.push_back (toRegion (region));
+            byId[regionId (region)] = region;
         }
+
+        in.sequences.push_back (std::move (s));
     }
 
-    if (chosen == nullptr || chosen->getAudioModification() == nullptr)
+    const auto before = selectionPolicy.currentModification();
+    const auto decision = selectionPolicy.decide (in);
+
+    // 実機で Studio Pro が何を送ったかを後から調べるための行（常に書く。同じ行は省く。Diagnostics::logAlways）
+    juce::StringArray regionList, sequenceList;
+
+    for (const auto& r : in.regions)
+        regionList.add (r.id + "=" + (r.modification.isEmpty() ? juce::String ("-") : r.modification));
+
+    for (const auto& q : in.sequences)
+    {
+        juce::StringArray members;
+
+        for (const auto& r : q.regions)
+            members.add (r.id + "=" + (r.modification.isEmpty() ? juce::String ("-") : r.modification));
+
+        sequenceList.add (q.id + "[" + members.joinIntoString (" ") + "]");
+    }
+
+    diag::logAlways ("selection: view " + juce::String::toHexString ((juce::pointer_sized_int) view)
+                     + " regions [" + regionList.joinIntoString (" ") + "] sequences [" + sequenceList.joinIntoString (" ")
+                     + "] -> " + (decision.kind == SelectionPolicy::Kind::adopt ? "adopted " + decision.region.modification : juce::String ("ignored"))
+                     + " (" + decision.reason + "; was " + (before.isEmpty() ? juce::String ("none") : before) + ")");
+
+    if (decision.kind != SelectionPolicy::Kind::adopt)
         return;
 
-    selectionAraId = juce::String (chosen->getAudioModification()->getPersistentID());
-    selectionRegion = timesOf (chosen);
+    const auto found = byId.find (decision.region.id);
+
+    if (found == byId.end())
+        return;
+
+    selectionAraId = decision.region.modification;
+    selectionRegion = timesOf (found->second);
     hasSelection = true;
     sendEvent ("selection", describeSelection());
 }
@@ -1166,6 +1207,12 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
     if (! previewAudio->hasRenderer()) { done (result (false, "no-editor-renderer")); return; }
     if (playheadState.read().playing) { done (result (false, "host-playing")); return; }
 
+    if ((bool) arg.getProperty ("local", false))
+    {
+        previewLocal (arg, std::move (done));
+        return;
+    }
+
     const juce::File file (arg.getProperty ("path", {}).toString());
     if (! isReadableByEditor (file) || ! file.hasFileExtension ("wav"))
     {
@@ -1186,7 +1233,7 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
         juce::WavAudioFormat wav;
         std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (file.createInputStream().release(), true));
         if (reader != nullptr && reader->sampleRate > 0 && reader->lengthInSamples > 1
-            && reader->lengthInSamples <= (juce::int64) (reader->sampleRate * 15.0)
+            && reader->lengthInSamples <= (juce::int64) (reader->sampleRate * maxPreviewSeconds)
             && reader->numChannels > 0 && reader->numChannels <= 2)
         {
             juce::AudioBuffer<float> decoded ((int) reader->numChannels, (int) reader->lengthInSamples);
@@ -1204,19 +1251,140 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
         }
 
         diag::log ("audition-latency stage=decode-end ms=" + juce::String (juce::Time::getMillisecondCounter()));
-        auto pending = std::make_shared<std::unique_ptr<PreviewAudio::Clip>> (std::move (clip));
-        juce::MessageManager::callAsync ([this, token, audio, generation, cancellationEpoch, pending, done]() mutable
+        deliverPreview (token, audio, generation, cancellationEpoch, std::move (clip), "invalid-audio", done);
+    });
+}
+
+void GlissDocumentController::deliverPreview (std::weak_ptr<bool> token, std::shared_ptr<PreviewAudio> audio,
+                                              std::uint64_t generation, std::uint64_t cancellationEpoch,
+                                              std::unique_ptr<PreviewAudio::Clip> clip, const juce::String& failure, Completion done)
+{
+    auto pending = std::make_shared<std::unique_ptr<PreviewAudio::Clip>> (std::move (clip));
+    juce::MessageManager::callAsync ([this, token, audio, generation, cancellationEpoch, pending, failure, done]() mutable
+    {
+        if (token.lock() == nullptr) return;
+        if (generation != previewGeneration.load() || cancellationEpoch != audio->getCancellationEpoch())
+        { done (object ({ { "ok", false }, { "reason", "cancelled" } })); return; }
+        if (*pending == nullptr) { done (object ({ { "ok", false }, { "reason", failure } })); return; }
+        if (playheadState.read().playing) { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
+        if (! audio->publish (std::move (*pending), cancellationEpoch))
+        { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
+        diag::log ("audition-latency stage=published ms=" + juce::String (juce::Time::getMillisecondCounter()));
+        done (object ({ { "ok", true } }));
+    });
+}
+
+/** ずらさない試聴（cents = 0）を、エンジンを呼ばずに、プラグインが持つ編集済みの音（EditedPcm）と DAW のソースから作って鳴らす。
+    ソースの範囲を読み、編集済みの窓が重なる所を置き換え、モノラルにして公開する（エンジンの render_audition の cents = 0 と同じ中身。
+    窓の中は再生と同じ PCM、窓の外は原音）。キャッシュが最新でない（同期の最中）ときは、allow_stale でなければ断る（画面がエンジンで作る）。 */
+void GlissDocumentController::previewLocal (const juce::var& arg, Completion done)
+{
+    const auto fail = [&done] (const juce::String& reason) { done (object ({ { "ok", false }, { "reason", reason } })); };
+    const auto araId = arg.getProperty ("ara_id", {}).toString();
+    const double startSec = arg.getProperty ("start_sec", 0.0);
+    const double endSec = arg.getProperty ("end_sec", 0.0);
+    const bool allowStale = (bool) arg.getProperty ("allow_stale", false);
+
+    if (araId.isEmpty() || ! std::isfinite (startSec) || ! std::isfinite (endSec) || ! (endSec > startSec)
+        || endSec - startSec > maxPreviewSeconds || getDocument() == nullptr)
+    {
+        fail ("unsupported");
+        return;
+    }
+
+    juce::ARAAudioSource* source = nullptr;
+    GlissAudioModification* modification = nullptr;
+
+    for (auto* candidate : getDocument()->getAudioSources<juce::ARAAudioSource>())
+        for (auto* m : candidate->getAudioModifications<GlissAudioModification>())
+            if (juce::String (m->getPersistentID()) == araId)
+            {
+                source = candidate;
+                modification = m;
+            }
+
+    const auto entry = source != nullptr ? sourceEntries.find (source) : sourceEntries.end();
+
+    if (modification == nullptr || entry == sourceEntries.end() || entry->second.samples == nullptr
+        || ! source->isSampleAccessEnabled() || source->getSampleRate() <= 0.0 || source->getChannelCount() < 1)
+    {
+        fail ("not-cached");
+        return;
+    }
+
+    if (! allowStale && sync->getModStatus (araId).state != "ready")
+    {
+        fail ("stale");
+        return;
+    }
+
+    const auto sampleRate = source->getSampleRate();
+    const auto channels = juce::jmin ((int) source->getChannelCount(), 8);
+    const auto first = juce::jlimit<juce::int64> (0, source->getSampleCount(), (juce::int64) std::llround (startSec * sampleRate));
+    const auto last = juce::jlimit<juce::int64> (0, source->getSampleCount(), (juce::int64) std::llround (endSec * sampleRate));
+
+    if (last - first < 2)
+    {
+        fail ("unsupported");
+        return;
+    }
+
+    targetPreview (araId);
+
+    const auto generation = previewGeneration.fetch_add (1) + 1;
+    diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()) + " local=1");
+    const auto audio = previewAudio;
+    const auto cancellationEpoch = audio->getCancellationEpoch();
+    auditionPool.addJob ([this, token = std::weak_ptr<bool> (alive), samples = entry->second.samples, pcm = modification->getEditedPcm(),
+                          sampleRate, channels, first, last, generation, cancellationEpoch, audio, done = std::move (done)]
+    {
+        const auto frames = (int) (last - first);
+        juce::AudioBuffer<float> raw (channels, frames);
+        raw.clear();
+        std::vector<float*> pointers;
+
+        for (int ch = 0; ch < channels; ++ch)
+            pointers.push_back (raw.getWritePointer (ch));
+
+        std::unique_ptr<PreviewAudio::Clip> clip;
+
+        if (samples->read (pointers.data(), channels, first, frames))
         {
-            if (token.lock() == nullptr) return;
-            if (generation != previewGeneration.load() || cancellationEpoch != audio->getCancellationEpoch())
-            { done (object ({ { "ok", false }, { "reason", "cancelled" } })); return; }
-            if (*pending == nullptr) { done (object ({ { "ok", false }, { "reason", "invalid-audio" } })); return; }
-            if (playheadState.read().playing) { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
-            if (! audio->publish (std::move (*pending), cancellationEpoch))
-            { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
-            diag::log ("audition-latency stage=published ms=" + juce::String (juce::Time::getMillisecondCounter()));
-            done (object ({ { "ok", true } }));
-        });
+            if (pcm != nullptr)
+                if (const auto snapshot = pcm->getSnapshot(); snapshot != nullptr && snapshot->hasWindows()
+                                                              && std::abs (snapshot->getSampleRate() - sampleRate) < 1.0)
+                {
+                    const auto& windows = snapshot->getWindows();
+
+                    for (auto i = snapshot->findFirstWindowEndingAfter (first); i < windows.size() && windows[i].startFrame < last; ++i)
+                    {
+                        const auto& w = windows[i];
+                        const auto from = juce::jmax (first, w.startFrame);
+                        const auto to = juce::jmin (last, w.getEndFrame());
+
+                        if (to <= from || w.getNumChannels() < 1)
+                            continue;
+
+                        for (int ch = 0; ch < channels; ++ch)
+                        {
+                            const auto* src = w.getReadPointer (juce::jmin (ch, w.getNumChannels() - 1));
+                            std::copy (src + (from - w.startFrame), src + (to - w.startFrame), pointers[(size_t) ch] + (from - first));
+                        }
+                    }
+                }
+
+            clip = std::make_unique<PreviewAudio::Clip>();
+            clip->sampleRate = sampleRate;
+            auto& mono = clip->channels.emplace_back ((size_t) frames, 0.0f);
+
+            for (int ch = 0; ch < channels; ++ch)
+                for (int i = 0; i < frames; ++i)
+                    mono[(size_t) i] += raw.getSample (ch, i) / (float) channels;
+
+            PreviewAudio::fadeEdges (*clip);
+        }
+
+        deliverPreview (token, audio, generation, cancellationEpoch, std::move (clip), "not-cached", done);
     });
 }
 

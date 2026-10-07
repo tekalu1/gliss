@@ -7,6 +7,7 @@
 #include "ara/DocumentSync.h"
 #include "ara/PlayheadState.h"
 #include "ara/PreviewAudio.h"
+#include "ara/SelectionPolicy.h"
 #include "cache/EditedPcm.h"
 
 #include <map>
@@ -79,7 +80,9 @@ public:
     bool isReadableByEditor (const juce::File& file) override;
     void addListener (Listener*) override;
     void removeListener (Listener*) override;
-    void editorSelectionChanged (const juce::ARAViewSelection& selection) override;
+    void editorSelectionChanged (const void* view, const juce::ARAViewSelection& selection) override;
+    void editorVisibilityChanged (const void* view, bool showing) override;
+    bool hasEditorSelection() const override { return hasSelection; }
 
 protected:
     void willBeginEditing (juce::ARADocument*) override;
@@ -167,6 +170,13 @@ private:
     std::optional<double> toSongSeconds (const juce::var& arg, const juce::String& secKey) const;
     /** 試聴するノートの修飾（ara_id）を持つ EditorRenderer だけが試聴を足すようにする（空なら絞らない）。 */
     void targetPreview (const juce::String& araId);
+    /** 準備した試聴のクリップを、取り消されていなければ EditorRenderer へ公開して done を呼ぶ（メッセージスレッドへ戻って行う）。 */
+    void deliverPreview (std::weak_ptr<bool> token, std::shared_ptr<PreviewAudio> audio, std::uint64_t generation,
+                         std::uint64_t cancellationEpoch, std::unique_ptr<PreviewAudio::Clip> clip, const juce::String& failure,
+                         Completion done);
+    /** preview('start', { local: true, ara_id, start_sec, end_sec, allow_stale })。エンジンを呼ばない試聴（上の previewLocal の説明）。 */
+    void previewLocal (const juce::var& arg, Completion done);
+    static constexpr double maxPreviewSeconds = 60.0;   // 試聴 1 回の長さの上限（これを超えるとエンジンの WAV は読まない）
 
     juce::ReadWriteLock processBlockLock;
     bool editing = false;
@@ -189,6 +199,7 @@ private:
     std::vector<TrackView> tracks;
 
     juce::ListenerList<Listener> listeners;
+    SelectionPolicy selectionPolicy;   // DAW の選択を採るかの判断（ARA の型を使わない）
     juce::String selectionAraId;
     RegionTimes selectionRegion;
     bool hasSelection = false;

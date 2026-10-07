@@ -125,7 +125,9 @@ public:
     void addListener (Listener* l) override { listeners.addIfNotAlreadyThere (l); }
     void removeListener (Listener* l) override { listeners.removeFirstMatchingValue (l); }
 
-    void editorSelectionChanged (const juce::ARAViewSelection&) override { ++selectionChanges; }
+    void editorSelectionChanged (const void*, const juce::ARAViewSelection&) override { ++selectionChanges; }
+    void editorVisibilityChanged (const void*, bool) override {}
+    bool hasEditorSelection() const override { return selectionChanges > 0; }
 
     /** ドキュメントの知らせを、登録しているエディタ全部へ送る。 */
     void emit (const juce::String& name, const juce::var& data)

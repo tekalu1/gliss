@@ -61,8 +61,15 @@ public:
     virtual void addListener (Listener*) = 0;
     virtual void removeListener (Listener*) = 0;
 
-    /** エディタの EditorView で DAW の選択が変わった。C3 が track_id・region の形にして "selection" のイベントで返す。 */
-    virtual void editorSelectionChanged (const juce::ARAViewSelection& selection) = 0;
+    /** エディタの EditorView（view = その識別）で DAW の選択が変わった。SelectionPolicy が編集対象を切り替えるかを決め、
+        切り替えるなら track_id・region の形にして "selection" のイベントで返す。 */
+    virtual void editorSelectionChanged (const void* view, const juce::ARAViewSelection& selection) = 0;
+
+    /** エディタの窓が見える・見えなくなった（隠れた・別のインスタンスのエディタの選択は、共有する選択を上書きしない）。 */
+    virtual void editorVisibilityChanged (const void* view, bool showing) = 0;
+
+    /** DAW の選択をもう 1 度でも受けたか（開いた直後のエディタが、すでにある選択を上書きしないための問い合わせ）。 */
+    virtual bool hasEditorSelection() const = 0;
 };
 
 } // namespace gliss
