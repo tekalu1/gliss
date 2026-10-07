@@ -14,7 +14,7 @@
   - ログは stderr ではなく <project>/engine.log に自前で書く。
 """
 
-__version__ = "0.1.0-beta.13"
+__version__ = "0.1.0-beta.14"
 
 HOP_S = 0.010          # 解析の共通ホップ（10 ms）
 XFADE_MS = 20.0        # 編集区間と原音のつなぎ目のクロスフェード長
