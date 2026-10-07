@@ -75,7 +75,8 @@ private:
 //==============================================================================
 #if GLISS_TEST_HOOKS
 /** 試験用（GLISS_TEST_BRIDGE_DIR。CMake の GLISS_TEST_HOOKS のビルドだけ）: 画面の engineCall の代わり。フォルダの <名前>.call.json（{tool, args}）を順に
-    engineCall に渡し、答えを <名前>.result.json に書く（plugin/tests/aratest の GlissARATest -changes が使う）。
+    engineCall に渡し、答えを <名前>.result.json に書く（plugin/tests/aratest の GlissARATest -changes が使う）。tool が "@preview" のときは
+    画面の preview の代わり（{tool: "@preview", op, args}。GlissHostCheck --ara-preview が使う）。
     args の文字列 "@ara:<修飾の persistentID>" はその修飾のトラックの id に置き換える。メッセージスレッドで動く。 */
 class GlissDocumentController::TestBridge final : private juce::Timer
 {
@@ -110,14 +111,21 @@ private:
                     o->setProperty (p.name, owner.sync->getModStatus (p.value.toString().fromFirstOccurrenceOf ("@ara:", false, false)).trackId);
 
         *busy = true;
-        owner.engineCall (request.getProperty ("tool", {}).toString(), args,
-                          [out = dir.getChildFile (base + ".result.json"), tmp = dir.getChildFile (base + ".result.tmp"), flag = busy]
-                          (const juce::var& result)
+        auto answer = [out = dir.getChildFile (base + ".result.json"), tmp = dir.getChildFile (base + ".result.tmp"), flag = busy]
+                      (const juce::var& result)
         {
             tmp.replaceWithText (juce::JSON::toString (result, true));
             tmp.moveFileTo (out);
             *flag = false;
-        });
+        };
+        const auto tool = request.getProperty ("tool", {}).toString();
+
+        // "@preview": 画面の preview（{op, args}）の代わり。args の requester（試聴を求めたエディタの EditorRenderer の id）は、
+        // 本物の GlissEditor が足すもの（EditorWebView の preview）と同じ名前
+        if (tool == "@preview")
+            owner.preview (request.getProperty ("op", "start").toString(), args, std::move (answer));
+        else
+            owner.engineCall (tool, args, std::move (answer));
     }
 
     GlissDocumentController& owner;

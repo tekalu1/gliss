@@ -15,7 +15,11 @@
 #      access is switched off and on, and the host reports a change of the source's samples. The original sound keeps playing
 #      each time (the renderer replaces its source readers and region table without prepareToPlay), and plugin.log has the
 #      renderer lines (prepare, source reader replaced, regions synced, release)
-#   Checks 1-3, 5, 6 and 6b run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
+#   6c. GlissHostCheck --ara-preview: two plug-in instances (editor renderers) bound to one ARA document; a preview asked for
+#      by one of them (the plug-in's test bridge, "@preview", with the requester's editor renderer id) is added to that
+#      instance's output only, also when no editor renderer covers the previewed modification and another instance owned
+#      the previous preview
+#   Checks 1-3, 5, 6, 6b and 6c run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
 #   worktree's .venv, cwd = this worktree's engine, Praat for the pitch, a temporary work folder):
 #   7. ARA SDK TestHost, all test cases
 #   8. GlissARATest (plugin/tests/aratest): a test edit (GLISS_TEST_EDIT) -> render -> archive -> restore in another work
@@ -197,6 +201,21 @@ try {
         @{ GLISS_ENGINE_DISABLED = '1'; GLISS_PLUGIN_LOG_FILE = $playbackLog }
     $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
     Report 'GlissHostCheck --ara-playback (readers and regions after prepare)' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+    # 6c. two plug-in instances on one document: only the instance that asked for a preview adds it (test bridge "@preview")
+    $previewBridge = Join-Path $work 'ara-preview-bridge'
+    $previewTrace = Join-Path $work 'ara-preview-trace'
+    foreach ($d in @($previewBridge, $previewTrace)) {
+        if (Test-Path $d) { [System.IO.Directory]::Delete($d, $true) }
+        New-Item -ItemType Directory -Force $d | Out-Null
+    }
+    $report = Join-Path $work 'ara-preview-report.txt'
+    $code = Invoke-Checked $hostCheck @('--ara-preview', $report, $gliss, $previewBridge, $previewTrace) 'ara-preview' `
+        @{ GLISS_ENGINE_DISABLED = '1'; GLISS_TEST_BRIDGE_DIR = $previewBridge; GLISS_ARA_TRACE_DIR = $previewTrace
+           GLISS_PLUGIN_LOG_FILE = (Join-Path $work 'ara-preview-plugin.log') }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    Report 'GlissHostCheck --ara-preview (the preview is added by the instance that asked)' ($code -eq 0) "exit=$code $summary"
     if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
 
     if (-not $EnginePython -or -not (Test-Path $EnginePython)) {

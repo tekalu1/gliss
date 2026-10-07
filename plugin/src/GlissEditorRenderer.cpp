@@ -8,6 +8,7 @@ GlissEditorRenderer::GlissEditorRenderer (ARA::PlugIn::DocumentController* contr
     : ARAEditorRenderer (controller), previewAudio (std::move (preview))
 {
     rendererId = previewAudio->addRenderer();
+    diag::log ("preview: editor renderer " + juce::String ((juce::int64) rendererId) + " created");
 }
 
 GlissEditorRenderer::~GlissEditorRenderer()
