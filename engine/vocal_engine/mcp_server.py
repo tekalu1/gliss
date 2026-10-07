@@ -2049,7 +2049,7 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
     if p.reload_if_changed():
         _invalidate_renderer()
     from .render.region import RegionRenderer, audition as _aud
-    from .mcp_ara import _rev_parts, audition_pcm, audition_renderer, audition_segs
+    from .mcp_ara import _rev_parts, audition_pcm, audition_region, audition_renderer, audition_segs
     name = resolve_backend_name(backend)
     with _prep_yield():
         p.ensure_analyzed()
@@ -2096,7 +2096,12 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
                 rr = RegionRenderer.for_project(p, backend=backend, channels="mono",
                                                 audition_local=True)
                 _state["region"][(name, "mono", "audition")] = rr
-            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs)
+            region = None
+            if ara_id and abs(float(cents)) >= 1e-6:     # ピッチをドラッグしている間: 曲全体の層を当てない（音は同じ）
+                n = p.note(note_id)
+                region = audition_region(ara_id, p, n.start_sec if start_sec is None else float(start_sec),
+                                         n.end_sec if end_sec is None else float(end_sec))
+            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs, region=region)
         if p.view_key() != view_rev or _rev_parts(p) != (asig, erev):
             raise ProjectConflict("試聴中に解析または編集の版が変わった。結果を破棄した")
     if y.ndim == 2 and y.shape[1] > 1:

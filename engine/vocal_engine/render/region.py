@@ -331,7 +331,7 @@ def render_region(project, start_sec=None, end_sec=None, backend=None, channels=
     }
 
 
-def audition_segments(project, note_id, cents=0.0):
+def audition_segments(project, note_id, cents=0.0, region=None):
     """ノートを cents だけ動かした**つもり**の Segment 列（プロジェクトは書き換えない。issue #27）。
 
     画面でピッチをドラッグしている間のプレビュー音用。確定した編集に、そのノートの pitch_shift を
@@ -345,13 +345,49 @@ def audition_segments(project, note_id, cents=0.0):
     edits = list(project.edits) + [Edit(id="audition", kind="pitch_shift",
                                         target=Target.note(note_id),
                                         params={"cents": float(cents)}, author="human")]
-    segs = layered_segments(project, edits)
+    segs = layered_segments(project, edits, region=region)
     from ..project.fades import fade_segments
     return list(segs) + fade_segments(project)
 
 
+REGION_MARGIN_SEC = 1.0      # 要求範囲に掛かる（実際に再合成する）窓が、層を省いた範囲の端からこれ以上内側に収まること
+
+
+def _render_windows(project, segs, ia, ib, sr, audition_fast=True):
+    """`render_region` が (ia, ib) のために実際に再合成する窓 [(開始フレーム, 終了フレーム)]（同じ規則。長い窓の試聴は絞る）。"""
+    out = []
+    for a, b in windows_for(project, segs):
+        wa, wb = int(round(a * sr)), int(round(b * sr))
+        if wb <= ia or wa >= ib or wb - wa < 2:
+            continue
+        if audition_fast and wb - wa > 5 * sr:
+            has_timewarp = any((abs(s.ratio - 1.0) > 1e-9 or abs(s.move_ms) > 1e-9
+                                or s.silence_sec > 0.0) and s.end_sec >= a and s.start_sec <= b
+                               for s in segs)
+            if not has_timewarp:
+                wa, wb = _audition_window(a, b, ia, ib, sr, segs)
+        out.append((wa, wb))
+    return out
+
+
+def audition_segments_near(project, note_id, cents, t0, t1, region=None):
+    """audition_segments。region（素材の秒の範囲）が渡されたときは、その外へは層を当てない（ピッチのドラッグ 1 歩ごとに、
+    曲全体の層を当てる時間を省く）。要求範囲 [t0, t1] のために再合成する窓が region の端から REGION_MARGIN_SEC 以内に
+    触れたら、省かずに全体で作り直す。窓の中の Segment は省かないときと同じなので、音は変わらない。"""
+    if region is None or abs(float(cents)) < 1e-6:
+        return audition_segments(project, note_id, cents)
+    lo, hi = float(region[0]), float(region[1])
+    segs = audition_segments(project, note_id, cents, region=(lo, hi))
+    sr = int(project.take["sr"])
+    ia, ib = int(round(t0 * sr)), int(round(t1 * sr))
+    for wa, wb in _render_windows(project, segs, ia, ib, sr):
+        if wa / sr < lo + REGION_MARGIN_SEC or wb / sr > hi - REGION_MARGIN_SEC:
+            return audition_segments(project, note_id, cents)
+    return segs
+
+
 def audition(project, note_id, cents=0.0, start_sec=None, end_sec=None, renderer=None,
-             backend=None, segs=None):
+             backend=None, segs=None, region=None):
     """つかんだノートのプレビュー音: ノートを cents だけ動かしたつもりで [start, end) を再合成する。(y, info)
 
     範囲の既定はノートの編集前の範囲（タイミングを動かしたノートは画面が編集後の範囲を渡す）。
@@ -361,7 +397,7 @@ def audition(project, note_id, cents=0.0, start_sec=None, end_sec=None, renderer
     t0 = n.start_sec if start_sec is None else float(start_sec)
     t1 = n.end_sec if end_sec is None else float(end_sec)
     if segs is None or abs(float(cents)) >= 1e-6:
-        segs = audition_segments(project, note_id, cents)
+        segs = audition_segments_near(project, note_id, cents, t0, t1, region)
     y, info = render_region(project, t0, t1, backend=backend, renderer=renderer, segs=segs,
                             audition_fast=True)
     info = dict(info, note_id=note_id, cents=round(float(cents), 3))

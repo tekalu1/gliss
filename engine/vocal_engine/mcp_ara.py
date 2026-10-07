@@ -588,6 +588,14 @@ def audition_segs(ara_id, p, backend, asig, rev):
     return st.get("segs")
 
 
+def audition_region(ara_id, p, t0, t1, around=7.0):
+    """ピッチをドラッグしている間の試聴（cents ≠ 0）で層を当てる範囲（素材の秒）: 要求範囲 [t0, t1] の前後 around 秒。
+    再合成する窓は 5 秒を超えると要求範囲の近くに絞られる（`render.region._audition_window`）ので、窓が 5 秒以内でも
+    範囲の端（REGION_MARGIN_SEC）に触れない大きさにしてある。足りなければ `audition_segments_near` が省かずに作り直すので、
+    音は変わらない。"""
+    return max(0.0, float(t0) - around), float(t1) + around
+
+
 def audition_pcm(ara_id, p, backend, asig, rev, ia, ib):
     """ARAへ渡した同じ版のPCMに要求範囲が丸ごとあれば、その部分を返す。"""
     st = _render.get(ara_id)
@@ -600,26 +608,47 @@ def audition_pcm(ara_id, p, backend, asig, rev, ia, ib):
             or pcm["source_frames"] != int(p.take["frames"])):
         return None
     channels = pcm["channels"]
-    for w in pcm["windows"]:
-        first = w["start_frame"]
-        last = first + w["frames"]
-        if not (first <= ia < ib <= last):
-            continue
-        offset = w["byte_offset"] + (ia - first) * channels * 4
-        length = (ib - ia) * channels * 4
-        try:
-            with open(pcm["path"], "rb") as f:
-                f.seek(offset)
-                raw = f.read(length)
-            if len(raw) != length:
+    for part in _pcm_parts(pcm):
+        for w in part["windows"]:
+            first = w["start_frame"]
+            last = first + w["frames"]
+            if not (first <= ia < ib <= last):
+                continue
+            offset = w["byte_offset"] + (ia - first) * channels * 4
+            length = (ib - ia) * channels * 4
+            try:
+                with open(part["path"], "rb") as f:
+                    f.seek(offset)
+                    raw = f.read(length)
+                if len(raw) != length:
+                    return None
+            except OSError:
                 return None
-        except OSError:
-            return None
-        y = np.frombuffer(raw, dtype="<f4").reshape(-1, channels)
-        if channels > 1:
-            return y.mean(axis=1, dtype="float64"), (first, last)
-        return y[:, 0].copy(), (first, last)
+            y = np.frombuffer(raw, dtype="<f4").reshape(-1, channels)
+            if channels > 1:
+                return y.mean(axis=1, dtype="float64"), (first, last)
+            return y[:, 0].copy(), (first, last)
     return None
+
+
+def _pcm_parts(pcm):
+    """試聴に使える PCM のファイルの一覧 [{path, windows}]（新しいものが先）。ARA へ渡した再合成のファイルは、編集のたびに
+    変わった窓だけを持つので、変わっていない窓は前のファイルに残る（`parts`）。単一の {path, windows} の形も読む。"""
+    return pcm["parts"] if "parts" in pcm else [{"path": pcm["path"], "windows": pcm["windows"]}]
+
+
+def _kept_parts(previous, restore, sr, ch, n):
+    """前の PCM の一覧から、今回の再合成で書き直す範囲（restore: [[頭のフレーム, 長さ]]。保留の窓も入る）に掛からない窓を残す。
+    形式（周波数・チャンネル数・長さ）が違えば捨てる。"""
+    if not previous or previous["sr"] != int(sr) or previous["channels"] != int(ch) or previous["source_frames"] != int(n):
+        return []
+    kept = []
+    for part in _pcm_parts(previous):
+        ws = [w for w in part["windows"]
+              if not any(w["start_frame"] < r0 + rn and r0 < w["start_frame"] + w["frames"] for r0, rn in restore)]
+        if ws:
+            kept.append({"path": part["path"], "windows": ws})
+    return kept
 
 
 def _out_path(wd, ara_id):
@@ -1035,10 +1064,11 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     if remaining:
         _out_seq[0] += 1
         token = "%s~%d" % (rev, _out_seq[0])
-    previous_pcm = (st.get("audition_pcm") if st is not None and not reset
-                    and st.get("rev") == rev else None)
-    current_pcm = ({"path": path, "windows": out_windows, "channels": int(ch),
-                    "sr": int(sr), "source_frames": int(n)} if path else previous_pcm)
+    # 試聴に使う PCM: 今回書いた窓と、書き直していない前の窓（版をまたいで残す。変わっていない窓は今も正しい）
+    previous_pcm = st.get("audition_pcm") if st is not None and not reset else None
+    parts = ([{"path": path, "windows": out_windows}] if path else []) + _kept_parts(previous_pcm, restore, sr, ch, n)
+    current_pcm = ({"parts": parts[:KEEP_OUT - 1], "channels": int(ch), "sr": int(sr), "source_frames": int(n)}
+                   if parts else None)
     _render[ara_id] = {"rev": token, "segs": segs, "windows": [list(w) for w in wins],
                        "pending": _merge([list(w) for w in remaining]), "backend": name,
                        "channels": channels, "asig": asig,

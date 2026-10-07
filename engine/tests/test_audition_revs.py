@@ -172,3 +172,33 @@ def test_stale_segments_are_not_used_after_an_edit(ara, tmp_path):
     _ok(m.shift_pitch(100, note_id=notes[0]))         # 編集した後の版では、前の版の列を返さない
     asig2, erev2 = a._rev_parts(p)
     assert a.audition_segs("mod-A", p, "praat", asig2, "%s:%s" % (asig2, erev2)) is None
+
+
+def test_audition_reuses_unchanged_windows_across_revisions(ara, tmp_path):
+    """別の場所を編集して再合成しても、変わっていない窓の試聴は、前の版の PCM から返す（エンジンに作り直させない）。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(150, note_id=notes[0]))
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    assert _ok(m.render_audition(note_id=notes[0]))["timing_sec"]["ara_pcm_reused"]
+    _ok(m.shift_pitch(-120, note_id=notes[4]))               # 遠い別のノート（別の窓）
+    c.sync(a, "mod-A")
+    first = _ok(m.render_audition(note_id=notes[0]))
+    last = _ok(m.render_audition(note_id=notes[4]))
+    assert first["timing_sec"]["ara_pcm_reused"], "前の版の窓が残っているはず"
+    assert last["timing_sec"]["ara_pcm_reused"]
+    ia = round(m._state["project"].note(notes[0]).start_sec * SR)
+    ib = round(m._state["project"].note(notes[0]).end_sec * SR)
+    got = sf.read(first["path"], dtype="float32")[0]
+    np.testing.assert_array_equal(got, c.buf[ia:ib].mean(axis=1).astype("float32"))
+    # 同じ窓を直し直したら、その窓は新しいファイルから
+    _ok(m.shift_pitch(40, note_id=notes[0]))
+    c.sync(a, "mod-A")
+    again = _ok(m.render_audition(note_id=notes[0]))
+    assert again["timing_sec"]["ara_pcm_reused"]
+    got = sf.read(again["path"], dtype="float32")[0]
+    np.testing.assert_array_equal(got, c.buf[ia:ib].mean(axis=1).astype("float32"))

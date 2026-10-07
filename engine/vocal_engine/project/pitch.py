@@ -681,9 +681,10 @@ def _slice(seg, a, b):
                    silence_sec=0.0, gain=seg.gain)
 
 
-def apply_layers(segs, lay, render_version=RENDER_VERSION):
+def apply_layers(segs, lay, render_version=RENDER_VERSION, region=None):
     """Segment 列に層を当てる。窓の中の Segment はずらし量を点列（curve_points）にする。
-    render_version: 描画の版（`model.RENDER_VERSION`。1 なら層の Segment のつなぎ目で曲線の点を切らない = 0.1.0-beta.6 までの音）。"""
+    render_version: 描画の版（`model.RENDER_VERSION`。1 なら層の Segment のつなぎ目で曲線の点を切らない = 0.1.0-beta.6 までの音）。
+    region: (頭, 尻)。範囲に掛からない Segment は層を当てずに返す（範囲の中は省かないときと同じ。`layered_segments`）。"""
     from ..render.pipeline import Segment
     wins = lay.windows()
     if not wins:
@@ -730,7 +731,7 @@ def apply_layers(segs, lay, render_version=RENDER_VERSION):
 
     res = []
     for s in out:
-        if s.silence_sec > 0 or not inside(s):
+        if s.silence_sec > 0 or not inside(s) or (region is not None and (s.end_sec < region[0] or s.start_sec > region[1])):
             res.append(s)
             continue
         a, b = s.start_sec, s.end_sec
@@ -815,8 +816,11 @@ def _join_layer_pieces(segs, clip=True):
     return out
 
 
-def layered_segments(project, edits=None, render_version=None):
-    """再合成・書き出し・画面の曲線に使う Segment 列（層を当てたもの）。render_version を省くと曲の描画の版。"""
+def layered_segments(project, edits=None, render_version=None, region=None):
+    """再合成・書き出し・画面の曲線に使う Segment 列（層を当てたもの）。render_version を省くと曲の描画の版。
+
+    region: (頭, 尻)（素材の秒）。指定すると、この範囲に掛からない Segment には層を当てない（原音の基本の段のまま。その外は使わない
+    呼び出し専用: ピッチをドラッグしている間の試聴。範囲の外を当てる時間を省く）。範囲に掛かる Segment は省かないときと同じ。"""
     from ..render.pipeline import edits_to_segments
     edits = project.edits if edits is None else edits
     segs = edits_to_segments(edits, project.edit_span)
@@ -827,7 +831,7 @@ def layered_segments(project, edits=None, render_version=None):
         fs = fade_segments(project, segs)
     trs, drs, base = build_layers(project, segs, edits)
     lay = Layered(base, trs, drs)
-    out = apply_layers(segs, lay, render_version_of(project) if render_version is None else render_version)
+    out = apply_layers(segs, lay, render_version_of(project) if render_version is None else render_version, region=region)
     return list(out) + fs if fs else out
 
 

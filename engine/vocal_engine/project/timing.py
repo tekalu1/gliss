@@ -187,18 +187,19 @@ def timing_connections(project, ns, conn=None):
     return out
 
 
-def default_connected(project, a, b, legacy=False):
+def default_connected(project, a, b, legacy=False, notes=None):
     """隣り合う音程ノート a → b の既定の接続（タイミング編集の接続・切り離し）。本当に接している（隙間 1e-6 秒以下）ときだけ接続。
     間に無声・息・無音を挟めば切り離し（間の piece が変化を吸収する）。
 
     legacy=True: 0.1.0-beta.10 までの既定（無声だけを挟む 0.30 秒未満の組も接続）。ピッチのつなぎ（`pitch.transitions`）だけが使う
-    （子音をはさんだ音程の段差をなだらかにする。これまでの曲の音を変えないため。タイミングの編集の相手は決めない）。"""
+    （子音をはさんだ音程の段差をなだらかにする。これまでの曲の音を変えないため。タイミングの編集の相手は決めない）。
+    notes: 組ごとに引き直さないための project.take_notes（`connections` が 1 度だけ引いて渡す）。"""
     gap = b.start_sec - a.end_sec
     if gap <= 1e-6:
         return True
     if not legacy or gap >= CONNECT_MAX_GAP_SEC:
         return False
-    between = [n for n in project.take_notes
+    between = [n for n in (project.take_notes if notes is None else notes)
                if n.start_sec >= a.end_sec - 1e-6 and n.end_sec <= b.start_sec + 1e-6
                and n.kind != "note"]
     return all(n.kind == "unvoiced" for n in between)
@@ -256,8 +257,9 @@ def connections(project, overrides=None, legacy=False):
     if overrides:
         ov = {**ov, **overrides}
     rows = []
+    all_notes = project.take_notes if legacy else None     # 組ごとに take_notes（解析の確認つき）を引かない
     for a, b in zip(ns[:-1], ns[1:]):
-        d = default_connected(project, a, b, legacy=legacy)
+        d = default_connected(project, a, b, legacy=legacy, notes=all_notes)
         rows.append((a, b, ov.get((a.id, b.id), d), d))
     return rows
 
