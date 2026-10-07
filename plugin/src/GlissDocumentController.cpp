@@ -211,6 +211,7 @@ GlissDocumentController::~GlissDocumentController()
     stopTimer();
     *alive = false;
     sync->shutdown();
+    auditionPool.removeAllJobs (true, 10000);
     bridgePool.removeAllJobs (true, 10000);
     sync.reset();
 
@@ -982,7 +983,9 @@ void GlissDocumentController::engineCall (const juce::String& tool, const juce::
     const auto requested = juce::Time::getMillisecondCounter();
     if (tool == "render_audition")
         diag::log ("audition-latency stage=request ms=" + juce::String (requested));
-    bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), tool, args, done = std::move (done), requested]
+    // 試聴（render_audition）は、長い呼び出し（再合成・描画データ）が bridgePool を埋めていても待たせない
+    auto& pool = tool == "render_audition" ? auditionPool : bridgePool;
+    pool.addJob ([this, token = std::weak_ptr<bool> (alive), tool, args, done = std::move (done), requested]
     {
         const auto started = juce::Time::getMillisecondCounter();
         if (tool == "render_audition")
@@ -1176,7 +1179,7 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
     diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
     const auto audio = previewAudio;
     const auto cancellationEpoch = audio->getCancellationEpoch();
-    bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), file, generation, cancellationEpoch, audio, done = std::move (done)]
+    auditionPool.addJob ([this, token = std::weak_ptr<bool> (alive), file, generation, cancellationEpoch, audio, done = std::move (done)]
     {
         diag::log ("audition-latency stage=decode-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
         std::unique_ptr<PreviewAudio::Clip> clip;
