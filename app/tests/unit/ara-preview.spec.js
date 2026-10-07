@@ -214,3 +214,71 @@ test('release, blur and host playback cancel an ARA preview even while native st
     globalThis.CustomEvent = oldCustomEvent;
   }
 });
+
+// 長押し（250 ms）の判定の後すぐ鳴らす: 押した時点で render_audition を始め（preparePreview）、判定の時点でその結果を
+// 使う（startPreview）ので、native への開始の要求は max(判定の時間, render_audition の時間) の後に 1 回だけ出る。
+// 判定の後にもう一度 render_audition を呼ぶ（待ちが 2 倍になる）ことがない。
+test('ARA preview starts right after the hold using the render prepared at pointerdown', async () => {
+  const oldWindow = globalThis.window;
+  const oldDocument = globalThis.document;
+  const oldCustomEvent = globalThis.CustomEvent;
+  const natives = [];
+  let renderCalls = 0;
+  let renderMs = 0;
+  let t0 = 0;
+  globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init.detail; } };
+  globalThis.window = {
+    api: {
+      mode: 'ara',
+      call: async (tool) => {
+        if (tool !== 'render_audition') return { ok: true };
+        renderCalls++;
+        await new Promise((r) => setTimeout(r, renderMs));
+        return { ok: true, path: 'preview.wav', view_rev: 'view-1', rev: 'audio-1', track_id: 'track-1',
+          ara_id: 'mod-1', note_id: 'n1', cents: 0, source_id: 'source-1' };
+      },
+      preview: async (op) => {
+        if (op === 'start') natives.push(performance.now() - t0);
+        return { ok: true };
+      },
+    },
+    addEventListener: () => {},
+    dispatchEvent: () => {},
+  };
+  globalThis.document = { documentElement: { dataset: {} }, hidden: false, querySelector: () => null, addEventListener: () => {} };
+  try {
+    const { S } = await import('../../renderer/state.js');
+    const { preparePreview, startPreview, stopPreview } = await import('../../renderer/audio.js');
+    S.playing = false; S.vd = { view_rev: 'view-1' }; S.local.pitch = new Map();
+    S.session = { current: 'track-1' }; S.tracks = [{ id: 'track-1', ara_id: 'mod-1' }];
+    S.projectDir = 'synthetic-project'; S.busy = false; S.queued = 0; S.pendingPlan = false;
+    S.byId = new Map([['n1', { id: 'n1', kind: 'note', start_sec: 0.1, end_sec: 0.5 }]]);
+    const HOLD = 250;
+    const press = async (ms) => {
+      stopPreview();
+      natives.length = 0; renderCalls = 0; renderMs = ms;
+      t0 = performance.now();
+      preparePreview('n1');                                   // pointerdown
+      await new Promise((r) => setTimeout(r, HOLD));
+      startPreview('n1');                                     // 長押しの判定
+      await new Promise((r) => setTimeout(r, Math.max(0, ms - HOLD) + 120));
+    };
+
+    await press(60);                                          // 速いエンジン: 判定の直後に native へ
+    expect(renderCalls).toBe(1);
+    expect(natives).toHaveLength(1);
+    expect(natives[0]).toBeGreaterThanOrEqual(HOLD - 10);
+    expect(natives[0]).toBeLessThan(HOLD + 60);
+
+    await press(400);                                         // 遅いエンジン: 押してから 400 ms で（判定 + 400 ms ではない）
+    expect(renderCalls).toBe(1);
+    expect(natives).toHaveLength(1);
+    expect(natives[0]).toBeGreaterThanOrEqual(400 - 10);
+    expect(natives[0]).toBeLessThan(400 + 60);
+    stopPreview();
+  } finally {
+    globalThis.window = oldWindow;
+    globalThis.document = oldDocument;
+    globalThis.CustomEvent = oldCustomEvent;
+  }
+});
