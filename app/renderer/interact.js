@@ -31,7 +31,7 @@ import {
   wake,
 } from './edits.js';
 import { G, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
-import { preparePreview, previewEnabled, previewState, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
+import { markNoteEdited, previewEnabled, previewState, releasePreview, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
 import { ARA, araLoopEditor, araSeekEditor, pullHostState } from './ara.js';
 import { status } from './engine.js';
 import { closeMenu, editorMenu, menuOpen } from './menus.js';
@@ -62,14 +62,17 @@ function onPreviewState(e) {
   const p = e.detail || previewState();
   if (p.phase === 'sounding') auditionText('試聴中');
   else if (p.phase === 'preparing') auditionText('試聴を準備中');
+  else if (p.phase === 'idle') auditionText('');
   else if (p.phase === 'error') {
     auditionText('試聴できません');
     status(`試聴できません: ${p.error || 'ホストの出力を確認してください'}`);
   }
 }
 
+const AUDITION_KINDS = new Set(['note', 'unvoiced', 'breath']);    // 子音・息も鳴らせる（ずらさない = cents 0 だけ）
+
 function beginAudition(id) {
-  if (!id || !S.byId.get(id)?.pitch_editable) return;
+  if (!id || !AUDITION_KINDS.has(S.byId.get(id)?.kind)) return;
   if (auditionNote === id) return;
   if (auditionNote) endAudition();
   auditionNote = id;
@@ -80,11 +83,9 @@ function beginAudition(id) {
   onPreviewState({ detail: previewState() });
 }
 
+/** 押した瞬間から試聴を始める（長押しの判定を待たない）。離すのが早くても、最短（releasePreview）は鳴る。 */
 function scheduleNoteHold(dr, id) {
-  preparePreview(id);
-  dr.holdTimer = setTimeout(() => {
-    if (S.drag === dr && !dr.moved && dr.trackId === S.session?.current) beginAudition(id);
-  }, 250);
+  if (dr.trackId === S.session?.current) beginAudition(id);
 }
 
 export function beginSelectedAudition({ once = false } = {}) {
@@ -97,10 +98,12 @@ export function beginSelectedAudition({ once = false } = {}) {
   }
 }
 
-export function endAudition() {
+/** 試聴をやめる。離したとき（既定）は最短だけ鳴らして止める。immediate: すぐ止める（フォーカスを失った・DAW が再生を始めた）。 */
+export function endAudition({ immediate = false } = {}) {
   clearTimeout(auditionLimit);
   auditionLimit = null;
-  stopPreview();
+  if (immediate === true) stopPreview();
+  else releasePreview();
   if (auditionRestore === false) setPreviewEnabled(false, { save: false });
   auditionRestore = null;
   auditionNote = null;
@@ -125,8 +128,8 @@ export function install(svgEl, rootEl, onViewChanged) {
   });
   // Alt を押したまま別のウィンドウへ移ると keyup が来ない: 予告を残さない
   window.addEventListener('blur', () => { if (S.alt) { S.alt = false; render(); } });
-  window.addEventListener('blur', () => { clearTimeout(S.drag?.holdTimer); endAudition(); });
-  window.addEventListener('gliss-host-play', () => { clearTimeout(S.drag?.holdTimer); endAudition(); });
+  window.addEventListener('blur', () => { clearTimeout(S.drag?.holdTimer); endAudition({ immediate: true }); });
+  window.addEventListener('gliss-host-play', () => { clearTimeout(S.drag?.holdTimer); endAudition({ immediate: true }); });
   svg.addEventListener('pointermove', onMove);
   svg.addEventListener('pointerup', endDrag);
   svg.addEventListener('pointercancel', endDrag);
@@ -202,6 +205,7 @@ function onDown(e) {
         want: 0, nop: true, shift0: e.shiftKey, trackId: S.session?.current };
     }
     svg.setPointerCapture(e.pointerId);
+    if (ARA) beginAudition(n.id);
     render();
     return;
   }
@@ -213,7 +217,8 @@ function onDown(e) {
     planFor(dr, { op: 'edge', note_id: d.note, side: d.edge, detach: e.altKey });
     S.drag = dr;
     svg.setPointerCapture(e.pointerId);
-    if (!ARA) startPreview(d.note);
+    if (ARA) beginAudition(d.note);
+    else startPreview(d.note);
     render();
     return;
   }
@@ -362,7 +367,7 @@ function onMove(e) {
       // 子音・息は横だけ（音程が無い。issue #35）
       dr.axis = dr.nop || Math.abs(dx) > Math.abs(dy) ? 'time' : 'pitch';
       clearTimeout(dr.holdTimer);
-      if (dr.axis === 'time') { stopPreview(); planFor(dr, { op: 'move', note_ids: dr.ids }); }
+      if (dr.axis === 'time') { if (!ARA) stopPreview(); planFor(dr, { op: 'move', note_ids: dr.ids }); }   // ARA は鳴らし続ける（cents 0）
       else if (ARA) beginAudition(dr.anchor?.id);
     }
     dr.moved = true;
@@ -451,6 +456,7 @@ function endDrag(e) {
   clearTimeout(dr.holdTimer);
   S.drag = null;
   dr.releasedAt = performance.now();
+  if (dr.moved && (dr.type === 'note' || dr.type === 'edge')) markNoteEdited(dr.type === 'note' ? dr.ids : [dr.id]);   // 試聴は編集したノートだけ厳密に
   if (dr.type === 'stroke') { finishStroke(); return; }
   if (dr.type === 'fade') { finishFade(dr); return; }
   if (dr.type === 'mute') { finishMute(dr); return; }
