@@ -3,6 +3,7 @@
 #include "Diagnostics.h"
 #include "GlissDocumentController.h"
 #include "GlissEditor.h"
+#include "GlissEditorRenderer.h"
 
 namespace gliss
 {
@@ -54,6 +55,14 @@ double GlissProcessor::getTailLengthSeconds() const
 {
     double tail = 0.0;
     return getTailLengthSecondsForARA (tail) ? tail : 0.0;
+}
+
+std::uint64_t GlissProcessor::getEditorRendererId() const
+{
+    if (const auto* renderer = dynamic_cast<const GlissEditorRenderer*> (getEditorRenderer()))
+        return renderer->getRendererId();
+
+    return 0;
 }
 
 juce::AudioProcessorEditor* GlissProcessor::createEditor()

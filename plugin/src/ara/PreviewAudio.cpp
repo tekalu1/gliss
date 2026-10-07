@@ -119,6 +119,30 @@ void PreviewAudio::setEligibleRenderers (const std::vector<std::uint64_t>& ids, 
         activeRendererId.compare_exchange_strong (owner, 0);
 }
 
+std::vector<std::uint64_t> PreviewAudio::chooseEligible (const std::vector<std::uint64_t>& covering, std::uint64_t requester) const
+{
+    if (! covering.empty())
+        return covering;
+
+    if (requester != 0 && findSlot (requester) != nullptr)
+        return { requester };
+
+    return {};
+}
+
+void PreviewAudio::beginPreview (const std::vector<std::uint64_t>& covering, std::uint64_t requester, std::uint32_t nowMs) noexcept
+{
+    setEligibleRenderers (chooseEligible (covering, requester), nowMs);
+    activeRendererId.store (0);          // 前の試聴の所有者を持ち越さない（絞れなくても、新しく足す renderer が所有者になる）
+    lastPlayedBy.store (0);
+    handoverCount.store (0);
+}
+
+PreviewAudio::PreviewStats PreviewAudio::getStats() const noexcept
+{
+    return { activeRendererId.load(), lastPlayedBy.load(), narrowed.load(), handoverCount.load() };
+}
+
 bool PreviewAudio::renderForRenderer (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor,
                                       std::uint64_t rendererId, std::uint32_t nowMs, RenderStats* stats) noexcept
 {
@@ -142,14 +166,21 @@ bool PreviewAudio::renderForRenderer (juce::AudioBuffer<float>& output, double o
             renderGate.clear (std::memory_order_release);
             return false;
         }
+        const auto previousOwner = owner;
+
         if (! activeRendererId.compare_exchange_strong (owner, rendererId))
         {
             renderGate.clear (std::memory_order_release);
             return false;
         }
+
+        if (previousOwner != 0)
+            handoverCount.fetch_add (1);
+
         cursor.released = true;
     }
     ownerStampMs.store (nowMs);
+    lastPlayedBy.store (rendererId);
     render (output, outputRate, cursor, stats);
     renderGate.clear (std::memory_order_release);
     return true;

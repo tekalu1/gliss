@@ -174,7 +174,10 @@ private:
     const TrackView* findTrackByTrackId (const juce::String& trackId) const;
     std::optional<double> toSongSeconds (const juce::var& arg, const juce::String& secKey) const;
     /** 試聴するノートの修飾（ara_id）を持つ EditorRenderer だけが試聴を足すようにする（空なら絞らない）。 */
-    void targetPreview (const juce::String& araId);
+    /** 試聴を始めるとき: 足す EditorRenderer を絞って（修飾を持つ renderer → 求めた側 → 絞らない）、所有者を外し、preview: start の行を書く。 */
+    void targetPreview (const juce::var& arg, const char* mode);
+    /** 試聴を止める（世代を進めて音を止め、始めていたら preview: stop の行を書く）。 */
+    void stopPreviewAudio();
     /** 準備した試聴のクリップを、取り消されていなければ EditorRenderer へ公開して done を呼ぶ（メッセージスレッドへ戻って行う）。 */
     void deliverPreview (std::weak_ptr<bool> token, std::shared_ptr<PreviewAudio> audio, std::uint64_t generation,
                          std::uint64_t cancellationEpoch, std::unique_ptr<PreviewAudio::Clip> clip, const juce::String& failure,
@@ -192,7 +195,7 @@ private:
     PlayheadState playheadState;
     std::shared_ptr<PreviewAudio> previewAudio = std::make_shared<PreviewAudio>();
     std::atomic<std::uint64_t> previewGeneration { 0 };
-    juce::String lastPreviewTarget;   // targetPreview のログを、対象が変わったときだけ書くため
+    bool previewStarted = false;      // preview: start を書いて、まだ preview: stop を書いていない（メッセージスレッドだけ）
     std::atomic<bool> compare { false };
 
     // ホストにノートを「まだ無い」と答えた修飾（m:<ID>）・ソース（s:<ID>）。ホストの読み出しのスレッドとメッセージスレッドが触る

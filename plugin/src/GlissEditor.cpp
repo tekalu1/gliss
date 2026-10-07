@@ -15,6 +15,7 @@ GlissEditor::GlissEditor (GlissProcessor& processor)
     if (bridge != nullptr)
     {
         webView = std::make_unique<editor::EditorWebView> (*bridge);
+        webView->setRequesterProvider ([&processor] { return processor.getEditorRendererId(); });
         addAndMakeVisible (*webView);
 
         editorView->addListener (this);
@@ -23,6 +24,9 @@ GlissEditor::GlissEditor (GlissProcessor& processor)
         if (! bridge->hasEditorSelection())
             bridge->editorSelectionChanged (this, editorView->getViewSelection());
         diag::log ("editor: opened with a document");
+        // selection: の行の view の番地と、試聴を求めたときの requester（この instance の EditorRenderer）を結び付ける
+        diag::logAlways ("editor view " + juce::String::toHexString ((juce::pointer_sized_int) this) + " -> editor renderer "
+                         + juce::String ((juce::int64) processor.getEditorRendererId()));
     }
     else
     {

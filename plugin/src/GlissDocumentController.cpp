@@ -264,8 +264,7 @@ void GlissDocumentController::didEndEditing (juce::ARADocument*)
 
 void GlissDocumentController::willDestroyDocument (juce::ARADocument*)
 {
-    previewGeneration.fetch_add (1);
-    previewAudio->stop();
+    stopPreviewAudio();
     // 先に同期とエンジンを止める（この後、モデルの各オブジェクトが壊される）。
     sync->shutdown();
 }
@@ -955,8 +954,7 @@ void GlissDocumentController::timerCallback()
         return;
     if (position.playing && ! lastHostPlaying)
     {
-        previewGeneration.fetch_add (1);
-        previewAudio->stop();
+        stopPreviewAudio();
     }
     lastHostPlaying = position.playing;
 
@@ -1269,16 +1267,32 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
     };
     if (op == "stop")
     {
-        previewGeneration.fetch_add (1);
-        previewAudio->stop();
+        stopPreviewAudio();
         done (result (true));
         return;
     }
     if (op != "start") { done (result (false, "unknown-op")); return; }
+
+    const auto local = (bool) arg.getProperty ("local", false);
+
+    if (local)
+    {
+        // 断った理由を残す（画面は断られたらエンジンで作るので、画面からは見えない）。止められた（cancelled）のは断りではない
+        done = [done = std::move (done)] (juce::var answer)
+        {
+            const auto reason = answer.getProperty ("reason", {}).toString();
+
+            if (! (bool) answer.getProperty ("ok", false) && reason != "cancelled")
+                diag::logAlways ("preview: local refused reason=" + reason);
+
+            done (std::move (answer));
+        };
+    }
+
     if (! previewAudio->hasRenderer()) { done (result (false, "no-editor-renderer")); return; }
     if (playheadState.read().playing) { done (result (false, "host-playing")); return; }
 
-    if ((bool) arg.getProperty ("local", false))
+    if (local)
     {
         previewLocal (arg, std::move (done));
         return;
@@ -1291,7 +1305,7 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
         return;
     }
 
-    targetPreview (arg.getProperty ("ara_id", {}).toString());
+    targetPreview (arg, "engine");
 
     const auto generation = previewGeneration.fetch_add (1) + 1;
     diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
@@ -1400,7 +1414,7 @@ void GlissDocumentController::previewLocal (const juce::var& arg, Completion don
         return;
     }
 
-    targetPreview (araId);
+    targetPreview (arg, "local");
 
     const auto generation = previewGeneration.fetch_add (1) + 1;
     diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()) + " local=1");
@@ -1459,8 +1473,10 @@ void GlissDocumentController::previewLocal (const juce::var& arg, Completion don
     });
 }
 
-void GlissDocumentController::targetPreview (const juce::String& araId)
+void GlissDocumentController::targetPreview (const juce::var& arg, const char* mode)
 {
+    const auto araId = arg.getProperty ("ara_id", {}).toString();
+    const auto requester = (std::uint64_t) (juce::int64) arg.getProperty ("requester", 0);
     std::vector<std::uint64_t> covering;
     int renderers = 0;
 
@@ -1473,18 +1489,37 @@ void GlissDocumentController::targetPreview (const juce::String& araId)
                 covering.push_back (renderer->getRendererId());
         }
 
-    previewAudio->setEligibleRenderers (covering, juce::Time::getMillisecondCounter());
+    const auto previousOwner = previewAudio->getStats().owner;
+    previewAudio->beginPreview (covering, requester, juce::Time::getMillisecondCounter());
+    previewStarted = true;
 
-    // 修飾を持つ renderer が無ければ（ホストが領域を渡さない）絞らない。対象が変わったときだけ書く。
-    const auto summary = araId + " " + juce::String ((int) covering.size()) + "/" + juce::String (renderers);
+    const auto range = arg.hasProperty ("start_sec")
+        ? juce::String ((double) arg.getProperty ("start_sec", 0.0), 3) + "-" + juce::String ((double) arg.getProperty ("end_sec", 0.0), 3)
+        : juce::String ("-");
 
-    if (summary != lastPreviewTarget)
+    // どのトラックを選んでいて（ui-track）どのトラックを描いていたか（shown）は画面が添える。絞り込み（narrowed）は、修飾を持つ renderer
+    // か、求めた側（requester）の EditorRenderer に絞れたか
+    diag::logAlways ("preview: start " + juce::String (mode) + " ara=" + araId + " note=" + arg.getProperty ("note", {}).toString()
+                     + " range=" + range + " cents=" + juce::String ((double) arg.getProperty ("cents", 0.0), 1)
+                     + " ui-track=" + arg.getProperty ("ui_track", {}).toString() + " shown=" + arg.getProperty ("shown_track", {}).toString()
+                     + " covered=" + juce::String ((int) covering.size()) + "/" + juce::String (renderers)
+                     + " narrowed=" + juce::String (previewAudio->getStats().narrowed ? 1 : 0)
+                     + " requester=" + juce::String ((juce::int64) requester) + " owner=" + juce::String ((juce::int64) previousOwner));
+}
+
+void GlissDocumentController::stopPreviewAudio()
+{
+    previewGeneration.fetch_add (1);
+
+    if (previewStarted)
     {
-        lastPreviewTarget = summary;
-        diag::log ("preview: target modification " + araId + " is covered by " + juce::String ((int) covering.size())
-                   + " of " + juce::String (renderers) + " editor renderers"
-                   + (araId.isNotEmpty() && covering.empty() ? " (not narrowed)" : ""));
+        previewStarted = false;
+        const auto stats = previewAudio->getStats();
+        diag::logAlways ("preview: stop played-by=" + juce::String ((juce::int64) stats.playedBy) + " narrowed=" + juce::String (stats.narrowed ? 1 : 0)
+                         + " handovers=" + juce::String (stats.handovers));
     }
+
+    previewAudio->stop();
 }
 
 void GlissDocumentController::setCompare (bool on)

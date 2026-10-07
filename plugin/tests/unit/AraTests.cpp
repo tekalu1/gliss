@@ -7,6 +7,7 @@
 #include "ara/PlayheadState.h"
 #include "ara/PluginState.h"
 #include "ara/PreviewAudio.h"
+#include "ara/PreviewRequest.h"
 #include "ara/RegionMapping.h"
 #include "ara/SelectionPolicy.h"
 
@@ -655,6 +656,75 @@ public:
             expect (! shared.renderForRenderer (out, 48000.0, lateCursor, late, 500));
             shared.removeRenderer (first);
             shared.removeRenderer (late);
+        }
+
+        beginTest ("a new preview drops the previous owner and narrows to the requester when no renderer holds the modification");
+        {
+            // 前の試聴の所有者（A）は、次の試聴が絞れなくても持ち越さない。求めた側（B）があればそこに絞る
+            PreviewAudio shared;
+            const auto a = shared.addRenderer();
+            const auto b = shared.addRenderer();
+            PreviewAudio::Cursor cursorA, cursorB;
+            juce::AudioBuffer<float> out (1, 480);
+            const auto renderAt = [&] (std::uint64_t id, PreviewAudio::Cursor& c, std::uint32_t nowMs)
+            {
+                out.clear();
+                return shared.renderForRenderer (out, 48000.0, c, id, nowMs);
+            };
+            shared.publish (makeClip (0.4f));
+
+            shared.beginPreview ({}, 0, 1000);                                    // 絞れない・求めた側も分からない
+            expect (renderAt (a, cursorA, 1000), "A owns the first preview");
+            expect (! shared.getStats().narrowed);
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) a);
+
+            shared.beginPreview ({}, b, 2000);                                     // 持つ renderer は無い。求めたのは B
+            expect (shared.getStats().narrowed, "narrowed to the requester");
+            expect (shared.getStats().owner == 0, "the previous owner is dropped");
+            expect (! renderAt (a, cursorA, 2000), "the previous owner does not keep adding");
+            expect (renderAt (b, cursorB, 2000), "the requester adds");
+            expect (out.getSample (0, 400) > 0.3f);
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) b);
+            expect (! renderAt (a, cursorA, 2100), "A stays out while the requester is alive");
+
+            // 求めた側が呼ばれなくなったら（ミュートのトラックなど）、別の renderer が引き継ぐ（動作は変えない。回数だけ数える）
+            expect (renderAt (a, cursorA, 2400), "A takes over when the requester stopped");
+            expectEquals (shared.getStats().handovers, 1);
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) a);
+
+            expect (renderAt (a, cursorA, 2950), "A is the live owner of the previous preview");
+            shared.beginPreview ({}, 0, 3000);                                     // 求めた側も分からない: 絞らず、先に呼ばれた renderer が足す
+            expect (! shared.getStats().narrowed);
+            expectEquals (shared.getStats().handovers, 0);
+            expect (renderAt (b, cursorB, 3000), "not narrowed: the first caller adds");
+            expect (! renderAt (a, cursorA, 3000), "not narrowed: the second does not");
+
+            shared.beginPreview ({ a }, b, 4000);                                  // 持つ renderer があれば、それが先（求めた側より）
+            expect (renderAt (a, cursorA, 4000), "the renderer that holds the modification adds");
+            expect (! renderAt (b, cursorB, 4000), "the requester does not, when another renderer holds the modification");
+
+            shared.beginPreview ({}, 999, 5000);                                   // 登録されていない requester は無いものとする
+            expect (! shared.getStats().narrowed, "an unknown requester does not narrow");
+
+            expect (shared.chooseEligible ({}, 0).empty());
+            expect (shared.chooseEligible ({}, b) == std::vector<std::uint64_t> { b });
+            expect (shared.chooseEligible ({ a }, b) == std::vector<std::uint64_t> { a });
+
+            shared.removeRenderer (a);
+            shared.removeRenderer (b);
+        }
+
+        beginTest ("the editor adds its EditorRenderer id to the preview arguments as the requester");
+        {
+            auto* object = new juce::DynamicObject();
+            object->setProperty ("note", "n1");
+            const juce::var original (object);
+            const auto withId = withRequester (original, 7);
+            expectEquals ((juce::int64) withId.getProperty ("requester", 0), (juce::int64) 7);
+            expectEquals (withId.getProperty ("note", {}).toString(), juce::String ("n1"));
+            expect (! original.hasProperty ("requester"), "the caller's object is not changed");
+            expect (! withRequester (original, 0).hasProperty ("requester"), "no id, nothing added");
+            expect (withRequester (juce::var(), 7).isVoid(), "not an object: returned as it is");
         }
 
         beginTest ("new audition PCM changes the actual output pitch");

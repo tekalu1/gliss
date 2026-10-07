@@ -2,6 +2,8 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <cstdint>
+
 namespace gliss
 {
 
@@ -39,6 +41,10 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
 
     juce::AudioProcessorARAExtension* getARAClientExtensions() override { return this; }
+
+    /** このインスタンスの EditorRenderer の id（ARA に結び付いていなければ 0）。試聴を求めたインスタンスを知るために、
+        GlissEditor が画面の preview に添える（PreviewAudio::chooseEligible）。メッセージスレッドから呼ぶ。 */
+    std::uint64_t getEditorRendererId() const;
 
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlissProcessor)

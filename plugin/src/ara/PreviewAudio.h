@@ -54,6 +54,23 @@ public:
         空なら（修飾を持つ renderer が無い・ホストが領域を渡さない）絞らず、どの renderer も足せる。
         所有者が絞りから外れたら外す。持つ renderer が 250 ms 呼ばれなければ、持たない renderer が足す（持つ側が止まっている）。 */
     void setEligibleRenderers (const std::vector<std::uint64_t>& ids, std::uint32_t nowMs) noexcept;
+
+    /** 足してよい renderer の絞り込みの規則: 修飾を持つ renderer（covering）があればそれ、無ければ試聴を求めた側（requester。登録されていなければ無いものとする）、
+        それも無ければ絞らない（空）。 */
+    std::vector<std::uint64_t> chooseEligible (const std::vector<std::uint64_t>& covering, std::uint64_t requester) const;
+
+    /** 試聴を始めるたびに呼ぶ（メッセージスレッド）。chooseEligible で絞り、前の試聴の所有者を外す（前の所有者が、絞れないまま足し続けない）。 */
+    void beginPreview (const std::vector<std::uint64_t>& covering, std::uint64_t requester, std::uint32_t nowMs) noexcept;
+
+    /** 試聴の様子（ログ用。オーディオスレッドが書く値をメッセージスレッドが読む）。 */
+    struct PreviewStats
+    {
+        std::uint64_t owner = 0;        // 今の所有者（外れていれば 0）
+        std::uint64_t playedBy = 0;     // 最後に足した renderer
+        bool narrowed = false;
+        int handovers = 0;              // beginPreview の後、足す renderer が別の renderer に移った回数
+    };
+    PreviewStats getStats() const noexcept;
     bool renderForRenderer (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor,
                             std::uint64_t rendererId, std::uint32_t nowMs, RenderStats* stats = nullptr) noexcept;
 
@@ -76,6 +93,8 @@ private:
     std::atomic<std::uint64_t> nextRendererId { 1 }, activeRendererId { 0 };
     std::atomic<std::uint32_t> ownerStampMs { 0 }, eligibleStampMs { 0 };
     std::atomic<bool> narrowed { false };   // setEligibleRenderers が renderer を絞っている
+    std::atomic<std::uint64_t> lastPlayedBy { 0 };
+    std::atomic<int> handoverCount { 0 };
     std::array<RendererSlot, maxRendererSlots> slots;
     std::atomic_flag renderGate = ATOMIC_FLAG_INIT;
     std::unique_ptr<Clip> owned;
