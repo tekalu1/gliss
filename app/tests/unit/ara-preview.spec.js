@@ -6,6 +6,7 @@ test('release, blur and host playback cancel an ARA preview even while native st
   const oldCustomEvent = globalThis.CustomEvent;
   const listeners = new Map();
   const calls = [];
+  const startArgs = [];
   const phases = [];
   let pendingStart = null;
   let holdRender = false;
@@ -26,8 +27,9 @@ test('release, blur and host playback cancel an ARA preview even while native st
         if (holdRender) return new Promise((resolve) => { pendingRenders.push(resolve); });
         return rendered('preview.wav');
       },
-      preview: (op) => {
+      preview: (op, arg) => {
         calls.push(op);
+        if (op === 'start') startArgs.push(arg);
         if (op === 'stop') return Promise.resolve({ ok: true });
         return new Promise((resolve) => { pendingStart = resolve; });
       },
@@ -54,6 +56,8 @@ test('release, blur and host playback cancel an ARA preview even while native st
 
     startPreview('n1'); await settle();
     expect(calls).toContain('start');
+    // 試聴を足す EditorRenderer を選ぶために、ノートの修飾の ara_id を native へ渡す
+    expect(startArgs.at(-1)).toMatchObject({ note: 'n1', ara_id: 'mod-1' });
     expect(previewState().phase).toBe('preparing');
     expect(phases.map((x) => x.phase)).toEqual(['preparing']);
     stopPreview();

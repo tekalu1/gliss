@@ -423,7 +423,8 @@ async function requestPreview() {
       return;
     }
     if (ARA) {                      // native は準備した PCM を EditorRenderer へ渡してから ok を返す
-      const result = await araPreview('start', { path: r.path, loop: true, note, cents });
+      // ara_id: 試聴を足すのは、このノートの修飾（トラック）を持つ EditorRenderer だけ（ミュートのトラックの renderer に足させない）
+      const result = await araPreview('start', { path: r.path, loop: true, note, cents, ara_id: context.araId });
       if (tok !== PV.token) return;
       if (!previewContextCurrent(context, args)) { stopPreview(); return; }
       if (!result?.ok) {
