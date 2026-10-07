@@ -317,7 +317,9 @@ def transitions(project, overrides=None, base=None):
         return tr
 
     out = []
-    for a, b, conn, _ in connections(project, overrides):
+    # つなぎの相手は、これまでの曲の音を変えないよう beta.10 までの既定（子音をはさんだ短い隙間も）で決める。
+    # タイミング編集の接続（既定は接しているときだけ）とは別
+    for a, b, conn, _ in connections(project, overrides, legacy=True):
         if not conn:
             continue
         d = sum(j for _, j in base.jumps(a.end_sec, b.start_sec))

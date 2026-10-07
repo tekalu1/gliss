@@ -13,8 +13,9 @@
   **元の位置のまま**（隙間の端が動くだけ）。次のノートの頭の子音（アタック）は
   そのノートと一緒に動く。
 
-既定の判定（`default_connected`）: 間に何も無い（ノート分割で隣接）か、
-間が無声（`unvoiced`）だけで 0.30 秒未満なら接続。息・無音を挟めば切り離し。
+既定の判定（`default_connected`）: 本当に接している（隙間 1e-6 秒以下。ノート分割で隣接）ときだけ接続。間に無声（子音）・息・
+無音など何かを挟めば、隙間の長さによらず切り離し（0.1.0-beta.10 までは、無声だけを挟む 0.30 秒未満の組を接続にしていたので、
+ノートの端を動かすと、子音を挟んで離れた次のノートまで動いた）。
 状態を変えたものだけ `connection` 編集として編集リストに入る（undo で戻る）。
 
 ## 音程の無い区間の幅とタイミング（issues #35, #44）
@@ -69,7 +70,7 @@ from .model import Target
 
 MIN_BODY_SEC = 0.02          # ノートの最短（画面の MIN_SEG と同じ）
 F_MIN, F_MAX = 0.05, 20.0    # 伸縮の比（元の長さに対して）の範囲
-CONNECT_MAX_GAP_SEC = 0.30   # 無声だけを挟む隣同士を「接続」とみなす隙間の上限
+CONNECT_MAX_GAP_SEC = 0.30   # （ピッチのつなぎだけ）無声だけを挟む隣同士にもつなぎを作る隙間の上限。タイミングの接続には使わない
 ATTACK_MAX_SEC = 0.30        # ノートの頭に付く子音（アタック）の上限
 ATTACK_TOL_SEC = 0.02        # 子音と母音・ノート頭の食い違いの許容
 EPS = 1e-7                   # これより小さい長さの差は「変わっていない」
@@ -186,12 +187,16 @@ def timing_connections(project, ns, conn=None):
     return out
 
 
-def default_connected(project, a, b):
-    """隣り合う音程ノート a → b の既定の接続。"""
+def default_connected(project, a, b, legacy=False):
+    """隣り合う音程ノート a → b の既定の接続（タイミング編集の接続・切り離し）。本当に接している（隙間 1e-6 秒以下）ときだけ接続。
+    間に無声・息・無音を挟めば切り離し（間の piece が変化を吸収する）。
+
+    legacy=True: 0.1.0-beta.10 までの既定（無声だけを挟む 0.30 秒未満の組も接続）。ピッチのつなぎ（`pitch.transitions`）だけが使う
+    （子音をはさんだ音程の段差をなだらかにする。これまでの曲の音を変えないため。タイミングの編集の相手は決めない）。"""
     gap = b.start_sec - a.end_sec
     if gap <= 1e-6:
         return True
-    if gap >= CONNECT_MAX_GAP_SEC:
+    if not legacy or gap >= CONNECT_MAX_GAP_SEC:
         return False
     between = [n for n in project.take_notes
                if n.start_sec >= a.end_sec - 1e-6 and n.end_sec <= b.start_sec + 1e-6
@@ -241,17 +246,18 @@ def connection_overrides(project):
     return out
 
 
-def connections(project, overrides=None):
+def connections(project, overrides=None, legacy=False):
     """隣り合う音程ノートの組ごとの状態 [(a, b, connected, default)]。
 
-    overrides: {(a, b): bool} を編集リストの上に重ねる（計画の「確定したらこうなる」を測るため）。"""
+    overrides: {(a, b): bool} を編集リストの上に重ねる（計画の「確定したらこうなる」を測るため）。
+    legacy: 既定を 0.1.0-beta.10 までのもの（`default_connected(legacy=True)`）にする（ピッチのつなぎ用）。"""
     ns = pitched_notes(project)
     ov = connection_overrides(project)
     if overrides:
         ov = {**ov, **overrides}
     rows = []
     for a, b in zip(ns[:-1], ns[1:]):
-        d = default_connected(project, a, b)
+        d = default_connected(project, a, b, legacy=legacy)
         rows.append((a, b, ov.get((a.id, b.id), d), d))
     return rows
 
