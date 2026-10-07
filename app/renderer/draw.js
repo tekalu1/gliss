@@ -414,36 +414,9 @@ function noPitchHit(n, segs, conn) {
   return out;
 }
 
-/** 子音・息の端が隣と接しているか（接続の見込み。カーソルの形だけに使う。エンジンの既定と同じく接していれば接続）。 */
+/** 子音・息の端が隣と接続しているか（カーソルの形だけに使う。エンジンの接続 = 音程ノートと同じ規則。view data の connected_prev / next）。 */
 function noPitchConn(n) {
-  const i = S.notes.indexOf(n);
-  const a = S.notes[i - 1]; const b = S.notes[i + 1];
-  const touch = (x, y) => !!x && !!y
-    && Math.abs(y.start_sec - x.end_sec) < 1e-6;
-  return { start: touch(a, n), end: touch(n, b) };
-}
-
-/** 子音・息の端をドラッグ中の接続の記号（計画の info。接続 = 塗りの点、切り離し = 両端に白抜きの点）。 */
-function noPitchGlyph(n, which, x, y) {
-  const info = S.plan?.data?.info;
-  const dr = S.drag;
-  if (!info?.pair || S.plan.data.kind !== 'edge' || S.plan.data.params?.note_id !== n.id) return '';
-  let conn = !!info.connected;
-  const d = S.plan.data;
-  if (d.snap_x != null && Math.abs((S.plan.x || 0) - d.snap_x) < 1e-6 && Math.abs(S.plan.x || 0) > 1e-9) conn = true;
-  const key = `${info.pair[0]}|${info.pair[1]}`;
-  if (conn && !(dr?.alt && !dr.moved)) {
-    return `<g data-conn="${key}" data-state="connected" pointer-events="none"><circle cx="${f1(x)}" cy="${f1(y)}" r="3.4" fill="${SEL}"/></g>`;
-  }
-  const nb = S.byId.get(info.neighbour);
-  let s = `<g data-conn="${key}" data-state="${conn ? 'cut' : 'detached'}" pointer-events="none">`
-    + `<circle cx="${f1(x)}" cy="${f1(y)}" r="3.2" fill="#111113" stroke="${SEL}" stroke-width="1.3"/>`;
-  if (nb) {
-    const nx = X(which === 'start' ? spanOf(nb)[1] : spanOf(nb)[0]);
-    const ny = nb.kind === 'note' ? Y(bandOf(nb)) : y;
-    s += `<circle cx="${f1(nx)}" cy="${f1(ny)}" r="3.2" fill="#111113" stroke="${SEL}" stroke-width="1.3"/>`;
-  }
-  return `${s}</g>`;
+  return { start: !!n.connected_prev, end: !!n.connected_next };
 }
 
 /** 端の明るい縦線の片側の長さ（px）: 端から 30 ms 内側の帯の太さ（最低 8 px）。 */
@@ -504,7 +477,7 @@ const pairKey = (a, b) => `${a.id}|${b.id}`;
 function connFocus() {
   const out = new Set();
   if (S.tool !== 'main' || !S.vd) return out;
-  const P = S.pitched;
+  const P = S.blocks;                               // 種類によらず、隣り合う区間の組
   const idx = new Map(P.map((n, i) => [n.id, i]));
   const sides = (id) => {
     const i = idx.get(id);
@@ -533,7 +506,7 @@ export function hasConnFocus() { return connGlyphs() !== ''; }
 /** ポインタ（px）に近い境目の 'a|b'（無ければ null）。隙間の真ん中など、どちらの端からも遠いところは出さない。 */
 export function nearPair(x, y) {
   if (S.tool !== 'main' || !S.vd || x <= KEYS_W || y <= rollTop() || y >= rollBottom()) return null;
-  const P = S.pitched;
+  const P = S.blocks;
   let best = null; let bd = Infinity;
   for (let i = 0; i + 1 < P.length; i++) {
     const a = P[i]; const b = P[i + 1];
@@ -541,7 +514,9 @@ export function nearPair(x, y) {
     if (xb < KEYS_W - NEAR_PX || xa > W + NEAR_PX) continue;
     const dx = Math.min(Math.abs(x - xa), Math.abs(x - xb));
     if (dx >= NEAR_PX || dx >= bd) continue;
-    const ba = boxOf(a); const bb = boxOf(b);
+    const aa = S.blockAnchor.get(a.id); const ab = S.blockAnchor.get(b.id);
+    if (!aa || !ab) continue;
+    const ba = boxOf(aa); const bb = boxOf(ab);
     if (y < Y(Math.max(ba.hi, bb.hi)) - 16 || y > Y(Math.min(ba.lo, bb.lo)) + 16) continue;
     bd = dx; best = pairKey(a, b);
   }
@@ -552,7 +527,7 @@ export function nearPair(x, y) {
 function connGlyphs() {
   const keys = connFocus();
   if (!keys.size) return '';
-  const P = S.pitched;
+  const P = S.blocks;
   const trBy = new Map((S.vd.transitions || []).map((t) => [`${t.a}|${t.b}`, t]));
   const cc = planConnChanges();
   if (cc?.add) trBy.set(`${cc.add.a}|${cc.add.b}`, cc.add);
@@ -565,7 +540,9 @@ function connGlyphs() {
     if (!keys.has(key)) continue;
     const xa = X(spanOf(a)[1]); const xb = X(spanOf(b)[0]);
     if (xb < KEYS_W - 40 || xa > W + 40) continue;
-    const yA = Y(bandOf(a)); const yB = Y(bandOf(b));
+    const aa = S.blockAnchor.get(a.id); const ab = S.blockAnchor.get(b.id);
+    if (!aa || !ab) continue;
+    const yA = Y(bandOf(aa)); const yB = Y(bandOf(ab));
     // 離した後の接続: 計画の切り離し（x ≠ 0）・吸着を重ねる
     let conn = !!a.connected_next;
     if (cc?.off.has(key)) conn = false;
@@ -914,7 +891,6 @@ export function render() {
     if (grabbed && dr.type === 'edge') {
       const cx = X(dr.which === 'start' ? s0 : s1);
       const p = dr.which === 'start' ? first : last;
-      s += noPitchGlyph(n, dr.which, cx, p.y);
       if (dr.moved) tipStr += tip(cx, p.y - Math.max(8, p.h) - 14, `${sign(Math.round((S.plan?.x ?? dr.want ?? 0) * 1000))} ms`, 'middle');
     }
     if (grabbed && dr.type === 'note' && dr.axis === 'time' && dr.moved) {

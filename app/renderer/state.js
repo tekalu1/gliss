@@ -703,6 +703,9 @@ export function adopt(vd, { keepView = true } = {}) {
     redo: vh.can_redo ? { label: '編集' } : null };
   S.notes = vd.notes || [];
   S.pitched = S.notes.filter((n) => n.kind === 'note');
+  // タイミングの単位（音程ノート・子音・息。種類によらず同じ規則。無音は隙間）と、記号の高さ・当たりの元にする音程ノート
+  S.blocks = S.notes.filter((n) => BLOCK_KINDS.has(n.kind)).sort((a, b) => a.start_sec - b.start_sec);
+  S.blockAnchor = anchorsOf(S.blocks);
   S.byId = new Map(S.notes.map((n) => [n.id, n]));
   S.aiNotes = aiNotesOf(vd.edits || [], S.pitched);
   S.local.pitch.clear();
@@ -834,6 +837,22 @@ export function nextUtterance(tSrc, dir = 1) {
   if (dir > 0) return us.find(([a]) => a > tSrc + 1e-3) || us[us.length - 1];
   const prev = us.filter(([, b]) => b < tSrc - 1e-3);
   return prev.length ? prev[prev.length - 1] : us[0];
+}
+
+export const BLOCK_KINDS = new Set(['note', 'unvoiced', 'breath']);
+
+/** 区間 → 高さの元にする音程ノート（音程ノートはその自身、子音・息は直前の音程ノート。無ければ直後）。 */
+function anchorsOf(blocks) {
+  const out = new Map();
+  let last = null;
+  let nextIdx = 0;
+  blocks.forEach((n, i) => {
+    if (n.kind === 'note') { last = n; out.set(n.id, n); return; }
+    if (last) { out.set(n.id, last); return; }
+    while (nextIdx < blocks.length && (nextIdx <= i || blocks[nextIdx].kind !== 'note')) nextIdx++;
+    out.set(n.id, blocks[nextIdx] || null);
+  });
+  return out;
 }
 
 export function totalSec() {

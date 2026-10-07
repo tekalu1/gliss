@@ -170,12 +170,12 @@ function boundaryMenu(e, a, b) {
   const conn = !!a.connected_next;
   const gap = spanOf(b)[0] - spanOf(a)[1];
   return [
-    cmd('merge', ctx, { disabled: !touch, run: () => mergeNotes(a.id, b.id) }),
+    cmd('merge', ctx, { disabled: !touch || a.kind !== 'note' || b.kind !== 'note', run: () => mergeNotes(a.id, b.id) }),   // 結合は音程ノートどうしだけ
     conn
       ? { id: 'detach', label: '切り離す', key: 'Alt+ドラッグ', run: () => setConnection(a.id, b.id, false) }
       : { id: 'connect', label: 'つなぐ', key: 'Alt+ドラッグ',
         run: () => (gap > 0.0005 ? connectGap(a.id) : setConnection(a.id, b.id, true)) },
-    cmd('transition', ctx, { disabled: !conn }),
+    cmd('transition', ctx, { disabled: !conn || a.kind !== 'note' || b.kind !== 'note' }),   // なだらかさは音程ノートどうしだけ
   ];
 }
 
@@ -258,14 +258,16 @@ function rulerMenu(e) {
 
 /** 空白の中の、隙間のある境目（前のノートの尻と次のノートの頭の間。縦は両方の帯の近く）。 */
 function gapAt(x, y) {
-  const P = S.pitched;
+  const P = S.blocks;
   for (let i = 0; i + 1 < P.length; i++) {
     const a = P[i]; const b = P[i + 1];
     const xa = X(spanOf(a)[1]); const xb = X(spanOf(b)[0]);
     if (x < xa || x > xb || xb - xa < 1) continue;
-    const ba = boxOf(a); const bb = boxOf(b);
-    const top = Math.min(Y(ba.hi), Y(bb.hi), Y(bandOf(a)), Y(bandOf(b))) - 16;
-    const bot = Math.max(Y(ba.lo), Y(bb.lo), Y(bandOf(a)), Y(bandOf(b))) + 16;
+    const aa = S.blockAnchor.get(a.id); const ab = S.blockAnchor.get(b.id);
+    if (!aa || !ab) continue;
+    const ba = boxOf(aa); const bb = boxOf(ab);
+    const top = Math.min(Y(ba.hi), Y(bb.hi), Y(bandOf(aa)), Y(bandOf(ab))) - 16;
+    const bot = Math.max(Y(ba.lo), Y(bb.lo), Y(bandOf(aa)), Y(bandOf(ab))) + 16;
     if (y >= top && y <= bot) return [a, b];
   }
   return null;
@@ -281,11 +283,23 @@ export function editorMenu(e, svg) {
   if (d.scale !== undefined) { openMenu(e, rulerMenu(e)); return; }
   if (d.keys !== undefined) return;
   if (y >= rollBottom()) { openMenu(e, laneMenu(e, toSource(T(x)), y > rollBottom() + 22)); return; }
-  const P = S.pitched;
+  const P = S.blocks;                                    // 隣り合う区間（音程ノート・子音・息）
   const idx = (id) => P.findIndex((n) => n.id === id);
   if (d.join !== undefined) {
     const [a, b] = d.join.split('|').map((id) => S.byId.get(id));
     if (a && b) { openMenu(e, boundaryMenu(e, a, b)); return; }
+  }
+  if (d.nop !== undefined && d.nopEdge !== undefined) {
+    // 子音・息の端: 隣と接している端は境目のメニュー（音程ノートの端と同じ）
+    const i = idx(d.nop);
+    const n = P[i];
+    const nb = d.nopEdge === 'end' ? P[i + 1] : P[i - 1];
+    const conn = d.nopEdge === 'end' ? n?.connected_next : n?.connected_prev;
+    if (n && nb && (conn || (d.nopEdge === 'end' ? touching(n, nb) : touching(nb, n)))) {
+      const [a, b] = d.nopEdge === 'end' ? [n, nb] : [nb, n];
+      openMenu(e, boundaryMenu(e, a, b));
+      return;
+    }
   }
   if (d.edge !== undefined) {
     // 隣と接している端（接続でも切り離しでも）= 境目のメニュー。隙間のある端はそのノートのメニュー
