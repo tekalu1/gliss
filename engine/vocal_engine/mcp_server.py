@@ -1594,10 +1594,10 @@ def _replan(p, plan):
 
 @_tool
 def list_connections(start_sec: float = None, end_sec: float = None) -> dict:
-    """隣り合う音程ノートの**接続 / 切り離し**と、**つなぎのなだらかさ**の一覧。
+    """隣り合う区間（音程ノート・子音・息。種類によらない）の**接続 / 切り離し**と、**つなぎのなだらかさ**の一覧。
 
     接続 = 境目を共有（片方を縮めると隣が伸びる）。切り離し = 隙間が増減する。
-    既定: 本当に接している（ノート分割で隣接）ときだけ接続。無声（子音）・息・無音を挟めば、隙間の長さによらず切り離し。
+    既定: 接している（隙間 1e-6 秒以下）ときだけ接続、離れていれば切り離し。種類によらず同じ規則。
     `default` と違うものは `set_connection` か画面（Alt+ドラッグ・吸着）で変えたもの。
     """
     from .project import pitch as PI
@@ -1607,12 +1607,12 @@ def list_connections(start_sec: float = None, end_sec: float = None) -> dict:
     all_trs = PI.transitions(p)
     trs = {(t.a, t.b): t for t in all_trs if t.kind == "boundary"}
     rows = []
-    for a, b, c, dflt in TM.connections(p):
+    for a, b, c, dflt in TM.block_connections(p):
         if start_sec is not None and b.start_sec < float(start_sec):
             continue
         if end_sec is not None and a.end_sec > float(end_sec):
             continue
-        row = {"a": a.id, "b": b.id, "connected": c, "default": dflt,
+        row = {"a": a.id, "b": b.id, "a_kind": a.kind, "b_kind": b.kind, "connected": c, "default": dflt,
                "gap_ms": round((b.start_sec - a.end_sec) * 1000, 1),
                "at_sec": round(a.end_sec, 4)}
         t = trs.get((a.id, b.id))
@@ -1645,14 +1645,14 @@ def _tr_row(t):
 
 @_tool
 def set_connection(note_a: str, note_b: str, connected: bool, author: str = "ai") -> dict:
-    """隣り合う 2 つのノート（a の次が b）の接続を変える。**音は変わらない**（次の編集の動き方が変わる）。"""
+    """隣り合う 2 つの区間（音程ノート・子音・息。a の次が b）の接続を変える。**音は変わらない**（次の編集の動き方が変わる）。"""
     from .project import timing as TM
     p = _project()
     p.reload_if_changed()
-    ns = TM.pitched_notes(p)
+    ns = TM.blocks(p)
     ix = {n.id: i for i, n in enumerate(ns)}
     if note_a not in ix or note_b not in ix or ix[note_b] != ix[note_a] + 1:
-        raise ProjectError("%s の次の音程ノートが %s ではない（list_connections で確認）"
+        raise ProjectError("%s の次の区間が %s ではない（list_connections で確認）"
                            % (note_a, note_b))
     rm, add = TM.connection_specs(p, [(note_a, note_b, bool(connected))])
     cs = p.apply_changes(rm, add, author=author, label="%s｜%s を%s" % (

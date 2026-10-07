@@ -93,9 +93,10 @@ def _check_plan_result(p, plan, x):
 # ---------------------------------------------------------------- 既定の接続
 def test_default_connections(plain):
     from vocal_engine.project import timing as TM
-    c = {(a.id, b.id): v for a, b, v, _ in TM.connections(plain)}
+    c = {(a.id, b.id): v for a, b, v, _ in TM.block_connections(plain)}
     assert c[("n005", "n006")] is True            # ノート分割で隣接 = 接続
-    assert c[("n007", "n009")] is False           # 息（breath）を挟む = 切り離し
+    assert ("n007", "n009") not in c              # 息（breath）を挟む組は、隣り合う区間ではない（息との組が別にある）
+    assert all(v == (b.start_sec - a.end_sec <= 1e-6) for a, b, v, _ in TM.block_connections(plain))   # 接していれば接続、離れていれば切り離し
 
 
 # ---------------------------------------------------------------- リップルなし（書き出しのサンプル一致）
