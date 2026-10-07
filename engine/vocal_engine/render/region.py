@@ -351,15 +351,17 @@ def audition_segments(project, note_id, cents=0.0):
 
 
 def audition(project, note_id, cents=0.0, start_sec=None, end_sec=None, renderer=None,
-             backend=None):
+             backend=None, segs=None):
     """つかんだノートのプレビュー音: ノートを cents だけ動かしたつもりで [start, end) を再合成する。(y, info)
 
     範囲の既定はノートの編集前の範囲（タイミングを動かしたノートは画面が編集後の範囲を渡す）。
-    中身は `render_region` と同じ（掛かる窓を丸ごと再合成して切り出す）。"""
+    中身は `render_region` と同じ（掛かる窓を丸ごと再合成して切り出す）。
+    segs: cents = 0 のとき、同じ版で作ってある Segment 列（無ければ作る）。"""
     n = project.note(note_id)
     t0 = n.start_sec if start_sec is None else float(start_sec)
     t1 = n.end_sec if end_sec is None else float(end_sec)
-    segs = audition_segments(project, note_id, cents)
+    if segs is None or abs(float(cents)) >= 1e-6:
+        segs = audition_segments(project, note_id, cents)
     y, info = render_region(project, t0, t1, backend=backend, renderer=renderer, segs=segs,
                             audition_fast=True)
     info = dict(info, note_id=note_id, cents=round(float(cents), 3))

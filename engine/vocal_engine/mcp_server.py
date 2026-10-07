@@ -2049,7 +2049,7 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
     if p.reload_if_changed():
         _invalidate_renderer()
     from .render.region import RegionRenderer, audition as _aud
-    from .mcp_ara import _rev_parts, audition_pcm, audition_renderer
+    from .mcp_ara import _rev_parts, audition_pcm, audition_renderer, audition_segs
     name = resolve_backend_name(backend)
     with _prep_yield():
         p.ensure_analyzed()
@@ -2062,6 +2062,7 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
         if session is not None and track_id is not None:
             ara_id = session.track(track_id).get("ara_id")
         cached = None
+        segs = None
         cache_t0 = time.perf_counter()
         if ara_id and abs(float(cents)) < 1e-6:
             note = p.note(note_id)
@@ -2072,6 +2073,8 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
             if ib <= ia:
                 raise ValueError("範囲が不正（start >= end）")
             cached = audition_pcm(ara_id, p, name, asig, rev, ia, ib)
+            if cached is None:
+                segs = audition_segs(ara_id, p, name, asig, rev)      # 窓の外・端にかかる範囲: 層は作り直さない
         if cached is not None:
             y, (wa, wb) = cached
             cache_sec = round(time.perf_counter() - cache_t0, 4)
@@ -2093,7 +2096,7 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
                 rr = RegionRenderer.for_project(p, backend=backend, channels="mono",
                                                 audition_local=True)
                 _state["region"][(name, "mono", "audition")] = rr
-            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr)
+            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs)
         if p.view_key() != view_rev or _rev_parts(p) != (asig, erev):
             raise ProjectConflict("試聴中に解析または編集の版が変わった。結果を破棄した")
     if y.ndim == 2 and y.shape[1] > 1:

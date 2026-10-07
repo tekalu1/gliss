@@ -477,13 +477,48 @@ def _rev_parts(p):
     return asig, erev
 
 
+_disk_cache = {}                # project.json のあるフォルダ → (project.json の署名, 方式, 解析のキャッシュのパス・署名, 結果)
+SETTLE_NS = 2_000_000_000       # 書いてからこれより経った project.json だけ、署名が同じなら読み直さない
+
+
+def _stat_sig(path):
+    """ファイルの (更新時刻・大きさ・inode)。無ければ（パスが無ければ）None。"""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def _disk_state(s, t):
-    """(版, 保存の状態の署名)。ディスクの project.json を 1 回だけ読む（無ければ版は EMPTY_REV）。"""
+    """(版, 保存の状態の署名)。ディスクの project.json を読む（無ければ版は EMPTY_REV）。
+
+    プラグインが 1 秒ごとに全修飾の版を聞く（`ara_revs`）。読み直し（17 修飾・約 10 MB で 0.3 秒、Python の GIL を握る）を
+    毎回すると、エンジンの他のツール（試聴）が秒単位で待たされる。版と署名は project.json・F0 の方式・解析のキャッシュの
+    ファイルだけから決まる（`_rev_parts`・`_state_sig`）ので、その署名が前と同じなら前の結果を返す。
+    書いた直後（SETTLE_NS 以内）の署名は、同じ時刻の次の書き込みと区別できないので信用せず、毎回読む。"""
     pdir = s.project_dir_of(t)
-    if not os.path.exists(os.path.join(pdir, "project.json")):
+    pj = os.path.join(pdir, "project.json")
+    sig = _stat_sig(pj)
+    if sig is None:
         return EMPTY_REV, _state_sig(t, None)
+    key, est = _norm(pdir), t.get("estimator")
+    hit = _disk_cache.get(key)
+    if hit is not None and hit[0] == sig and hit[1] == est and _stat_sig(hit[2]) == hit[3]:
+        return hit[4]
+    checked = time.time_ns()
     p = Project(pdir).load()
-    return "%s:%s" % _rev_parts(p), _state_sig(t, p)
+    result = "%s:%s" % _rev_parts(p), _state_sig(t, p)
+    cache = ((p.analysis or {}).get("take") or {}).get("cache")
+    cache_sig = _stat_sig(cache) if cache else None
+    settled = checked - sig[0] > SETTLE_NS and (cache_sig is None or checked - cache_sig[0] > SETTLE_NS)
+    if settled and _stat_sig(pj) == sig:
+        _disk_cache[key] = (sig, est, cache, cache_sig, result)
+    else:
+        _disk_cache.pop(key, None)
+    return result
 
 
 def _disk_rev(s, t):
@@ -540,6 +575,17 @@ def audition_renderer(ara_id, p, backend, asig):
         return None
     _renderers.move_to_end(ara_id)
     return rr
+
+
+def audition_segs(ara_id, p, backend, asig, rev):
+    """ARAの再生用に作った同じ版の Segment 列（無ければ None）。cents = 0 の試聴はこの列で再合成でき、編集の層を
+    作り直さなくて済む（編集が多い曲で 0.2 秒以上）。"""
+    st = _render.get(ara_id)
+    if (st is None or st.get("rev") != rev or st.get("asig") != asig
+            or st.get("backend") != backend or st.get("pending")
+            or st.get("project_dir") != _norm(p.dir)):
+        return None
+    return st.get("segs")
 
 
 def audition_pcm(ara_id, p, backend, asig, rev, ia, ib):
