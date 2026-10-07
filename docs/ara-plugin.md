@@ -71,7 +71,7 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 - 原音と比べる（`DocumentBridge::setCompare`）間は窓を当てない（全部の修飾の音が変わったとホストに知らせる）。
 - ドキュメントの編集中（`willBeginEditing`〜`didEndEditing`）は、オーディオスレッドが待たずに（`ScopedTryReadLock`）そのブロックを無音にする。
 - DAW の再生位置は `GlissProcessor::processBlock` が `PlayheadState` に書く。再生中は一つの processor を位置の正本に選び、停止中に別の再生中 processor が現れた場合や更新が途切れた場合だけ切り替える。複数の値は連番の前後一致で同じブロックから読み、エディタへ `song_sec`・`stamp_ms`・`sequence` として 30 Hz で送る（ループの PPQ はその位置の BPM で秒に直す）。画面は通知時刻との差から配送の揺れを補正し、補間を 55 ms に制限する。ソングの秒は上段・時計の正本、リージョンに写したソースの秒は下段の表示だけに使う。
-- `EditorRenderer` はエンジンの `render_audition` が作った補正後の WAV を作業スレッドで読み、DAW の音声出力へ足す。音声コールバックは準備済み PCM を読むだけでロック・IO・確保をしない。ループ端、開始、ピッチ差し替え、離したときは 6 ms でフェードし、DAW の通常再生中とオフライン描画には足さない。離す・フォーカス喪失・ホストの再生開始・文書破棄・native editor の破棄では準備中のリクエストも世代番号で取り消す。短いホスト再生が画面への通知の間に終わっても、音声コールバックの取消印で古い試聴を再開させない。同一ドキュメントの複数 EditorRenderer は最初に出力処理した 1 つだけが試聴を加算し、所有者が消えるか 250 ms 更新しなければ別の renderer に渡す。`bootstrap.preview` は EditorRenderer がある場合に保存した設定（未設定ならオン）を返す。`preview('start')` は PCM を公開してから `{ok:true}`、利用できないときは `{ok:false,reason}` を返す。
+- `EditorRenderer` はエンジンの `render_audition` が作った補正後の WAV を作業スレッドで読み、DAW の音声出力へ足す。音声コールバックは準備済み PCM を読むだけでロック・IO・確保をしない。ループ端、開始、ピッチ差し替え、離したときは 6 ms でフェードし、DAW の通常再生中とオフライン描画には足さない。離す・フォーカス喪失・ホストの再生開始・文書破棄・native editor の破棄では準備中のリクエストも世代番号で取り消す。短いホスト再生が画面への通知の間に終わっても、音声コールバックの取消印で古い試聴を再開させない。同一ドキュメントの複数 EditorRenderer のうち試聴を加算するのは 1 つだけ。画面は `preview('start')` に試聴するノートの修飾の `ara_id` を渡し、プラグインは DAW が各 EditorRenderer に割り当てた再生リージョン（またはリージョン列）にその修飾のリージョンを持つ renderer だけを加算の候補にする（Gliss を挿したトラックが何本もある曲で、ミュートのトラックやフォルダーの中のトラック、別のトラックの renderer に先に当たって、聞こえるトラックで鳴らなくなるのを避ける）。候補の中では最初に出力処理した 1 つが所有し、所有者が消えるか 250 ms 更新しなければ別の候補に渡す。候補でない renderer は、候補が 250 ms 呼ばれていない間（DAW がそのトラックの Gliss を処理していない）だけ加算を引き継ぐ。候補が呼ばれ始めたら、候補でない所有者から候補が奪う。持つ renderer が 1 つも無い・`ara_id` が無いときは絞らず、最初に処理した 1 つが加算する（従来どおり）。絞りの結果は `GLISS_ARA_TRACE_DIR` のログの `preview: target modification … is covered by N of M editor renderers`（対象が変わったときだけ）に出る。`bootstrap.preview` は EditorRenderer がある場合に保存した設定（未設定ならオン）を返す。`preview('start')` は PCM を公開してから `{ok:true}`、利用できないときは `{ok:false,reason}` を返す。
 - 画面の `previewState()` は `phase`（`idle`・`preparing`・`sounding`・`error`）、`error`、`sounding` を返す。`phase` が変わると `gliss-preview-state` を送り、`detail` はその時点の `previewState()`。遅れて返った取り消し済みの開始結果からは通知しない。
 - ARA に結び付かない（普通の VST3 として読み込まれた）ときは、入力をそのまま通す。
 
@@ -292,7 +292,7 @@ AI からの手順:
 
 エンジンの起動の設定（`GLISS_ENGINE_PYTHON`・`GLISS_ENGINE_CWD`）は下の「配布版のプラグインがエンジンを見つける順」、エンジン側の環境変数（`VOCAL_ENGINE_WORK_DIR`・`GLISS_F0_ESTIMATOR` など）は AGENTS.md。試験では `VOCAL_ENGINE_WORK_DIR`・`VOCAL_ENGINE_LOG_DIR` を一時フォルダに向ける。
 
-実 DAW の試聴音を確認するときは、DAW 起動前に `GLISS_ARA_TRACE_DIR` を試験用フォルダへ向ける。ホスト再生を止め、ノートを長押ししてから離し、停止後も 1 秒ほどエディタを開いたままにして音声コールバックを通す。ログは message thread が約 100 ms ごとに書く。`preview-trace` の `mode=r active=1 nonzero>0 energy>0` は EditorRenderer が実際に PCM を出力へ加えた証拠で、UI の `sounding` 表示には依存しない。離した後は `release=1` の短いフェードに続き、`mode=r active=0 release=0 nonzero=0 energy=0` のブロックを時系列で確認する。EditorRenderer の解放時には集計行 `preview: release ... frames>0 nonzero>0 energy>0 stopZeroBlocks>0 dropped=0` も出る。`mode=h` は DAW 再生中、`mode=o` はオフライン、`mode=x` は別の EditorRenderer が出力を担当したブロックで、これらのゼロは試聴停止の根拠に使わない。message thread が長く塞がれて `dropped>0` なら、その区間は確認できない。二乗和は発音と停止を示すが、実機でのピッチ値そのものは示さない。
+実 DAW の試聴音を確認するときは、DAW 起動前に `GLISS_ARA_TRACE_DIR` を試験用フォルダへ向ける。ホスト再生を止め、ノートを長押ししてから離し、停止後も 1 秒ほどエディタを開いたままにして音声コールバックを通す。ログは message thread が約 100 ms ごとに書く。`preview-trace` の `mode=r active=1 nonzero>0 energy>0` は EditorRenderer が実際に PCM を出力へ加えた証拠で、UI の `sounding` 表示には依存しない。離した後は `release=1` の短いフェードに続き、`mode=r active=0 release=0 nonzero=0 energy=0` のブロックを時系列で確認する。EditorRenderer の解放時には集計行 `preview: release ... frames>0 nonzero>0 energy>0 stopZeroBlocks>0 dropped=0` も出る。`mode=h` は DAW 再生中、`mode=o` はオフライン、`mode=x` は別の EditorRenderer が出力を担当した（または試聴するノートの修飾を持たない）ブロックで、これらのゼロは試聴停止の根拠に使わない。message thread が長く塞がれて `dropped>0` なら、その区間は確認できない。二乗和は発音と停止を示すが、実機でのピッチ値そのものは示さない。
 
 ## ビルド
 
@@ -471,7 +471,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 | `plugin/src/GlissProcessor.*` | `AudioProcessor`（`createPluginFilter`・`createARAFactory` もここ） |
 | `plugin/src/GlissDocumentController.*` | ARA の `DocumentController`。ARA の出来事 → `DocumentSync`、アーカイブ、`DocumentBridge` の実装（`engineCall`・`bootstrap`・`saveState`・`transport`・`hostState`・`isReadableByEditor`・選択と再生位置の知らせ）、ホストの音のリーダー |
 | `plugin/src/GlissPlaybackRenderer.*` | 再生（リージョンごとの `RegionReader`・原音の先読み・バウンスでの同期の待ち・比べる・検証の記録） |
-| `plugin/src/GlissEditorRenderer.*` | 試聴の役（まだ何も足さない） |
+| `plugin/src/GlissEditorRenderer.*` | 試聴の役（補正後の試聴 PCM を DAW の出力に足す。試聴するノートの修飾を持つ renderer だけが足す） |
 | `plugin/src/ara/` | ドキュメントの部品（ARA の型を使わず、単体テストにも入る）: `DocumentSync`（エンジンとの同期のスレッド）・`NoteContent`（DAW に返すノートの写し・リージョンでの切り取り・品質のラベル）・`ArchiveIO`（アーカイブの形・作業場所の鍵）・`RegionMapping`（リージョンの時間）・`PlayheadState`・`EngineCalls`（禁止のツール・同期の予約・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方）・`FloatWavWriter`・`PluginState`。`sources.cmake` が ARA を使うファイル（`GlissEditorRenderer`）をプラグインだけに足す |
 | `plugin/src/engine/`・`plugin/src/cache/` | エンジンの子プロセスと MCP クライアント・編集した窓のキャッシュと再生の読み出し |
 | `plugin/src/GlissEditor.*` | プラグインのエディタ（`DocumentBridge` を得て画面を出す・選択を渡す・ARA でないときの案内） |
