@@ -19,7 +19,7 @@
 //    （S.head・S.playing は ara.js が入れる）。つかんだノートのプレビュー音は C++ の EditorRenderer が DAW の出力で鳴らす。
 import { call, callJob, status } from './engine.js';
 import { ARA, araPreview, araSelectedModification, araTransport } from './ara.js';
-import { S, audible, timelineRange } from './state.js';
+import { S, audible, shownTrack, timelineRange } from './state.js';
 import { dbToGain, gainOf, panOf } from './mixer.js';
 import { follow, movePlayhead, renderToolbar } from './draw.js';
 import { waitFor } from './edits.js';
@@ -355,14 +355,21 @@ function previewRequest(noteId) {
   return { note_id: noteId, cents: n.kind === 'note' ? wantCents(noteId) : 0, start_sec: +a.toFixed(6), end_sec: +b.toFixed(6) };
 }
 
+/** 試聴の元になる状態。トラックの切り替えの途中（S.session.current は新しいトラックだが、S.vd・S.byId・S.projectDir はまだ前のトラック）は
+ * null（前のトラックのノートの時刻で、新しいトラックの音を切り出さない）。表示しているトラックは state.js の shownTrack（syncOff と同じ規則）。 */
 function previewContext() {
   if (!ARA) return null;
   const track = S.tracks.find((t) => t.id === S.session?.current);
   const selected = araSelectedModification();
-  if (!track?.ara_id || !S.projectDir || !S.vd?.view_rev
+  if (!track?.ara_id || !S.projectDir || !S.vd?.view_rev || shownTrack()?.id !== track.id
       || (selected && (selected.track_id !== track.id || selected.ara_id !== track.ara_id))) return null;
   return { view: S.vd, rev: S.vd.view_rev, track: track.id, araId: track.ara_id,
     project: S.projectDir, selected };
+}
+
+/** プラグインのログ（preview: start の行）に残す、画面の側の状態（どのトラックを選んでいて、どのトラックを描いていたか）。 */
+function previewTrackInfo(context) {
+  return { ui_track: context.track, shown_track: shownTrack()?.id || '' };
 }
 
 function previewContextCurrent(ctx, args) {
@@ -497,7 +504,8 @@ async function requestPreview() {
         // ずらさない試聴（長押し・クリック）は、DAW のプラグインが持つ編集済みの音から、エンジンを呼ばずに切り出して鳴らす。
         // 編集したばかりのノートは、キャッシュが追いついていないことがあるので、追いついてから（stale ならエンジンで）
         const local = await araPreview('start', { local: true, ara_id: context.araId, note, cents: 0,
-          start_sec: args.start_sec, end_sec: args.end_sec, allow_stale: !strictFor(note), loop: true });
+          start_sec: args.start_sec, end_sec: args.end_sec, allow_stale: !strictFor(note), loop: true,
+          ...previewTrackInfo(context) });
         if (tok !== PV.token) return;
         if (local?.ok) {
           PV.host = true;
@@ -519,7 +527,8 @@ async function requestPreview() {
           && r.track_id === context.track && r.ara_id === context.araId && r.note_id === note && r.cents === args.cents;
         if (!fresh) { await new Promise((r) => setTimeout(r, 80)); continue; }   // 編集の最中・版が変わった: 待って取り直す
         // native は準備した PCM を EditorRenderer へ渡してから ok を返す
-        const result = await araPreview('start', { path: r.path, loop: true, note, cents: args.cents, ara_id: context.araId });
+        const result = await araPreview('start', { path: r.path, loop: true, note, cents: args.cents, ara_id: context.araId,
+          ...previewTrackInfo(context) });
         if (tok !== PV.token) return;
         if (!previewContextCurrent(context, args)) {            // 渡している間に編集が始まった: 止めて取り直す
           await araPreview('stop');

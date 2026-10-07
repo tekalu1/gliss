@@ -47,7 +47,7 @@ test('release, blur and host playback cancel an ARA preview even while native st
     const { S } = await import('../../renderer/state.js');
     const { preparePreview, startPreview, stopPreview, previewState } = await import('../../renderer/audio.js');
     S.playing = false; S.vd = { view_rev: 'view-1' }; S.local.pitch = new Map();
-    S.session = { current: 'track-1' }; S.tracks = [{ id: 'track-1', ara_id: 'mod-1' }];
+    S.session = { current: 'track-1' }; S.tracks = [{ id: 'track-1', ara_id: 'mod-1', project_dir: 'synthetic-project' }];
     S.projectDir = 'synthetic-project'; S.busy = false; S.queued = 0; S.pendingPlan = false;
     S.byId = new Map([
       ['n1', { id: 'n1', kind: 'note', start_sec: 0.1, end_sec: 0.5 }],
@@ -280,7 +280,7 @@ test('ARA preview: starts at pointerdown, serves cents=0 locally, retries while 
     const attack = { id: 'u1', kind: 'unvoiced', start_sec: 0.9, end_sec: 1.0 };
     const breath = { id: 'b1', kind: 'breath', start_sec: 2.0, end_sec: 2.3 };
     S.playing = false; S.vd = { view_rev: 'view-1' }; S.local.pitch = new Map();
-    S.session = { current: 'track-1' }; S.tracks = [{ id: 'track-1', ara_id: 'mod-1' }];
+    S.session = { current: 'track-1' }; S.tracks = [{ id: 'track-1', ara_id: 'mod-1', project_dir: 'synthetic-project' }];
     S.projectDir = 'synthetic-project'; S.busy = false; S.queued = 0; S.pendingPlan = false;
     S.notes = [attack, note, breath];
     S.byId = new Map(S.notes.map((n) => [n.id, n]));
@@ -373,6 +373,69 @@ test('ARA preview: starts at pointerdown, serves cents=0 locally, retries while 
     expect(names()).toContain('start');
     expect(names()).toContain('stop');
     expect(log.find((x) => x[0] === 'stop')[1]).toBeGreaterThan(log.find((x) => x[0] === 'start')[1] + 150);
+  } finally {
+    globalThis.window = oldWindow;
+    globalThis.document = oldDocument;
+    globalThis.CustomEvent = oldCustomEvent;
+  }
+});
+
+// トラックの切り替えの途中（S.session.current は新しいトラック、S.vd・S.byId・S.projectDir はまだ前のトラック）に押しても、
+// 前のトラックのノートの時刻で、新しいトラックの音を切り出して鳴らさない。表示が新しいトラックに追いついたら、そのトラックで鳴る。
+test('ARA preview: pressing while the view still shows the previous track does not play the new track', async () => {
+  const oldWindow = globalThis.window;
+  const oldDocument = globalThis.document;
+  const oldCustomEvent = globalThis.CustomEvent;
+  const log = [];
+  let renderCalls = 0;
+  globalThis.CustomEvent = class { constructor(type, init) { this.type = type; this.detail = init.detail; } };
+  globalThis.window = {
+    api: {
+      mode: 'ara',
+      call: async (tool, args) => {
+        if (tool !== 'render_audition') return { ok: true };
+        renderCalls++;
+        return { ok: true, path: 'preview.wav', view_rev: 'view-1', rev: 'audio-1', track_id: 'track-2',
+          ara_id: 'mod-2', note_id: args.note_id, cents: args.cents, source_id: 'source-2' };
+      },
+      preview: async (op, arg) => { log.push([op, arg]); return { ok: true }; },
+    },
+    addEventListener: () => {},
+    dispatchEvent: () => {},
+  };
+  globalThis.document = { documentElement: { dataset: {} }, hidden: false, querySelector: () => null, addEventListener: () => {} };
+  try {
+    const { S, shownTrack } = await import('../../renderer/state.js');
+    const { startPreview, stopPreview, previewState } = await import('../../renderer/audio.js');
+    const note1 = { id: 'n1', kind: 'note', start_sec: 1.0, end_sec: 1.5, pitch_editable: true };   // トラック 1 の n1
+    const note2 = { id: 'n1', kind: 'note', start_sec: 4.0, end_sec: 4.6, pitch_editable: true };   // トラック 2 の n1（ID は同じ）
+    S.playing = false; S.local.pitch = new Map(); S.busy = false; S.queued = 0; S.pendingPlan = false;
+    S.tracks = [{ id: 'track-1', ara_id: 'mod-1', project_dir: 'p1' }, { id: 'track-2', ara_id: 'mod-2', project_dir: 'p2' }];
+    // 切り替えの途中: 選んでいるのはトラック 2、描いているのはまだトラック 1
+    S.session = { current: 'track-2' };
+    S.projectDir = 'p1'; S.vd = { view_rev: 'view-1' };
+    S.notes = [note1]; S.byId = new Map([['n1', note1]]);
+    expect(shownTrack()?.id).toBe('track-1');
+
+    startPreview('n1');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(log.filter((x) => x[0] === 'start')).toEqual([]);      // 前のトラックのノートの時刻で、トラック 2 の音を切り出さない
+    expect(renderCalls).toBe(0);
+    expect(previewState().phase).toBe('error');
+    stopPreview();
+    log.length = 0;
+
+    // 表示がトラック 2 に追いついた: トラック 2 の修飾・ノートの時刻で鳴る
+    S.projectDir = 'p2'; S.vd = { view_rev: 'view-1' };
+    S.notes = [note2]; S.byId = new Map([['n1', note2]]);
+    expect(shownTrack()?.id).toBe('track-2');
+    startPreview('n1');
+    await new Promise((r) => setTimeout(r, 100));
+    const started = log.find((x) => x[0] === 'start');
+    expect(started?.[1]).toMatchObject({ local: true, ara_id: 'mod-2', note: 'n1', start_sec: 4.0, end_sec: 4.6,
+      ui_track: 'track-2', shown_track: 'track-2' });
+    expect(previewState().phase).toBe('sounding');
+    stopPreview();
   } finally {
     globalThis.window = oldWindow;
     globalThis.document = oldDocument;

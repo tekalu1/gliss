@@ -139,13 +139,18 @@ export function currentTrack() {
   return S.tracks.find((t) => t.id === S.session?.current) || null;
 }
 
+/** 画面が今描いているデータ（S.vd・S.byId = S.projectDir）のトラック。切り替えの途中（S.session.current は新しいトラック、
+ * S.vd はまだ前のトラック）では current と違う。無ければ null。 */
+export function shownTrack() {
+  const norm = (p) => String(p || '').replace(/\//g, '\\').toLowerCase();
+  return S.projectDir
+    ? S.tracks.find((t) => t.project_dir && norm(t.project_dir) === norm(S.projectDir)) || null : null;
+}
+
 /** 下に出しているデータ（S.vd = S.projectDir のトラック）の位置を S.off に。切り替えの途中でも、
  * 下の目盛り・再生位置は下に出ているトラックの位置で描く（ドラッグ中の見かけの位置を含む）。 */
 export function syncOff() {
-  const norm = (p) => String(p || '').replace(/\//g, '\\').toLowerCase();
-  const shown = S.projectDir
-    ? S.tracks.find((t) => t.project_dir && norm(t.project_dir) === norm(S.projectDir)) : null;
-  const t = shown || currentTrack();
+  const t = shownTrack() || currentTrack();
   S.off = t ? offsetOf(t) : 0;
 }
 
