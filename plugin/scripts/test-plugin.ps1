@@ -11,7 +11,11 @@
 #   5. GlissHostCheck --editor: the editor's page (app/renderer, embedded) on a fake DocumentBridge, in-process and off-screen:
 #      ui-ready, native functions, /fs/, events, keys, open/close 20 times with 2 editors
 #   6. the same with GLISS_PLUGIN_WEB_DIR pointing at a marked copy of app/renderer (the page is read from the folder)
-#   Checks 1-3, 5 and 6 run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
+#   6b. GlissHostCheck --ara-playback: a real ARA document (JUCE ARA hosting) prepared once; then a region is added, the samples
+#      access is switched off and on, and the host reports a change of the source's samples. The original sound keeps playing
+#      each time (the renderer replaces its source readers and region table without prepareToPlay), and plugin.log has the
+#      renderer lines (prepare, source reader replaced, regions synced, release)
+#   Checks 1-3, 5, 6 and 6b run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
 #   worktree's .venv, cwd = this worktree's engine, Praat for the pitch, a temporary work folder):
 #   7. ARA SDK TestHost, all test cases
 #   8. GlissARATest (plugin/tests/aratest): a test edit (GLISS_TEST_EDIT) -> render -> archive -> restore in another work
@@ -183,6 +187,16 @@ try {
         @{ GLISS_ARA_TRACE_DIR = $hcTrace; GLISS_PLUGIN_WEB_DIR = $webDir }
     $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
     Report 'GlissHostCheck --editor (GLISS_PLUGIN_WEB_DIR)' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+    # 6b. the renderer keeps playing after the host changes things without prepareToPlay (plugin.log is redirected here)
+    $report = Join-Path $work 'ara-playback-report.txt'
+    $playbackLog = Join-Path $work 'ara-playback-plugin.log'
+    [System.IO.File]::Delete($playbackLog)
+    $code = Invoke-Checked $hostCheck @('--ara-playback', $report, $gliss, $playbackLog) 'ara-playback' `
+        @{ GLISS_ENGINE_DISABLED = '1'; GLISS_PLUGIN_LOG_FILE = $playbackLog }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    Report 'GlissHostCheck --ara-playback (readers and regions after prepare)' ($code -eq 0) "exit=$code $summary"
     if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
 
     if (-not $EnginePython -or -not (Test-Path $EnginePython)) {
