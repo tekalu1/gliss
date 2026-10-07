@@ -165,6 +165,8 @@ private:
     juce::var loadedState();
     const TrackView* findTrackByTrackId (const juce::String& trackId) const;
     std::optional<double> toSongSeconds (const juce::var& arg, const juce::String& secKey) const;
+    /** 試聴するノートの修飾（ara_id）を持つ EditorRenderer だけが試聴を足すようにする（空なら絞らない）。 */
+    void targetPreview (const juce::String& araId);
 
     juce::ReadWriteLock processBlockLock;
     bool editing = false;
@@ -175,6 +177,7 @@ private:
     PlayheadState playheadState;
     std::shared_ptr<PreviewAudio> previewAudio = std::make_shared<PreviewAudio>();
     std::atomic<std::uint64_t> previewGeneration { 0 };
+    juce::String lastPreviewTarget;   // targetPreview のログを、対象が変わったときだけ書くため
     std::atomic<bool> compare { false };
 
     // ホストにノートを「まだ無い」と答えた修飾（m:<ID>）・ソース（s:<ID>）。ホストの読み出しのスレッドとメッセージスレッドが触る

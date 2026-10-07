@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_basics/juce_audio_basics.h>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <limits>
@@ -46,20 +47,36 @@ public:
     }
     std::uint64_t getCancellationEpoch() const noexcept { return cancelState.load() >> 1; }
     void render (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor, RenderStats* stats = nullptr) noexcept;
-    std::uint64_t addRenderer() noexcept { renderers.fetch_add (1); return nextRendererId.fetch_add (1); }
+    std::uint64_t addRenderer() noexcept;
     void removeRenderer (std::uint64_t id) noexcept;
     bool hasRenderer() const noexcept { return renderers.load() > 0; }
+    /** 試聴するノートの修飾を持つ EditorRenderer の id を渡す（メッセージスレッド）。ここに入った renderer だけが試聴を足す。
+        空なら（修飾を持つ renderer が無い・ホストが領域を渡さない）絞らず、どの renderer も足せる。
+        所有者が絞りから外れたら外す。持つ renderer が 250 ms 呼ばれなければ、持たない renderer が足す（持つ側が止まっている）。 */
+    void setEligibleRenderers (const std::vector<std::uint64_t>& ids, std::uint32_t nowMs) noexcept;
     bool renderForRenderer (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor,
                             std::uint64_t rendererId, std::uint32_t nowMs, RenderStats* stats = nullptr) noexcept;
 
 private:
+    /** 登録した renderer の枠。オーディオスレッドが id から eligible を引く（ロックしない）。 */
+    struct RendererSlot
+    {
+        std::atomic<std::uint64_t> id { 0 };
+        std::atomic<bool> eligible { true };
+    };
+    static constexpr int maxRendererSlots = 128;
+
+    const RendererSlot* findSlot (std::uint64_t id) const noexcept;
+    bool isEligible (std::uint64_t id) const noexcept;
     void collect();
     std::atomic<const Clip*> current { nullptr }, previous { nullptr };
     std::atomic<std::uint64_t> transition { 0 };
     std::atomic<std::uint64_t> cancelState { 0 }; // upper bits: generation, low bit: host playback suppression
     std::atomic<int> readers { 0 }, renderers { 0 };
     std::atomic<std::uint64_t> nextRendererId { 1 }, activeRendererId { 0 };
-    std::atomic<std::uint32_t> ownerStampMs { 0 };
+    std::atomic<std::uint32_t> ownerStampMs { 0 }, eligibleStampMs { 0 };
+    std::atomic<bool> narrowed { false };   // setEligibleRenderers が renderer を絞っている
+    std::array<RendererSlot, maxRendererSlots> slots;
     std::atomic_flag renderGate = ATOMIC_FLAG_INIT;
     std::unique_ptr<Clip> owned;
     std::unique_ptr<Clip> previousOwned;

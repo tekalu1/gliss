@@ -38,6 +38,24 @@ void GlissEditorRenderer::releaseResources()
     ARAEditorRenderer::releaseResources();
 }
 
+bool GlissEditorRenderer::coversModification (const juce::String& araId) const
+{
+    const auto isIt = [&araId] (const juce::ARAPlaybackRegion* region)
+    {
+        const auto* modification = region != nullptr ? region->getAudioModification() : nullptr;
+        return modification != nullptr && juce::String (modification->getPersistentID()) == araId;
+    };
+
+    for (const auto* region : getPlaybackRegions<juce::ARAPlaybackRegion>())
+        if (isIt (region)) return true;
+
+    for (const auto* sequence : getRegionSequences<juce::ARARegionSequence>())
+        for (const auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
+            if (isIt (region)) return true;
+
+    return false;
+}
+
 void GlissEditorRenderer::closeTrace()
 {
     stopTimer();

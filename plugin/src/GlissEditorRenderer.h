@@ -27,6 +27,12 @@ public:
                        const juce::AudioPlayHead::PositionInfo& positionInfo) noexcept override;
 
     using ARAEditorRenderer::processBlock;
+
+    std::uint64_t getRendererId() const noexcept { return rendererId; }
+    /** DAW がこの renderer に割り当てた再生リージョン（またはリージョン列）に、この修飾（persistentID）のリージョンがあるか。
+        ARA のメインスレッド（メッセージスレッド）から呼ぶ。試聴を足す renderer を選ぶのに使う。 */
+    bool coversModification (const juce::String& araId) const;
+
 private:
     struct TraceEntry
     {

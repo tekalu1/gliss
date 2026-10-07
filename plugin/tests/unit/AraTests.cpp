@@ -587,6 +587,75 @@ public:
             shared.removeRenderer (fourthId);
         }
 
+        beginTest ("only the EditorRenderer that holds the auditioned modification adds the preview");
+        {
+            // 17 トラックの曲: 試聴するノートの修飾を持つのは 1 つの renderer だけ。ほかはミュートのトラックなどで先に呼ばれる。
+            PreviewAudio shared;
+            std::vector<std::uint64_t> ids;
+            for (int i = 0; i < 17; ++i) ids.push_back (shared.addRenderer());
+            const auto mine = ids[11];
+            std::vector<PreviewAudio::Cursor> cursors (ids.size());
+            juce::AudioBuffer<float> out (1, 480);
+            const auto renderAt = [&] (size_t index, std::uint32_t nowMs)
+            {
+                out.clear();
+                return shared.renderForRenderer (out, 48000.0, cursors[index], ids[index], nowMs);
+            };
+            shared.publish (makeClip (0.4f));
+            shared.setEligibleRenderers ({ mine }, 1000);
+
+            // 持たない renderer が先に毎ブロック呼ばれても、持つ renderer が足す
+            for (std::uint32_t t = 1000; t < 1100; t += 10)
+            {
+                for (size_t i = 0; i < ids.size(); ++i)
+                {
+                    if (i == 11) continue;
+                    expect (! renderAt (i, t), "ineligible " + juce::String ((int) i) + " at " + juce::String ((int) t));
+                    expectWithinAbsoluteError (out.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+                }
+                expect (renderAt (11, t), "eligible renderer adds");
+                expect (out.getSample (0, 400) > 0.3f);
+            }
+
+            // 持つ renderer が 250 ms 呼ばれなくなったら（持つトラックが止まっている）、持たない renderer が足す
+            expect (! renderAt (3, 1200), "ineligible waits while the eligible renderer is alive");
+            expect (renderAt (3, 1400), "ineligible takes over when the eligible one stopped");
+            expect (out.getSample (0, 400) > 0.3f);
+            // 持つ renderer が戻ったら、持たない側の所有を奪って足す
+            expect (renderAt (11, 1410), "the eligible renderer takes the preview back");
+            expect (out.getSample (0, 400) > 0.3f);
+            expect (! renderAt (3, 1410), "ineligible stays out again");
+
+            // 試聴するノートの修飾が別の renderer に移ったら、所有者を外して新しい持ち主が足す
+            shared.setEligibleRenderers ({ ids[5] }, 2000);
+            expect (! renderAt (11, 2000), "old owner is out after retargeting");
+            expect (renderAt (5, 2000), "new eligible renderer takes the preview");
+            expect (out.getSample (0, 400) > 0.3f);
+            expect (! renderAt (11, 2010), "old owner stays out");
+
+            // 持つ renderer が無ければ（ホストが領域を渡さない）絞らない: 先に呼ばれた 1 つが足す
+            shared.setEligibleRenderers ({}, 3000);
+            expect (renderAt (2, 3000), "not narrowed: the first renderer adds");
+            expect (out.getSample (0, 400) > 0.3f);
+            expect (! renderAt (7, 3000), "not narrowed: the second one does not");
+
+            for (auto id : ids) shared.removeRenderer (id);
+        }
+
+        beginTest ("a renderer added while narrowed does not take the preview");
+        {
+            PreviewAudio shared;
+            const auto first = shared.addRenderer();
+            shared.publish (makeClip (0.4f));
+            shared.setEligibleRenderers ({ first }, 500);
+            const auto late = shared.addRenderer();
+            PreviewAudio::Cursor lateCursor;
+            juce::AudioBuffer<float> out (1, 480);
+            expect (! shared.renderForRenderer (out, 48000.0, lateCursor, late, 500));
+            shared.removeRenderer (first);
+            shared.removeRenderer (late);
+        }
+
         beginTest ("new audition PCM changes the actual output pitch");
         {
             PreviewAudio pitched;

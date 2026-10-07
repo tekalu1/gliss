@@ -1,4 +1,5 @@
 #include "PreviewAudio.h"
+#include <algorithm>
 #include <cmath>
 
 namespace gliss
@@ -54,21 +55,89 @@ void PreviewAudio::stop()
     publish (nullptr);
 }
 
+std::uint64_t PreviewAudio::addRenderer() noexcept
+{
+    renderers.fetch_add (1);
+    const auto id = nextRendererId.fetch_add (1);
+    for (auto& slot : slots)
+    {
+        std::uint64_t free = 0;
+        if (slot.id.compare_exchange_strong (free, id))
+        {
+            // 絞っている最中に増えた renderer は、次の setEligibleRenderers まで足さない側に置く。
+            slot.eligible.store (! narrowed.load());
+            break;
+        }
+    }
+    return id;
+}
+
 void PreviewAudio::removeRenderer (std::uint64_t id) noexcept
 {
     auto expected = id;
     activeRendererId.compare_exchange_strong (expected, 0);
+    for (auto& slot : slots)
+    {
+        auto mine = id;
+        if (slot.id.compare_exchange_strong (mine, 0)) break;
+    }
     renderers.fetch_sub (1);
+}
+
+const PreviewAudio::RendererSlot* PreviewAudio::findSlot (std::uint64_t id) const noexcept
+{
+    for (const auto& slot : slots)
+        if (slot.id.load() == id) return &slot;
+    return nullptr;
+}
+
+bool PreviewAudio::isEligible (std::uint64_t id) const noexcept
+{
+    if (! narrowed.load()) return true;
+    const auto* slot = findSlot (id);
+    return slot == nullptr || slot->eligible.load(); // 枠が尽きた renderer は絞らない（足せなくならないように）
+}
+
+void PreviewAudio::setEligibleRenderers (const std::vector<std::uint64_t>& ids, std::uint32_t nowMs) noexcept
+{
+    if (ids.empty())
+    {
+        narrowed.store (false);
+        for (auto& slot : slots) slot.eligible.store (true);
+        return;
+    }
+    // 持つ側がこれから呼ばれるのを待つ猶予を数える（持つ側が一度も来ないまま持たない側が足してしまわないように）。
+    eligibleStampMs.store (nowMs);
+    for (auto& slot : slots)
+    {
+        const auto id = slot.id.load();
+        slot.eligible.store (id != 0 && std::find (ids.begin(), ids.end(), id) != ids.end());
+    }
+    narrowed.store (true);
+    auto owner = activeRendererId.load();
+    if (owner != 0 && ! isEligible (owner))
+        activeRendererId.compare_exchange_strong (owner, 0);
 }
 
 bool PreviewAudio::renderForRenderer (juce::AudioBuffer<float>& output, double outputRate, Cursor& cursor,
                                       std::uint64_t rendererId, std::uint32_t nowMs, RenderStats* stats) noexcept
 {
-    if (rendererId == 0 || renderGate.test_and_set (std::memory_order_acquire)) return false;
+    if (rendererId == 0) return false;
+    const auto eligible = isEligible (rendererId);
+    if (narrowed.load())
+    {
+        // 試聴するノートの修飾を持つ renderer が動いている間は、持たない renderer（ミュートのトラックなど）は足さない。
+        if (eligible) eligibleStampMs.store (nowMs);
+        else if ((std::uint32_t) (nowMs - eligibleStampMs.load()) <= 250) return false;
+    }
+    if (renderGate.test_and_set (std::memory_order_acquire)) return false;
     auto owner = activeRendererId.load();
     if (owner != rendererId)
     {
-        if (owner != 0 && (std::uint32_t) (nowMs - ownerStampMs.load()) <= 250)
+        const auto ownerAlive = owner != 0 && (std::uint32_t) (nowMs - ownerStampMs.load()) <= 250;
+        // 持たない renderer が所有している間でも、持つ renderer は代わって足す。
+        const auto displace = ownerAlive && eligible && narrowed.load() && ! isEligible (owner);
+        if (ownerAlive && ! displace)
         {
             renderGate.clear (std::memory_order_release);
             return false;

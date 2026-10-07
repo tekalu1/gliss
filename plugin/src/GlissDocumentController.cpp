@@ -1170,6 +1170,8 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
         return;
     }
 
+    targetPreview (arg.getProperty ("ara_id", {}).toString());
+
     const auto generation = previewGeneration.fetch_add (1) + 1;
     diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
     const auto audio = previewAudio;
@@ -1213,6 +1215,34 @@ void GlissDocumentController::preview (const juce::String& op, const juce::var& 
             done (object ({ { "ok", true } }));
         });
     });
+}
+
+void GlissDocumentController::targetPreview (const juce::String& araId)
+{
+    std::vector<std::uint64_t> covering;
+    int renderers = 0;
+
+    if (araId.isNotEmpty())
+        for (auto* renderer : getDocumentController()->getEditorRenderers<GlissEditorRenderer>())
+        {
+            ++renderers;
+
+            if (renderer->coversModification (araId))
+                covering.push_back (renderer->getRendererId());
+        }
+
+    previewAudio->setEligibleRenderers (covering, juce::Time::getMillisecondCounter());
+
+    // 修飾を持つ renderer が無ければ（ホストが領域を渡さない）絞らない。対象が変わったときだけ書く。
+    const auto summary = araId + " " + juce::String ((int) covering.size()) + "/" + juce::String (renderers);
+
+    if (summary != lastPreviewTarget)
+    {
+        lastPreviewTarget = summary;
+        diag::log ("preview: target modification " + araId + " is covered by " + juce::String ((int) covering.size())
+                   + " of " + juce::String (renderers) + " editor renderers"
+                   + (araId.isNotEmpty() && covering.empty() ? " (not narrowed)" : ""));
+    }
 }
 
 void GlissDocumentController::setCompare (bool on)
