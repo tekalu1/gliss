@@ -1,5 +1,7 @@
 #include "GlissDocumentController.h"
 
+#include <cstring>
+
 #include "Diagnostics.h"
 #include "GlissEditorRenderer.h"
 #include "GlissPlaybackRenderer.h"
@@ -260,10 +262,68 @@ void GlissDocumentController::willDestroyDocument (juce::ARADocument*)
     sync->shutdown();
 }
 
-void GlissDocumentController::didEnableAudioSourceSamplesAccess (juce::ARAAudioSource*, bool)
+void GlissDocumentController::didEnableAudioSourceSamplesAccess (juce::ARAAudioSource* source, bool enable)
 {
+    // 切っている間に読めなかった区間を、先読みのリーダーが無音のまま持っている。戻ったら作り直す
+    if (enable)
+        scheduleReaderRefresh (source, "samples-access");
+    else
+        diag::logAlways ("source: samples access disabled id=" + juce::String (source->getPersistentID()));
+
     if (! editing)
         pushModel();
+}
+
+void GlissDocumentController::didUpdateAudioSourceProperties (juce::ARAAudioSource* source)
+{
+    scheduleReaderRefresh (source, "properties");
+}
+
+void GlissDocumentController::scheduleReaderRefresh (juce::ARAAudioSource* source, const char* reason)
+{
+    // 同じソースへの予約はまとめる（プロパティの更新より、内容・アクセスの理由を優先する。前者は変わっていなければ何もしない）
+    const auto [pending, inserted] = pendingReaderRefresh.emplace (source, reason);
+
+    if (! inserted && std::strcmp (pending->second, "properties") == 0)
+        pending->second = reason;
+
+    if (readerRefreshScheduled)
+        return;
+
+    readerRefreshScheduled = true;
+    juce::MessageManager::callAsync ([this, token = std::weak_ptr<bool> (alive)]
+    {
+        if (token.lock() != nullptr)
+            runReaderRefresh();
+    });
+}
+
+void GlissDocumentController::runReaderRefresh()
+{
+    readerRefreshScheduled = false;
+    auto pending = std::move (pendingReaderRefresh);
+    pendingReaderRefresh.clear();
+
+    auto* document = getDocument();
+
+    if (document == nullptr)
+        return;
+
+    const auto& liveSources = document->getAudioSources();
+
+    for (const auto& [source, reason] : pending)
+    {
+        // 予約の間に壊れたソースには触らない
+        if (std::find (liveSources.begin(), liveSources.end(), source) == liveSources.end())
+            continue;
+
+        // サンプルへのアクセスが切れている間は作り直しても読めない。戻ったとき（samples-access）に作り直す
+        if (! source->isSampleAccessEnabled())
+            continue;
+
+        for (auto* renderer : getDocumentController()->getPlaybackRenderers<GlissPlaybackRenderer>())
+            renderer->refreshSource (source, reason);
+    }
 }
 
 void GlissDocumentController::doUpdateAudioSourceContent (juce::ARAAudioSource* source, juce::ARAContentUpdateScopes scopeFlags)
@@ -271,7 +331,10 @@ void GlissDocumentController::doUpdateAudioSourceContent (juce::ARAAudioSource* 
     if (! scopeFlags.affectSamples())
         return;
 
-    // DAW 側で音が変わった: 読み直す（エンジンは音の中身で比べ、違えば source_changed）。
+    // DAW 側で音が変わった: 再生の原音のリーダーを作り直す（ARAAudioSourceReader はこの知らせで無効になる）
+    scheduleReaderRefresh (source, "content");
+
+    // 読み直す（エンジンは音の中身で比べ、違えば source_changed）。
     if (auto it = sourceEntries.find (source); it != sourceEntries.end())
         it->second.contentChanged = true;
 

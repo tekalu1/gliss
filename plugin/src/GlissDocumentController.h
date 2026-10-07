@@ -90,6 +90,7 @@ protected:
     void willDestroyDocument (juce::ARADocument*) override;
     void didEnableAudioSourceSamplesAccess (juce::ARAAudioSource*, bool enable) override;
     void doUpdateAudioSourceContent (juce::ARAAudioSource*, juce::ARAContentUpdateScopes) override;
+    void didUpdateAudioSourceProperties (juce::ARAAudioSource*) override;
     void willDestroyAudioSource (juce::ARAAudioSource*) override;
 
     juce::ARAAudioModification* doCreateAudioModification (juce::ARAAudioSource* audioSource,
@@ -149,6 +150,10 @@ private:
     void pushModel();
     void ensureReader (juce::ARAAudioSource*, SourceEntry&);
     void dropSourceEntry (juce::ARAAudioSource*);
+    /** 再生のレンダラーの原音のリーダーを作り直す予約（メッセージスレッド。まとめて次のメッセージで行う）。
+        ARAAudioSourceReader は同じ知らせで無効になるので、知らせの中では作らず後に回す。 */
+    void scheduleReaderRefresh (juce::ARAAudioSource*, const char* reason);
+    void runReaderRefresh();
     /** notifyHost が false なら、ARA のリスナーにだけ知らせる（ホストには知らせない）。 */
     void notifyContentChanged (const juce::StringArray& araIds, bool notifyHost = true);
     void notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent);
@@ -210,6 +215,8 @@ private:
     bool pluginStateLoaded = false;
 
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
+    std::map<juce::ARAAudioSource*, const char*> pendingReaderRefresh;   // ソース → 理由（ログ用の定数）
+    bool readerRefreshScheduled = false;
     std::unique_ptr<TestBridge> testBridge;   // GLISS_TEST_BRIDGE_DIR（試験用の画面の代わり。GLISS_TEST_HOOKS のビルドだけ）
     juce::ThreadPool bridgePool { 2 };   // engineCall・restartEngine・saveState の書き込み（メッセージスレッドで待たない）
     juce::ThreadPool auditionPool { 2 }; // 試聴の render_audition の呼び出しと WAV の読み込み（bridgePool が埋まっていても待たない）
