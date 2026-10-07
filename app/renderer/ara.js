@@ -11,6 +11,7 @@
 //  - DAW の再生位置・ループを画面に出す（`playhead` → S.head・S.playing・S.loop）／画面の操作を DAW へ（transport）
 //  - リージョンの枠・キャッシュの状態（reading・syncing…）・エンジンの状態を、トラックビューとツールバーの札に出す
 import { S } from './state.js';
+import { createSelectionGate } from './ara-selection.js';
 
 export const ARA = typeof window !== 'undefined' && window.api?.mode === 'ara';
 if (ARA) document.documentElement.dataset.mode = 'ara';
@@ -232,6 +233,8 @@ export function onPlayhead(p) {
 // ---------------------------------------------------------------- DAW の選択への追従
 let selPending = null;
 let selWaiting = false;
+const selGate = createSelectionGate();      // 当てる・捨てるの判断（ara-selection.js）
+const editingNow = () => (H.idle ? !H.idle() : false) || !!S.drag || !!S.opening || (H.isDragging ? H.isDragging() : false);
 const isVocal = (id) => S.tracks.some((t) => t.id === id && t.kind === 'vocal');
 
 /** DAW で選ばれたリージョンのトラックに切り替える。ドラッグ中・開いている途中・編集の確定中は最後の 1 件だけ覚えて、静かになってから当てる。 */
@@ -243,7 +246,9 @@ async function onSelection(sel) {
       detail: A.sel ? { track_id: A.sel.track_id, ara_id: A.sel.ara_id } : null,
     }));
   }
-  if (!A.sel) return;
+  // 選択が空・最後に当てたものと同じ・編集中に来た今の編集対象と同じ、は何もしない（編集の最中に別のトラックへ飛ばない）
+  const verdict = selGate.decide(A.sel, { editing: editingNow(), currentTrack: S.session?.current });
+  if (verdict !== 'apply') return;
   selPending = A.sel;
   if (selWaiting) return;
   selWaiting = true;
@@ -252,6 +257,8 @@ async function onSelection(sel) {
       await H.waitFor(() => H.idle() && !S.drag && !S.opening && !H.isDragging());
       const s = selPending;
       selPending = null;
+      if (selGate.isApplied(s)) continue;              // 待っている間に同じ選択を当て終えた
+      selGate.markApplied(s);
       await applySelection(s);
     }
   } finally { selWaiting = false; }
@@ -518,4 +525,5 @@ export async function araBoot(host, b) {
   const view = r && r.mod_end > r.mod_start && t ? [(t.offset_sec || 0) + r.mod_start, (t.offset_sec || 0) + r.mod_end] : null;
   const whole = !r || !t?.duration_sec || (r.mod_end - r.mod_start) >= t.duration_sec * 0.9;
   if (await H.selectTrack(want, { view: whole ? null : view, first: whole })) A.sig = sigOf();
+  if (A.sel && A.sel.track_id === want) selGate.markApplied(A.sel);     // 起動で当てた選択。同じ知らせで選び直さない
 }
