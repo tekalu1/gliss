@@ -46,6 +46,9 @@ public:
         GlissEditor が画面の preview に添える（PreviewAudio::chooseEligible）。メッセージスレッドから呼ぶ。 */
     std::uint64_t getEditorRendererId() const;
 
+    /** ARA に結び付いたとき: このインスタンスの PlaybackRenderer と EditorRenderer を結ぶ（RendererPair。試聴を足す EditorRenderer を絞る手掛かり）。 */
+    void didBindToARA() noexcept override;
+
 private:
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlissProcessor)
 };

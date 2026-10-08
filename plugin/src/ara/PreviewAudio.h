@@ -55,12 +55,28 @@ public:
         所有者が絞りから外れたら外す。持つ renderer が 250 ms 呼ばれなければ、持たない renderer が足す（持つ側が止まっている）。 */
     void setEligibleRenderers (const std::vector<std::uint64_t>& ids, std::uint32_t nowMs) noexcept;
 
-    /** 足してよい renderer の絞り込みの規則: 修飾を持つ renderer（covering）があればそれ、無ければ試聴を求めた側（requester。登録されていなければ無いものとする）、
-        それも無ければ絞らない（空）。 */
-    std::vector<std::uint64_t> chooseEligible (const std::vector<std::uint64_t>& covering, std::uint64_t requester) const;
+    /** どの手掛かりで絞れたか。 */
+    enum class NarrowedBy { none, editor, playback, requester };
+    static const char* toString (NarrowedBy by) noexcept;
+
+    struct Choice
+    {
+        std::vector<std::uint64_t> ids;     // 足してよい renderer（空なら絞らない）
+        NarrowedBy by = NarrowedBy::none;
+    };
+
+    /** 足してよい renderer の絞り込みの規則（手掛かりの強い順）:
+        1. その修飾のリージョンが割り当たっている EditorRenderer（editorCovering）
+        2. 同じインスタンスの PlaybackRenderer がその修飾のリージョンを持つ EditorRenderer（playbackCovering。EditorRenderer にリージョンを割り当てない
+           ホスト向け。PlaybackRenderer には再生のために必ず割り当たる）
+        3. 試聴を求めた側（requester。登録されていなければ無いものとする）
+        4. 絞らない（空）。 */
+    Choice chooseEligible (const std::vector<std::uint64_t>& editorCovering, const std::vector<std::uint64_t>& playbackCovering,
+                           std::uint64_t requester) const;
 
     /** 試聴を始めるたびに呼ぶ（メッセージスレッド）。chooseEligible で絞り、前の試聴の所有者を外す（前の所有者が、絞れないまま足し続けない）。 */
-    void beginPreview (const std::vector<std::uint64_t>& covering, std::uint64_t requester, std::uint32_t nowMs) noexcept;
+    Choice beginPreview (const std::vector<std::uint64_t>& editorCovering, const std::vector<std::uint64_t>& playbackCovering,
+                         std::uint64_t requester, std::uint32_t nowMs) noexcept;
 
     /** 試聴の様子（ログ用。オーディオスレッドが書く値をメッセージスレッドが読む）。 */
     struct PreviewStats

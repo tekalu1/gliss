@@ -40,6 +40,9 @@ GlissPlaybackRenderer::GlissPlaybackRenderer (ARA::PlugIn::DocumentController* d
 
 GlissPlaybackRenderer::~GlissPlaybackRenderer()
 {
+    if (pair != nullptr)
+        pair->playback = nullptr;
+
     delete table.exchange (nullptr);
 }
 

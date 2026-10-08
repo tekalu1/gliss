@@ -4,6 +4,7 @@
 #include "GlissDocumentController.h"
 #include "GlissEditor.h"
 #include "GlissEditorRenderer.h"
+#include "GlissPlaybackRenderer.h"
 
 namespace gliss
 {
@@ -55,6 +56,23 @@ double GlissProcessor::getTailLengthSeconds() const
 {
     double tail = 0.0;
     return getTailLengthSecondsForARA (tail) ? tail : 0.0;
+}
+
+void GlissProcessor::didBindToARA() noexcept
+{
+    AudioProcessorARAExtension::didBindToARA();
+
+    auto* playback = dynamic_cast<GlissPlaybackRenderer*> (getPlaybackRenderer());
+    auto* editor = dynamic_cast<GlissEditorRenderer*> (getEditorRenderer());
+
+    if (playback == nullptr || editor == nullptr)
+        return;
+
+    auto pair = std::make_shared<RendererPair>();
+    playback->linkInstance (pair);
+    editor->linkInstance (pair);
+    diag::logAlways ("instance: editor renderer " + juce::String ((juce::int64) editor->getRendererId()) + " <-> playback renderer "
+                     + juce::String::toHexString ((juce::pointer_sized_int) playback));
 }
 
 std::uint64_t GlissProcessor::getEditorRendererId() const

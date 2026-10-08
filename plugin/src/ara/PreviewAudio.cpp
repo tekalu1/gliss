@@ -119,23 +119,45 @@ void PreviewAudio::setEligibleRenderers (const std::vector<std::uint64_t>& ids, 
         activeRendererId.compare_exchange_strong (owner, 0);
 }
 
-std::vector<std::uint64_t> PreviewAudio::chooseEligible (const std::vector<std::uint64_t>& covering, std::uint64_t requester) const
+const char* PreviewAudio::toString (NarrowedBy by) noexcept
 {
-    if (! covering.empty())
-        return covering;
+    switch (by)
+    {
+        case NarrowedBy::editor: return "editor";
+        case NarrowedBy::playback: return "playback";
+        case NarrowedBy::requester: return "requester";
+        case NarrowedBy::none: break;
+    }
+
+    return "none";
+}
+
+PreviewAudio::Choice PreviewAudio::chooseEligible (const std::vector<std::uint64_t>& editorCovering,
+                                                   const std::vector<std::uint64_t>& playbackCovering,
+                                                   std::uint64_t requester) const
+{
+    if (! editorCovering.empty())
+        return { editorCovering, NarrowedBy::editor };
+
+    if (! playbackCovering.empty())
+        return { playbackCovering, NarrowedBy::playback };
 
     if (requester != 0 && findSlot (requester) != nullptr)
-        return { requester };
+        return { { requester }, NarrowedBy::requester };
 
     return {};
 }
 
-void PreviewAudio::beginPreview (const std::vector<std::uint64_t>& covering, std::uint64_t requester, std::uint32_t nowMs) noexcept
+PreviewAudio::Choice PreviewAudio::beginPreview (const std::vector<std::uint64_t>& editorCovering,
+                                                 const std::vector<std::uint64_t>& playbackCovering,
+                                                 std::uint64_t requester, std::uint32_t nowMs) noexcept
 {
-    setEligibleRenderers (chooseEligible (covering, requester), nowMs);
+    auto choice = chooseEligible (editorCovering, playbackCovering, requester);
+    setEligibleRenderers (choice.ids, nowMs);
     activeRendererId.store (0);          // 前の試聴の所有者を持ち越さない（絞れなくても、新しく足す renderer が所有者になる）
     lastPlayedBy.store (0);
     handoverCount.store (0);
+    return choice;
 }
 
 PreviewAudio::PreviewStats PreviewAudio::getStats() const noexcept

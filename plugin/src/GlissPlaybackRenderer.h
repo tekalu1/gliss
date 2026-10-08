@@ -7,6 +7,7 @@
 #include "cache/RegionReader.h"
 #include "cache/SourceReader.h"
 #include "cache/StretchReader.h"
+#include "ara/RendererPair.h"
 
 #include <atomic>
 #include <map>
@@ -47,6 +48,13 @@ public:
     /** メッセージスレッド（ARA のメインスレッド）から呼ぶ。ソースの原音のリーダーを作り直して差し替える（準備前なら何もしない）。
         reason: ログ用（"content"・"samples-access"・"properties"）。形式（周波数・チャンネル数）が変わっていれば、そのリージョンの読み出しも作り直す。 */
     void refreshSource (juce::ARAAudioSource* source, const char* reason);
+
+    /** 同じインスタンスの EditorRenderer と結ぶ（GlissProcessor::didBindToARA）。壊れるとき、相手から外れる。 */
+    void linkInstance (std::shared_ptr<RendererPair> pairIn)
+    {
+        pair = std::move (pairIn);
+        pair->playback = this;
+    }
 
     /** メッセージスレッドから呼ぶ。ホストが持つリージョンのうち表に無いもの（準備のときに読み出しを作れなかった・準備の後に増えた）に読み出しを作り、無くなったものを外す。 */
     void syncRegions();
@@ -133,6 +141,7 @@ private:
     void dumpTrace();
 
     RenderContext& context;
+    std::shared_ptr<RendererPair> pair;
     juce::SharedResourcePointer<PrefetchThread> prefetchThread;   // sourceReaders より先に作り、後に壊す
 
     double sampleRate = 48000.0;

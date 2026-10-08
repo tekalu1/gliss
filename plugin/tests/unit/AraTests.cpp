@@ -673,12 +673,12 @@ public:
             };
             shared.publish (makeClip (0.4f));
 
-            shared.beginPreview ({}, 0, 1000);                                    // 絞れない・求めた側も分からない
+            shared.beginPreview ({}, {}, 0, 1000);                                    // 絞れない・求めた側も分からない
             expect (renderAt (a, cursorA, 1000), "A owns the first preview");
             expect (! shared.getStats().narrowed);
             expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) a);
 
-            shared.beginPreview ({}, b, 2000);                                     // 持つ renderer は無い。求めたのは B
+            shared.beginPreview ({}, {}, b, 2000);                                     // 持つ renderer は無い。求めたのは B
             expect (shared.getStats().narrowed, "narrowed to the requester");
             expect (shared.getStats().owner == 0, "the previous owner is dropped");
             expect (! renderAt (a, cursorA, 2000), "the previous owner does not keep adding");
@@ -693,25 +693,78 @@ public:
             expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) a);
 
             expect (renderAt (a, cursorA, 2950), "A is the live owner of the previous preview");
-            shared.beginPreview ({}, 0, 3000);                                     // 求めた側も分からない: 絞らず、先に呼ばれた renderer が足す
+            shared.beginPreview ({}, {}, 0, 3000);                                     // 求めた側も分からない: 絞らず、先に呼ばれた renderer が足す
             expect (! shared.getStats().narrowed);
             expectEquals (shared.getStats().handovers, 0);
             expect (renderAt (b, cursorB, 3000), "not narrowed: the first caller adds");
             expect (! renderAt (a, cursorA, 3000), "not narrowed: the second does not");
 
-            shared.beginPreview ({ a }, b, 4000);                                  // 持つ renderer があれば、それが先（求めた側より）
+            shared.beginPreview ({ a }, {}, b, 4000);                                  // 持つ renderer があれば、それが先（求めた側より）
             expect (renderAt (a, cursorA, 4000), "the renderer that holds the modification adds");
             expect (! renderAt (b, cursorB, 4000), "the requester does not, when another renderer holds the modification");
 
-            shared.beginPreview ({}, 999, 5000);                                   // 登録されていない requester は無いものとする
+            shared.beginPreview ({}, {}, 999, 5000);                                   // 登録されていない requester は無いものとする
             expect (! shared.getStats().narrowed, "an unknown requester does not narrow");
 
-            expect (shared.chooseEligible ({}, 0).empty());
-            expect (shared.chooseEligible ({}, b) == std::vector<std::uint64_t> { b });
-            expect (shared.chooseEligible ({ a }, b) == std::vector<std::uint64_t> { a });
+            expect (shared.chooseEligible ({}, {}, 0).ids.empty());
+            expect (shared.chooseEligible ({}, {}, b).ids == std::vector<std::uint64_t> { b });
+            expect (shared.chooseEligible ({ a }, {}, b).ids == std::vector<std::uint64_t> { a });
 
             shared.removeRenderer (a);
             shared.removeRenderer (b);
+        }
+
+        beginTest ("the preview narrows by the editor renderer's regions, then the same instance's playback renderer, then the requester");
+        {
+            // Studio Pro は EditorRenderer にリージョンを割り当てない（editorCovering が空）が、PlaybackRenderer には必ず割り当てる。
+            // 窓を開いたインスタンス（requester = A）が、プレビューする修飾（B のインスタンスの PlaybackRenderer が持つ）を持たないとき、B から鳴る
+            PreviewAudio shared;
+            const auto a = shared.addRenderer();
+            const auto b = shared.addRenderer();
+            const auto c = shared.addRenderer();
+            PreviewAudio::Cursor cursorA, cursorB, cursorC;
+            juce::AudioBuffer<float> out (1, 480);
+            const auto renderAt = [&] (std::uint64_t id, PreviewAudio::Cursor& cursor, std::uint32_t nowMs)
+            {
+                out.clear();
+                return shared.renderForRenderer (out, 48000.0, cursor, id, nowMs);
+            };
+            shared.publish (makeClip (0.4f));
+
+            // 1. EditorRenderer の割り当てがあればそれ（PlaybackRenderer・requester より先）
+            auto choice = shared.beginPreview ({ c }, { b }, a, 1000);
+            expect (choice.by == PreviewAudio::NarrowedBy::editor && choice.ids == std::vector<std::uint64_t> { c });
+            expect (! renderAt (a, cursorA, 1000) && ! renderAt (b, cursorB, 1000), "neither the requester nor the playback holder adds");
+            expect (renderAt (c, cursorC, 1000), "the editor renderer with the region adds");
+            expectEquals (juce::String (PreviewAudio::toString (choice.by)), juce::String ("editor"));
+
+            // 2. EditorRenderer の割り当てが空なら、同じインスタンスの PlaybackRenderer がリージョンを持つ EditorRenderer（窓を開いた A ではなく B）
+            choice = shared.beginPreview ({}, { b }, a, 2000);
+            expect (choice.by == PreviewAudio::NarrowedBy::playback && choice.ids == std::vector<std::uint64_t> { b });
+            expect (! renderAt (a, cursorA, 2000), "the window owner (requester) does not add");
+            expect (renderAt (b, cursorB, 2000), "the instance whose playback renderer has the modification adds");
+            expect (out.getSample (0, 400) > 0.3f);
+            expectEquals (juce::String (PreviewAudio::toString (choice.by)), juce::String ("playback"));
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) b);
+
+            // 3. どちらも空なら求めた側
+            choice = shared.beginPreview ({}, {}, a, 3000);
+            expect (choice.by == PreviewAudio::NarrowedBy::requester && choice.ids == std::vector<std::uint64_t> { a });
+            expect (renderAt (a, cursorA, 3000) && ! renderAt (b, cursorB, 3000));
+
+            // 4. 求めた側も分からなければ絞らない
+            choice = shared.beginPreview ({}, {}, 0, 4000);
+            expect (choice.by == PreviewAudio::NarrowedBy::none && choice.ids.empty());
+            expectEquals (juce::String (PreviewAudio::toString (choice.by)), juce::String ("none"));
+
+            // 複数のインスタンスの PlaybackRenderer が持つなら、それらが候補（先に呼ばれた 1 つが足す）
+            choice = shared.beginPreview ({}, { b, c }, a, 5000);
+            expect (choice.by == PreviewAudio::NarrowedBy::playback && choice.ids.size() == 2);
+            expect (renderAt (c, cursorC, 5000) && ! renderAt (b, cursorB, 5000) && ! renderAt (a, cursorA, 5000));
+
+            shared.removeRenderer (a);
+            shared.removeRenderer (b);
+            shared.removeRenderer (c);
         }
 
         beginTest ("the editor adds its EditorRenderer id to the preview arguments as the requester");

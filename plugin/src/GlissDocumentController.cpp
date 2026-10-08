@@ -1477,7 +1477,7 @@ void GlissDocumentController::targetPreview (const juce::var& arg, const char* m
 {
     const auto araId = arg.getProperty ("ara_id", {}).toString();
     const auto requester = (std::uint64_t) (juce::int64) arg.getProperty ("requester", 0);
-    std::vector<std::uint64_t> covering;
+    std::vector<std::uint64_t> editorCovering, playbackCovering;
     int renderers = 0;
 
     if (araId.isNotEmpty())
@@ -1486,23 +1486,29 @@ void GlissDocumentController::targetPreview (const juce::var& arg, const char* m
             ++renderers;
 
             if (renderer->coversModification (araId))
-                covering.push_back (renderer->getRendererId());
+                editorCovering.push_back (renderer->getRendererId());
+
+            if (renderer->playbackCoversModification (araId))
+                playbackCovering.push_back (renderer->getRendererId());
         }
 
     const auto previousOwner = previewAudio->getStats().owner;
-    previewAudio->beginPreview (covering, requester, juce::Time::getMillisecondCounter());
+    const auto choice = previewAudio->beginPreview (editorCovering, playbackCovering, requester, juce::Time::getMillisecondCounter());
     previewStarted = true;
 
     const auto range = arg.hasProperty ("start_sec")
         ? juce::String ((double) arg.getProperty ("start_sec", 0.0), 3) + "-" + juce::String ((double) arg.getProperty ("end_sec", 0.0), 3)
         : juce::String ("-");
 
-    // どのトラックを選んでいて（ui-track）どのトラックを描いていたか（shown）は画面が添える。絞り込み（narrowed）は、修飾を持つ renderer
-    // か、求めた側（requester）の EditorRenderer に絞れたか
+    // どのトラックを選んでいて（ui-track）どのトラックを描いていたか（shown）は画面が添える。covered は、その修飾のリージョンが割り当たった
+    // EditorRenderer の数 / 全部の数、playback は、同じインスタンスの PlaybackRenderer がその修飾のリージョンを持つ EditorRenderer の数。
+    // by は絞れた手掛かり（editor → playback → requester → none の順）、candidates は足してよい renderer の数
     diag::logAlways ("preview: start " + juce::String (mode) + " ara=" + araId + " note=" + arg.getProperty ("note", {}).toString()
                      + " range=" + range + " cents=" + juce::String ((double) arg.getProperty ("cents", 0.0), 1)
                      + " ui-track=" + arg.getProperty ("ui_track", {}).toString() + " shown=" + arg.getProperty ("shown_track", {}).toString()
-                     + " covered=" + juce::String ((int) covering.size()) + "/" + juce::String (renderers)
+                     + " covered=" + juce::String ((int) editorCovering.size()) + "/" + juce::String (renderers)
+                     + " playback=" + juce::String ((int) playbackCovering.size())
+                     + " by=" + PreviewAudio::toString (choice.by) + " candidates=" + juce::String ((int) choice.ids.size())
                      + " narrowed=" + juce::String (previewAudio->getStats().narrowed ? 1 : 0)
                      + " requester=" + juce::String ((juce::int64) requester) + " owner=" + juce::String ((juce::int64) previousOwner));
 }

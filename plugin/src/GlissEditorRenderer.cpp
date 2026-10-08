@@ -41,20 +41,20 @@ void GlissEditorRenderer::releaseResources()
 
 bool GlissEditorRenderer::coversModification (const juce::String& araId) const
 {
-    const auto isIt = [&araId] (const juce::ARAPlaybackRegion* region)
-    {
-        const auto* modification = region != nullptr ? region->getAudioModification() : nullptr;
-        return modification != nullptr && juce::String (modification->getPersistentID()) == araId;
-    };
-
-    for (const auto* region : getPlaybackRegions<juce::ARAPlaybackRegion>())
-        if (isIt (region)) return true;
+    if (hasRegionOfModification (getPlaybackRegions<juce::ARAPlaybackRegion>(), araId))
+        return true;
 
     for (const auto* sequence : getRegionSequences<juce::ARARegionSequence>())
-        for (const auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
-            if (isIt (region)) return true;
+        if (hasRegionOfModification (sequence->getPlaybackRegions<juce::ARAPlaybackRegion>(), araId))
+            return true;
 
     return false;
+}
+
+bool GlissEditorRenderer::playbackCoversModification (const juce::String& araId) const
+{
+    return pair != nullptr && pair->playback != nullptr
+        && hasRegionOfModification (pair->playback->getPlaybackRegions<juce::ARAPlaybackRegion>(), araId);
 }
 
 void GlissEditorRenderer::closeTrace()

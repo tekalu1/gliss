@@ -2,6 +2,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "ara/PreviewAudio.h"
+#include "ara/RendererPair.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -32,6 +33,10 @@ public:
     /** DAW がこの renderer に割り当てた再生リージョン（またはリージョン列）に、この修飾（persistentID）のリージョンがあるか。
         ARA のメインスレッド（メッセージスレッド）から呼ぶ。試聴を足す renderer を選ぶのに使う。 */
     bool coversModification (const juce::String& araId) const;
+    /** 同じインスタンスの PlaybackRenderer が、この修飾のリージョンを持つか（EditorRenderer にリージョンを割り当てないホストの手掛かり）。 */
+    bool playbackCoversModification (const juce::String& araId) const;
+    /** 同じインスタンスの PlaybackRenderer と結ぶ（GlissProcessor::didBindToARA）。 */
+    void linkInstance (std::shared_ptr<RendererPair> pairIn) { pair = std::move (pairIn); }
 
 private:
     struct TraceEntry
@@ -63,6 +68,7 @@ private:
     PreviewAudio::Cursor cursor;
     bool hostPlaying = false;
     std::uint64_t rendererId = 0;
+    std::shared_ptr<RendererPair> pair;
     std::shared_ptr<TraceState> traceState;
 };
 
