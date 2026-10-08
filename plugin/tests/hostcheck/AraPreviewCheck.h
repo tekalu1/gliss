@@ -4,6 +4,7 @@
 // 試聴の音を足すことを確かめる（エンジンは使わない。GLISS_ENGINE_DISABLED=1・GLISS_TEST_BRIDGE_DIR を付けて呼ぶ。GLISS_TEST_HOOKS のビルド）。
 //
 //   GlissHostCheck --ara-preview <結果を書くファイル> <Gliss.vst3> <GLISS_TEST_BRIDGE_DIR と同じフォルダ> <GLISS_ARA_TRACE_DIR と同じフォルダ>
+//   GlissHostCheck --ara-preview-playback ...（同じ引数。変種: どの EditorRenderer にもリージョンを渡さず、PlaybackRenderer にだけ渡す）
 //
 // 作るもの: 1 つのソースに修飾 N・M（それぞれリージョンが 1 つ）。インスタンス 1 の EditorRenderer にだけ N のリージョンを渡し、
 // インスタンス 2 には何も渡さない（M のリージョンはどの EditorRenderer にも渡さない＝M を持つ renderer が無い）。
@@ -29,10 +30,16 @@ public:
     using Report = std::function<void (const juce::String&)>;
     using Check = std::function<bool (bool, const juce::String&)>;
 
-    AraPreviewCheck (Report reportIn, Check checkIn, juce::File pluginIn, juce::File bridgeDirIn, juce::File traceDirIn)
+    /** playbackAssigned: false = 修飾 N のリージョンを、インスタンス 1 の EditorRenderer に渡す（EditorRenderer の割り当てで絞れるホスト）。
+        true = どの EditorRenderer にもリージョンを渡さず、PlaybackRenderer にだけ渡す（N はインスタンス 1、M はインスタンス 2。
+        Studio Pro のように EditorRenderer にリージョンを割り当てないホスト）。後者は、試聴を求めた側（requester）を、わざと音を持たない側にする。 */
+    AraPreviewCheck (Report reportIn, Check checkIn, juce::File pluginIn, juce::File bridgeDirIn, juce::File traceDirIn,
+                     bool playbackAssignedIn = false)
         : report (std::move (reportIn)), check (std::move (checkIn)), plugin (std::move (pluginIn)),
-          bridgeDir (std::move (bridgeDirIn)), traceDir (std::move (traceDirIn))
+          bridgeDir (std::move (bridgeDirIn)), traceDir (std::move (traceDirIn)), playbackAssigned (playbackAssignedIn)
     {
+        // 試聴する修飾ごとの「求める側」と「音が乗るはずの側」（インスタンスの番号）
+        if (playbackAssigned) { requesterOfN = 1; expectedForN = 0; requesterOfM = 0; expectedForM = 1; }
         voice.rate = voiceRate;
         voice.samples.resize ((size_t) (4.0 * voiceRate));
 
@@ -266,8 +273,17 @@ private:
             in.editorRenderer = in.extension.getEditorRendererInterface();
         }
 
-        // インスタンス 1 の EditorRenderer にだけ N のリージョンを渡す。インスタンス 2 は空、M のリージョンはどこにも渡さない
-        instances[0].editorRenderer.add (*playbackRegions[0]);
+        if (playbackAssigned)
+        {
+            // どの EditorRenderer にもリージョンを渡さない。PlaybackRenderer には再生のために必ず渡す（ARA の規則）: N はインスタンス 1、M はインスタンス 2
+            instances[0].playbackRenderer.add (*playbackRegions[0]);
+            instances[1].playbackRenderer.add (*playbackRegions[1]);
+        }
+        else
+        {
+            // インスタンス 1 の EditorRenderer にだけ N のリージョンを渡す。インスタンス 2 は空、M のリージョンはどこにも渡さない
+            instances[0].editorRenderer.add (*playbackRegions[0]);
+        }
 
         for (auto& in : instances)
         {
@@ -279,8 +295,11 @@ private:
         if (! readRendererIds())
             return finish();
 
-        report ("document: source + modifications N, M; instance 1's editor renderer " + juce::String ((juce::int64) rendererIds[0])
-                + " covers N, instance 2's editor renderer " + juce::String ((juce::int64) rendererIds[1]) + " covers nothing");
+        report (playbackAssigned
+                    ? "document: source + modifications N, M; no editor renderer has a region; instance 1's playback renderer has N, instance 2's has M"
+                      "; the window owner (requester) is the instance that does not play the modification"
+                    : "document: source + modifications N, M; instance 1's editor renderer " + juce::String ((juce::int64) rendererIds[0])
+                          + " covers N, instance 2's editor renderer " + juce::String ((juce::int64) rendererIds[1]) + " covers nothing");
         stage = Stage::startN;
         stageStart = juce::Time::getMillisecondCounter();
         startTimer (30);
@@ -372,7 +391,7 @@ private:
         switch (stage)
         {
             case Stage::startN:
-                sendPreview ("start", startArgs (modificationN, rendererIds[0]));
+                sendPreview ("start", startArgs (modificationN, rendererIds[(size_t) requesterOfN]));
                 stage = Stage::waitN;
                 stageStart = now;
                 break;
@@ -390,12 +409,14 @@ private:
                 break;
 
             case Stage::listenN:
-                if (inStage < listenMs && ! (instances[0].peakSince > audible && inStage > 400))
+                if (inStage < listenMs && ! (instances[(size_t) expectedForN].peakSince > audible && inStage > 400))
                     break;
 
                 report ("N: instance 1 peak " + juce::String (instances[0].peakSince, 3) + ", instance 2 peak " + juce::String (instances[1].peakSince, 3));
-                check (instances[0].peakSince > audible, "N is heard on the instance whose editor renderer covers it");
-                check (instances[1].peakSince < silent, "N is not added by the other instance");
+                check (instances[(size_t) expectedForN].peakSince > audible,
+                       playbackAssigned ? "N is heard on the instance whose playback renderer has it (the requester is the other instance)"
+                                        : "N is heard on the instance whose editor renderer covers it");
+                check (instances[(size_t) (1 - expectedForN)].peakSince < silent, "N is not added by the other instance");
                 sendPreview ("stop", juce::var());
                 stage = Stage::stopN;
                 stageStart = now;
@@ -412,7 +433,7 @@ private:
 
             case Stage::startM:
                 // M を持つ EditorRenderer は無い。求めた側はインスタンス 2
-                sendPreview ("start", startArgs (modificationM, rendererIds[1]));
+                sendPreview ("start", startArgs (modificationM, rendererIds[(size_t) requesterOfM]));
                 stage = Stage::waitM;
                 stageStart = now;
                 break;
@@ -434,8 +455,11 @@ private:
                     break;
 
                 report ("M: instance 1 peak " + juce::String (instances[0].peakSince, 3) + ", instance 2 peak " + juce::String (instances[1].peakSince, 3));
-                check (instances[1].peakSince > audible, "M (no editor renderer covers it) is heard on the instance that asked");
-                check (instances[0].peakSince < silent, "the previous owner (instance 1) does not keep adding the preview");
+                check (instances[(size_t) expectedForM].peakSince > audible,
+                       playbackAssigned ? "M is heard on the instance whose playback renderer has it (the requester is the other instance)"
+                                        : "M (no editor renderer covers it) is heard on the instance that asked");
+                check (instances[(size_t) (1 - expectedForM)].peakSince < silent,
+                       playbackAssigned ? "the instance that asked (the window owner) does not add M" : "the previous owner (instance 1) does not keep adding the preview");
                 sendPreview ("stop", juce::var());
                 stage = Stage::stopM;
                 stageStart = now;
@@ -509,6 +533,8 @@ private:
     Stage stage = Stage::startN;
     juce::uint32 stageStart = 0, windowStart = 0;
     juce::uint64 rendererIds[2] {};
+    bool playbackAssigned = false;
+    int requesterOfN = 0, expectedForN = 0, requesterOfM = 1, expectedForM = 1;
 
     juce::PluginDescription description;
     juce::AudioPluginFormatManager formatManager;

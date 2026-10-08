@@ -19,7 +19,8 @@
 // --ara-playback は同じく ARA のドキュメントを作り、再生の役で準備した後に起きる変化（サンプルへのアクセスの切り替え・内容の更新・リージョンの追加）の
 // あとも原音が鳴り続けることを確かめる（AraPlaybackCheck.h の冒頭。エンジンは GLISS_ENGINE_DISABLED=1 で止めて呼ぶ）。
 // --ara-preview は 2 つのインスタンスを同じドキュメントに結び付け、試聴を求めたインスタンスの EditorRenderer だけが試聴の音を足すことを確かめる
-// （AraPreviewCheck.h の冒頭。GLISS_TEST_HOOKS のビルドと GLISS_TEST_BRIDGE_DIR が要る）。
+// （AraPreviewCheck.h の冒頭。GLISS_TEST_HOOKS のビルドと GLISS_TEST_BRIDGE_DIR が要る）。--ara-preview-playback は、EditorRenderer にリージョンを
+// 割り当てないホスト（Studio Pro）の変種で、リージョンを持つ PlaybackRenderer のインスタンスから鳴ることを確かめる。
 // 窓は画面の外に置き、SW_SHOWNA（前面にも入力の対象にもならない）で出す。結果は 0（全部通った）か 1 で返す。
 #include "AraEditorCheck.h"
 #include "AraPlaybackCheck.h"
@@ -69,7 +70,7 @@ public:
         if (args.size() >= 2 && args[0] == "--editor")
             return runEditorCheck (args);
 
-        if (args.size() >= 5 && args[0] == "--ara-preview")
+        if (args.size() >= 5 && (args[0] == "--ara-preview" || args[0] == "--ara-preview-playback"))
             return runAraPreviewCheck (args);
 
         if (args.size() >= 4 && args[0] == "--ara-playback")
@@ -84,7 +85,8 @@ public:
                                   "       GlissHostCheck --editor <report file> [--expect-web-dir] [--cycles <n>]\n"
                                   "       GlissHostCheck --ara-editor <report file> <Gliss.vst3> <trace dir> [--timeout <s>]\n"
                                   "       GlissHostCheck --ara-playback <report file> <Gliss.vst3> <plugin log file> [--timeout <s>]\n"
-                                  "       GlissHostCheck --ara-preview <report file> <Gliss.vst3> <test bridge dir> <trace dir>\n");
+                                  "       GlissHostCheck --ara-preview <report file> <Gliss.vst3> <test bridge dir> <trace dir>\n"
+                                  "       GlissHostCheck --ara-preview-playback <report file> <Gliss.vst3> <test bridge dir> <trace dir>\n");
             setApplicationReturnValue (2);
             quit();
             return;
@@ -216,7 +218,8 @@ private:
 
         araPreviewCheck = std::make_unique<AraPreviewCheck> ([this] (const juce::String& line) { report (line); },
                                                             [this] (bool ok, const juce::String& what) { return check (ok, what); },
-                                                            juce::File (args[2]), juce::File (args[3]), juce::File (args[4]));
+                                                            juce::File (args[2]), juce::File (args[3]), juce::File (args[4]),
+                                                            args[0] == "--ara-preview-playback");
         araPreviewCheck->start ([this]
         {
             report (failures == 0 ? "RESULT OK" : "RESULT FAILED (" + juce::String (failures) + ")");
