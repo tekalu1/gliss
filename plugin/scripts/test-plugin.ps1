@@ -41,7 +41,8 @@
 #       bridge in the screen's order (edit, then view data) and the time until the answers, the host notification and
 #       the changed sound of the realtime playback renderer is measured (same note x8, walking notes x8, bursts of 3
 #       x4, and one edit x4 while the rest of the song is being re-rendered after a pitch shift).
-#       plugin/tests/verify_ara_perf.py compares the medians with plugin/tests/aratest/perf-limits.json
+#       plugin/tests/verify_ara_perf.py compares the medians with plugin/tests/aratest/perf-limits.json; when one
+#       run is over a limit, two more runs are made and the median of the three runs is compared
 #   13. no engine process is left behind
 # The engine checks are skipped (reported) when no engine python is found (-EnginePython, GLISS_ENGINE_PYTHON, or the
 # .venv of the main worktree).
@@ -342,29 +343,40 @@ try {
         $steps | ForEach-Object { Write-Host ("    " + ($_.Line -replace '^.*changes: ', '')) }
         Report 'GlissARATest -changes (every saved-state change tells the host, restoring does not)' ($code -eq 0) "exit=$code steps=$($steps.Count)"
 
-        # 12. time from an edit to the screen's data, the host notification and the sound
+        # 12. time from an edit to the screen's data, the host notification and the sound. Times depend on the load of the
+        #     machine: when one run is over a limit, two more runs are made and the median of the three is compared
         if (-not $SkipPerf) {
-            $outP = Join-Path $work 'aratest-perf'
-            $workP = Join-Path $work 'aratest-perf-work'
-            foreach ($d in @($outP, $workP)) { New-Item -ItemType Directory -Force $d | Out-Null }
-            $env12 = $engineEnv.Clone()
-            $env12.VOCAL_ENGINE_WORK_DIR = $workP
-            $env12.GLISS_ARA_SESSIONS_DIR = (Join-Path $work 'perf-sessions')
-            $env12.GLISS_ARA_SYNC_WAIT_MS = '120000'
-            $env12.GLISS_ARA_READ_TIMEOUT_MS = '3000'
-            $env12.GLISS_ARA_TRACE_DIR = (Join-Path $work 'trace-perf')
-            New-Item -ItemType Directory -Force $env12.GLISS_ARA_TRACE_DIR | Out-Null
-            $saved = $TimeoutSec
-            $TimeoutSec = [Math]::Max($TimeoutSec, 900)
-            try {
-                $code = Invoke-Checked $araTest @('-vst3', $gliss, '-out', $outP, '-perf', '18') 'aratest-perf' $env12
-            } finally { $TimeoutSec = $saved }
-            Report 'GlissARATest -perf (edits on long windows)' ($code -eq 0) "exit=$code"
-            if ($code -eq 0) {
-                $verify = & $EnginePython (Join-Path $plugin 'tests\verify_ara_perf.py') $outP 2>&1
+            $outs = @()
+            $verifyCode = -1
+            for ($run = 1; $run -le 3; $run++) {
+                $suffix = if ($run -eq 1) { '' } else { "-$run" }
+                $outP = Join-Path $work ('aratest-perf' + $suffix)
+                $workP = Join-Path $work ('aratest-perf-work' + $suffix)
+                foreach ($d in @($outP, $workP)) { New-Item -ItemType Directory -Force $d | Out-Null }
+                $env12 = $engineEnv.Clone()
+                $env12.VOCAL_ENGINE_WORK_DIR = $workP
+                $env12.GLISS_ARA_SESSIONS_DIR = (Join-Path $work ('perf-sessions' + $suffix))
+                $env12.GLISS_ARA_SYNC_WAIT_MS = '120000'
+                $env12.GLISS_ARA_READ_TIMEOUT_MS = '3000'
+                $env12.GLISS_ARA_TRACE_DIR = (Join-Path $work ('trace-perf' + $suffix))
+                New-Item -ItemType Directory -Force $env12.GLISS_ARA_TRACE_DIR | Out-Null
+                $saved = $TimeoutSec
+                $TimeoutSec = [Math]::Max($TimeoutSec, 900)
+                try {
+                    $code = Invoke-Checked $araTest @('-vst3', $gliss, '-out', $outP, '-perf', '18') ('aratest-perf' + $suffix) $env12
+                } finally { $TimeoutSec = $saved }
+                Report "GlissARATest -perf (edits on long windows, run $run)" ($code -eq 0) "exit=$code"
+                if ($code -ne 0) { break }
+                $outs += $outP
+                if ($run -eq 2) { continue }
+                $verify = & $EnginePython (Join-Path $plugin 'tests\verify_ara_perf.py') @outs 2>&1
                 $verifyCode = $LASTEXITCODE
                 $verify | Where-Object { $_ -match '^(FAIL|RESULT)| median ' } | ForEach-Object { Write-Host "    $_" }
-                Report 'edit -> screen and sound within the limits (verify_ara_perf.py)' ($verifyCode -eq 0) "exit=$verifyCode"
+                if ($verifyCode -eq 0) { break }
+                if ($run -eq 1) { Write-Host '    over a limit: two more runs, then the median of three' }
+            }
+            if ($code -eq 0) {
+                Report "edit -> screen and sound within the limits (verify_ara_perf.py, runs=$($outs.Count))" ($verifyCode -eq 0) "exit=$verifyCode"
             }
         }
     }

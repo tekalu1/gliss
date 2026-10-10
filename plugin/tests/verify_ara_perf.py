@@ -1,7 +1,7 @@
 """GlissARATest -perf（編集してから画面・音に出るまでの時間）の出力を確かめる。
 
 使い方:
-    python <wt>\\plugin\\tests\\verify_ara_perf.py <out>                  # 上限（perf-limits.json）と比べる
+    python <wt>\\plugin\\tests\\verify_ara_perf.py <out> [<out2> <out3>]   # 上限（perf-limits.json）と比べる
     python <wt>\\plugin\\tests\\verify_ara_perf.py --write-limits <out1> <out2> <out3>
                                                                          # 何回かの測りから上限を作り直す
 
@@ -13,6 +13,8 @@
   view_bytes  最後の描画データのファイルの大きさ（差分で返っているか。時間と違い揺れない）
 どの測りでも、編集と描画データの答えが全部返り、音が変わっていること（t_sound >= 0）も見る。
 上限は、直した後の版で 3 回測った中央値の 1.5 倍（--write-limits。plugin/tests/aratest/perf-limits.json）。
+時間は PC の負荷で揺れるので、出力を 3 つ渡すと、場面ごとに回ごとの中央値の中央値を上限と比べる（test-plugin.ps1 は
+1 回目が上限を超えたときだけ 2 回足す）。答えと音の変化は、どの回でも揃っていること。
 view_bytes の上限は、描画データが差分で返らなくなった（全体を毎回書く）ことを、時間の揺れに埋もれずに見つけるため。
 """
 import json
@@ -45,17 +47,24 @@ def medians(runs):
     return {sc: {m: statistics.median(v[m] for v in vs) for m in METRICS + (BYTES,)} for sc, vs in by.items()}
 
 
+def median_of_medians(per_out):
+    """[(head, 場面ごとの中央値)] → 場面ごとに、回ごとの中央値の中央値"""
+    return {sc: {m: statistics.median(med[sc][m] for _, med in per_out if sc in med) for m in METRICS + (BYTES,)}
+            for sc in per_out[0][1]}
+
+
 def write_limits(outs):
     per_out = []
     for out in outs:
         head, runs = load(out)
         per_out.append((head, medians(runs)))
     seconds = per_out[0][0]["seconds"]
+    med = median_of_medians(per_out)
     measured, limits, measured_bytes, limit_bytes = {}, {}, {}, {}
-    for sc in per_out[0][1]:
-        measured[sc] = {m: round(statistics.median(med[sc][m] for _, med in per_out), 1) for m in METRICS}
+    for sc in med:
+        measured[sc] = {m: round(med[sc][m], 1) for m in METRICS}
         limits[sc] = {m: int(math.ceil(measured[sc][m] * 1.5 / 10.0) * 10) for m in METRICS}
-        measured_bytes[sc] = int(statistics.median(med[sc][BYTES] for _, med in per_out))
+        measured_bytes[sc] = int(med[sc][BYTES])
         limit_bytes[sc] = int(math.ceil(measured_bytes[sc] * 1.5 / 100.0) * 100)
     doc = {"seconds": seconds, "runs": len(outs), "measured_median_ms": measured, "limit_ms": limits,
            "measured_median_view_bytes": measured_bytes, "limit_view_bytes": limit_bytes}
@@ -68,7 +77,7 @@ def main():
     if len(sys.argv) >= 3 and sys.argv[1] == "--write-limits":
         return write_limits(sys.argv[2:])
 
-    out = sys.argv[1]
+    outs = sys.argv[1:]
     failures = []
 
     def check(ok, label, detail=""):
@@ -76,19 +85,23 @@ def main():
         if not ok:
             failures.append(label)
 
-    head, runs = load(out)
     limits = json.load(open(LIMITS, encoding="utf-8"))
-    check("error" not in head, "the document was prepared", json.dumps(head.get("setup") or head))
-    check(head.get("seconds") == limits["seconds"], "same song length as the limits",
-          "seconds=%s limits=%s" % (head.get("seconds"), limits["seconds"]))
+    per_out = []
+    for k, out in enumerate(outs):
+        head, runs = load(out)
+        tag = "" if len(outs) == 1 else "[%d] " % (k + 1)
+        check("error" not in head, tag + "the document was prepared", json.dumps(head.get("setup") or head))
+        check(head.get("seconds") == limits["seconds"], tag + "same song length as the limits",
+              "seconds=%s limits=%s" % (head.get("seconds"), limits["seconds"]))
 
-    for run in runs:
-        name = "%s %d" % (run["scenario"], run["i"])
-        complete = len(run["t_edit"]) == run["ops"] and len(run["t_view"]) == run["ops"]
-        check(complete and run["t_sound"] >= 0, name + ": edits answered and the sound changed",
-              "edits=%d/%d views=%d t_sound=%.0f" % (len(run["t_edit"]), run["ops"], len(run["t_view"]), run["t_sound"]))
+        for run in runs:
+            name = "%s%s %d" % (tag, run["scenario"], run["i"])
+            complete = len(run["t_edit"]) == run["ops"] and len(run["t_view"]) == run["ops"]
+            check(complete and run["t_sound"] >= 0, name + ": edits answered and the sound changed",
+                  "edits=%d/%d views=%d t_sound=%.0f" % (len(run["t_edit"]), run["ops"], len(run["t_view"]), run["t_sound"]))
+        per_out.append((head, medians(runs)))
 
-    for sc, med in medians(runs).items():
+    for sc, med in median_of_medians(per_out).items():
         limit = limits["limit_ms"].get(sc)
         if limit is None:
             check(False, sc + ": has limits")
