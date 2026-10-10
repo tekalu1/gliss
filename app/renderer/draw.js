@@ -825,8 +825,21 @@ function clipMuteBands(ROLL_T, ROLL_B) {
   return s;
 }
 
+/** 反映待ちの印（斜線の縞。2026-10-10 承認の A 案）: 離した形の帯に重ねる。結果を画面に採ったら消える。 */
+const SYNC_HATCH = '<defs><pattern id="syncHatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+  + '<rect width="7" height="7" fill="#1d2a1f"/><rect width="3" height="7" fill="#7fc08a"/></pattern></defs>';
+function syncMark(id, ...ds) {
+  let s = '';
+  for (const d of ds) if (d) s += `<path data-sync="${id}" d="${d}" fill="url(#syncHatch)" opacity=".95" pointer-events="none"/>`;
+  return s;
+}
+
 // ---------------------------------------------------------------- 本体
+let renders = 0;
+/** 描いた回数（反映待ちの印が変わった後に、もう描いたかを見る。edits.js の syncMarks）。 */
+export const renderCount = () => renders;
 export function render() {
+  renders += 1;
   if (!svg) return;
   const r = svg.getBoundingClientRect();
   W = r.width || 1200;
@@ -843,7 +856,7 @@ export function render() {
   const dr = S.drag;
   const main = S.tool === 'main';
   const hovTool = main || S.tool === 'mute';       // ノートに乗ったら濃くする（鉛筆・はさみは出さない）
-  let s = '';
+  let s = S.syncing.size ? SYNC_HATCH : '';
 
   // ---- 鍵盤
   const selm = S.sel.length === 1 && S.byId.get(S.sel[0])?.pitch_midi != null
@@ -944,6 +957,7 @@ export function render() {
     const opacity = bc === TAKE ? '.14' : '.45';
     if (d.main) s += `<path data-nopitch="${n.id}" d="${d.main}" fill="${bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
     if (d.cons) s += `<path data-nopitch="${n.id}" data-cons="${n.id}" d="${d.cons}" fill="${bc === TAKE ? desat(bc) : bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
+    if (S.syncing.has(n.id)) s += syncMark(n.id, d.main, d.cons);
     if (main || S.tool === 'cut' || S.tool === 'mute' || S.tool === 'draw') s += noPitchHit(n, segs, noPitchConn(n));
     const [s0, s1] = spanOf(n);
     const first = segs[0][0]; const last = segs[segs.length - 1][segs[segs.length - 1].length - 1];
@@ -1001,6 +1015,7 @@ export function render() {
     // AI（Claude Code など）の編集が最後に当たっているノートは、帯の縁を AI の色に（state.js の aiNotesOf）
     if (bd0.main && S.aiNotes.has(n.id)) s += `<path data-ai="${n.id}" d="${bd0.main}" fill="none" stroke="${AI_EDGE}" stroke-width="1.2" stroke-opacity=".9" pointer-events="none"/>`;
     if (bd0.cons) s += `<path class="blob" data-cons="${n.id}" d="${bd0.cons}" fill="${desat(bc)}" pointer-events="none"/>`;
+    if (S.syncing.has(n.id)) s += syncMark(n.id, bd0.main, bd0.cons);
     s += `<rect data-note="${n.id}" x="${f1(x0)}" y="${f1(y0)}" width="${f1(Math.max(2, x1 - x0))}" height="${f1(Math.max(4, y1 - y0))}"`
       + ' fill="transparent" style="cursor:move"/>';
     // 元の長さ（issue #37）: **選択したノートだけ**、動かしていれば元の頭〜尻を帯のいちばん太い所の上 2 px に

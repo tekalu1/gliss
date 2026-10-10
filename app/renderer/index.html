@@ -37,6 +37,11 @@ body{display:flex;flex-direction:column}
 .mock:focus-visible{outline:none}
 .tb{display:flex;align-items:center;gap:2px;height:36px;padding:0 8px;color:var(--fg2);flex:0 0 auto}
 .undo-label{font-size:11px;max-width:150px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg2)}
+/* 反映待ちの札（単体。反映待ちが 300 ms を超えたときだけ。印はノートの縞と同じ。2026-10-10 承認） */
+.sync-chip{display:inline-flex;align-items:center;gap:5px;font-size:11px;color:var(--fg2);white-space:nowrap}
+.sync-chip[hidden]{display:none}
+.sync-chip i{width:12px;height:9px;border-radius:2px;background:repeating-linear-gradient(-45deg,#7fc08a 0 2px,#1d2a1f 2px 5px)}
+html[data-mode=ara] .sync-chip{display:none}
 #bAudition{font-size:11px;white-space:nowrap;min-width:36px}
 #auditionState{font-size:11px;white-space:nowrap;color:var(--fg2)}
 #auditionState:empty{display:none}
@@ -266,6 +271,7 @@ html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
 #roll .nb:hover .blob[data-man],#roll .nb.hov .blob[data-man]{fill-opacity:.62}
 #roll .nb.sel .blob[data-man]{fill-opacity:.75;stroke-opacity:.95}
 .status{flex:0 0 auto;height:18px;line-height:18px;padding:0 10px;color:var(--fg3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.status.err{color:#e0897f}
 .pop,.menu{position:absolute;z-index:2;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55)}
 .pop[hidden],.menu[hidden]{display:none}
 .pop{padding:10px 12px;width:260px}
@@ -443,6 +449,7 @@ html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
     <button id="bUndo" aria-label="元に戻す（Ctrl+Z）" title="元に戻す（Ctrl+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
     <button id="bRedo" aria-label="やり直す（Ctrl+Shift+Z）" title="やり直す（Ctrl+Shift+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
     <span id="undoLabel" class="undo-label" aria-live="polite">元に戻す: なし</span>
+    <span id="syncChip" class="sync-chip" role="status" aria-live="polite" hidden><i aria-hidden="true"></i>反映中…</span>
     <span class="grp"></span>
     <button id="bGuide" aria-label="ガイドを重ねて表示" title="ガイドを重ねて表示" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg></button>
     <span class="grp"></span>

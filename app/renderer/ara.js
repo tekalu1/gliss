@@ -373,7 +373,10 @@ function chipSpec() {
     return { kind: 'an', icon: SVG.ring(p), title: '解析中', percent: Math.round(p * 100),
       detail: `${prep.stage_label ? `${prep.stage_label} · ` : ''}原音を再生中`, action: null, box: null };
   }
-  if (c && c.state === 'syncing') return { kind: 'an', icon: SVG.ring(0.5), title: '編集を反映している', detail: '', action: null, box: null };
+  // 編集を送っている・DAW の再生の音を作り直している: 短く「DAW に反映中…」（全体は止めない。2026-10-10 承認）
+  if ((c && c.state === 'syncing') || H.editsPending?.()) {
+    return { kind: 'an', icon: SVG.ring(0.5), title: 'DAW に反映中…', detail: '', action: null, box: null };
+  }
   if (c && c.state === 'waiting') return { kind: 'an', icon: SVG.ring(0.1), title: '解析を待っている', detail: '原音を再生中', action: null, box: null };
   if (performance.now() < A.flashUntil) return { kind: 'ok', icon: SVG.ok, title: '準備完了', detail: '', action: null, box: null };
   return null;
@@ -384,6 +387,9 @@ function busyPopup() {
   const pop = H.busyState?.().popup;
   return pop && !pop.done ? pop : null;
 }
+
+/** 札を今の状態で描き直す（編集を離した・結果を採ったとき。edits.js の syncMarks）。 */
+export function araUpdateChip() { if (ARA) updateChip(); }
 
 function updateChip() {
   const slot = document.querySelector('#araChip');

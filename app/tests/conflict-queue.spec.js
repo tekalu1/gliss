@@ -2,8 +2,8 @@
 //
 //   (Q1) 保存（save_project）を待っている間は、順番待ちの次の操作を始めない。保存が終わったら始める
 //   (Q2) 保存が競合したら、読み直し（list_tracks・描画データ）が終わるまで次の操作を始めず、保存の後に入った操作も捨てる
-//   (Q3) 複数ノートのピッチ・結合で、途中の呼び出しが競合したら「一部だけ当たった可能性がある」と伝える
-//        （最初の呼び出しの競合は、今までどおり「今の操作は当てていない」）
+//   (Q3) 複数ノートのピッチは 1 回の shift_pitch で当てる（競合したら「今の操作は当てていない」。一部だけ当たることは無い）。
+//        結合で、途中の呼び出しが競合したら「一部だけ当たった可能性がある」と伝える
 //   (Q4) 閉じたセッションの prep_status が遅れて失敗しても、ポーリングを続けない。準備中のある新しいセッションに
 //        変わっても、予約は 1 本だけ
 //
@@ -176,24 +176,25 @@ async function undoAll() {
   }
 }
 
-test('(Q3) 複数ノートのピッチで、途中の呼び出しが競合したら「一部だけ当たった可能性がある」', async () => {
+test('(Q3) 複数ノートのピッチは 1 回の呼び出しで当て、競合したら「当てていない」', async () => {
   await settle();
   await undoAll();
   const ids = (await win.evaluate(() => window.__app.notes())).slice(0, 3).map((n) => n.id);
-  // 2 つ目の shift_pitch だけ競合: 1 つ目は当たっている
+  // 2 回目の shift_pitch が来たら競合（来ないこと = 1 回で当てたことを確かめる）
   await conflictOn('shift_pitch', 2);
   try {
     await win.evaluate(async (ns) => {
       const { applyPitch } = await import('./edits.js');
       await applyPitch(new Map(ns.map((id) => [id, 0.5])));
     }, ids);
+    expect(await app.evaluate(() => globalThis.__qCount)).toBe(1);
   } finally {
     await unhook();
   }
   await settle();
-  expect(await status()).toContain('今の操作は一部だけ当たった可能性がある。表示を確かめて');
-  expect((await edits()).filter((e) => e.kind === 'pitch_shift')).toHaveLength(1);
-  // 最初の呼び出しの競合は、今までどおり「当てていない」
+  expect(await status()).not.toContain('一部だけ当たった');
+  expect((await edits()).filter((e) => e.kind === 'pitch_shift')).toHaveLength(3);
+  // 1 回の呼び出しが競合したら、何も当てていない
   await undoAll();
   await conflictOn('shift_pitch', 1);
   try {

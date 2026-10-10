@@ -6,10 +6,11 @@ import { S } from './state.js';
 
 let statusEl = null;
 let pendingStatus = null;
-export function status(text) {
+export function status(text, { error = false } = {}) {
   statusEl = statusEl || $('#status');
   clearTimeout(pendingStatus);
   if (!statusEl) return;
+  statusEl.classList.toggle('err', !!error && !!text);
   if (/(?:している|読み込んでいる|開いている|作っている).*…/.test(text || '')) {
     pendingStatus = setTimeout(() => { statusEl.textContent = text; }, 300);
   } else {

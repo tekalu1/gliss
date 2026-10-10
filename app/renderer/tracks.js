@@ -888,7 +888,7 @@ function araMark(id) {
     const v = Number.isFinite(c.progress) ? c.progress : 0;
     return ['preparing', `DAW の音を読み込んでいる ${Math.round(v * 100)}%`, ring(v)];
   }
-  if (c.state === 'syncing') return ['preparing', '編集を DAW の再生に反映している', ring(0.5)];
+  if (c.state === 'syncing') return ['preparing', 'DAW に反映中…', ring(0.5)];
   if (c.state === 'waiting') {
     return ['queued', '解析の順番待ち（その間は原音が鳴る）', '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4" class="dot"/></svg>'];
   }

@@ -18,17 +18,17 @@
 //    ミュート（ノートをクリックで無音⇔戻す。なぞると、押したノートと同じ向きにそろえる。離したら 1 つの編集）。
 import {
   BLOCK_KINDS, LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
-  frameTime, restoreTo, setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited, toSource,
-  totalSec, utteranceAt,
+  frameTime, noteFrames, restoreTo, setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited,
+  toSource, totalSec, utteranceAt,
 } from './state.js';
 import {
   M, T, X, Y, blockYSpans, edStep, focusRange, hasConnFocus, nearPair, pan, render, renderToolbar, rollBottom, rollTop,
   rowH, scrollPitch, size, zoom, zoomPitch,
 } from './draw.js';
 import {
-  afterQueued, applyBoundary, applyDraw, applyFade, applyPitch, applyPlan, applyTransition, enqueue, idle,
-  mergeNotes, muteNotes, refresh, requestPlan, restorePreviews, retryDraw, setLyrics, setNoteSyllable, splitNote, unmuteNotes, waitFor,
-  wake,
+  afterQueued, applyBoundary, applyDraw, applyFade, applyPlan, applyTransition, enqueue, enqueuePitch, idle,
+  mergeNotes, muteNotes, queuedPitch, requestPlan, restorePreviews, retryDraw, setLyrics, setNoteSyllable, splitNote,
+  unmuteNotes, waitFor, wake,
 } from './edits.js';
 import { G, penSnapOn, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
 import { markNoteEdited, previewEnabled, previewState, releasePreview, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
@@ -495,26 +495,8 @@ function endDrag(e) {
   if (dr.type === 'fade') { finishFade(dr); return; }
   if (dr.type === 'mute') { finishMute(dr); return; }
   if (dr.type === 'note' && dr.moved && dr.axis === 'pitch') {
-    const deltas = new Map(dr.deltas || S.local.pitch);
-    for (const [id, v] of deltas) queuedPitch.set(id, (queuedPitch.get(id) || 0) + v);
-    const unqueue = () => {
-      // 当たった（view data に入った）・失敗した・Ctrl+Z で外した: もう順番待ちの分ではない
-      for (const [id, v] of deltas) {
-        const r = (queuedPitch.get(id) || 0) - v;
-        if (Math.abs(r) < 1e-9) queuedPitch.delete(id); else queuedPitch.set(id, r);
-      }
-    };
-    // まだ当たっていない間のプレビュー（前の操作の描き直しの後にも載せ直す）
-    const preview = () => {
-      if (S.drag?.type === 'note' && S.drag.axis === 'pitch') return;   // ドラッグ中は、そのドラッグが足して持つ
-      for (const [id, v] of deltas) S.local.pitch.set(id, (S.local.pitch.get(id) || 0) + v);
-    };
-    enqueue(() => {
-      // 待っている間に前の編集の描き直しでプレビューが消えている: 当てる直前に載せ直す
-      restorePreviews();
-      for (const [id, v] of deltas) S.local.pitch.set(id, (S.local.pitch.get(id) || 0) + v);
-      return applyPitch(deltas).finally(unqueue);
-    }, { label: 'ピッチ', preview, cancel: unqueue });
+    // 離した量を順番待ちの量に足して描く（当たって描画データに入るまで、離した形のまま）
+    enqueuePitch(new Map(dr.deltas || S.local.pitch), { label: 'ピッチ', op: 'pitch' });
     return;
   }
   if ((dr.type === 'note' && dr.axis === 'time') || dr.type === 'edge') {
@@ -524,8 +506,12 @@ function endDrag(e) {
   if (dr.type === 'bound') {
     if (dr.moved) {
       const dt = dr.dt || 0;
+      // 当たるまでは離した位置（秒）に描く
+      const idx = S.boundById.get(dr.id)?.index;
+      const at = S.local.btime.get(idx);
       enqueue(() => applyBoundary(dr.id, setBoundaryDrag(dr.id, dt)), {
-        label: '音素の境界',
+        label: '音素の境界', op: 'bound',
+        preview: () => { if (at != null) { S.local.btime.set(idx, at); invalidateWarp(); } },
         cancel: () => { S.local.btime.clear(); invalidateWarp(); },
       });
       return;
@@ -573,12 +559,12 @@ function finishFade(dr) {
     restorePreviews();
     preview();
     return applyFade([dr.id], patch);
-  }, { label: 'フェード', preview, cancel: () => { if (S.local.fade.get(dr.id) === val) S.local.fade.delete(dr.id); } });
+  }, {
+    label: 'フェード', preview, notes: [dr.id], op: 'fade',
+    cancel: () => { if (S.local.fade.get(dr.id) === val) S.local.fade.delete(dr.id); },
+  });
   render();
 }
-
-/** 離したが、まだ当たっていないピッチのドラッグの量（ノートごとの合計、半音）。 */
-const queuedPitch = new Map();
 
 /** 端・移動のドラッグを離した: 前に離した操作と計画を待ってから、同じ計画を同じ x で確定。 */
 let plansPending = 0;
@@ -617,19 +603,18 @@ async function finishPlanDrag(dr) {
       if (dr.canceled || dr.trackId !== S.session?.current) { cancel(); render(); return; }
       dr.applying = true;
       if (S.edgeDraft?.drag === dr) S.edgeDraft = null;
-      const timing = {};
-      const result = await applyPlan({ planId: data.plan_id, x, onTiming: (v) => Object.assign(timing, v) });
-      if (S.plan?.data.plan_id === data.plan_id) {
-        if (result.ok) await refresh().catch(() => {}); // 先の再取得が新しい世代に負けた場合
-        if (S.plan?.data.plan_id === data.plan_id) setPlan(null);
-        render();
-      }
-      if (dr.type === 'edge') S.lastEdgeTiming = {
-        planMs: dr.planMs, pointerMs: dr.releasedAt - dr.startedAt,
-        queueMs: performance.now() - dr.releasedAt - (timing.applyMs || 0) - (timing.viewMs || 0),
-        ...timing, totalMs: performance.now() - dr.startedAt,
-      };
-    }, { label: dr.type === 'edge' ? 'ノートの長さ' : 'ノートの移動', cancel });
+      // 結果は待たずに次の操作へ。計画のプレビューは、結果を採った描画で外す（applyPlan）
+      await applyPlan({
+        planId: data.plan_id, x,
+        onTiming: (timing) => {
+          if (dr.type === 'edge') S.lastEdgeTiming = {
+            planMs: dr.planMs, pointerMs: dr.releasedAt - dr.startedAt,
+            queueMs: performance.now() - dr.releasedAt - (timing.applyMs || 0) - (timing.viewMs || 0),
+            ...timing, totalMs: performance.now() - dr.startedAt,
+          };
+        },
+      });
+    }, { label: dr.type === 'edge' ? 'ノートの長さ' : 'ノートの移動', notes: dr.ids || [dr.id], op: dr.type === 'edge' ? 'edge' : 'move', cancel });
   } finally {
     if (S.edgeDraft?.drag === dr) S.edgeDraft = null;
     plansPending -= 1;
@@ -667,10 +652,19 @@ function connHover(e) {
 /** ピアノロールの上でドラッグを始めたら線を描く（タイムスケール・歌詞レーンはふつうどおり）。 */
 const inRoll = (x, y) => x > KEYS_W && y > rollTop() && y < rollBottom() && !!S.vd;
 
+/** 送って結果を待っている前の線を脇に置く（描いたまま見せる）。確かめ・再送の要る線があれば false。 */
+function setStrokeAside() {
+  if (!S.stroke) return true;
+  if (S.stroke.phase !== 'pending') return false;
+  S.strokesAside.push(S.stroke);
+  S.stroke = null;
+  return true;
+}
+
 function startStroke(e) {
   const x = px(e); const y = py(e);
   if (!inRoll(x, y)) return false;
-  if (S.stroke && S.strokePhase !== 'drawing') {
+  if (S.stroke && S.strokePhase !== 'drawing' && !setStrokeAside()) {
     status('前の描線を確定または取り消してから描いてください');
     return true;
   }
@@ -701,6 +695,21 @@ function penHover(e) {
   const show = !!S.penHud && penSnapOn(e);
   if (show || S.penHudOn) render();
   S.penHudOn = show;
+}
+
+/** 取り消した（順番待ちのまま捨てた）線を画面から外す。 */
+function dropStrokeAt(st) {
+  S.strokesAside = S.strokesAside.filter((x) => x !== st);
+  if (S.stroke === st) { S.stroke = null; S.strokePhase = 'idle'; }
+}
+/** 線がかかるノート（反映待ちの縞を付ける）。 */
+function strokeNotes(sd) {
+  const ids = [];
+  for (const n of S.notes || []) {
+    const r = noteFrames().get(n.id);
+    if (r && sd.v1 >= r[0] && sd.v0 <= r[1]) ids.push(n.id);
+  }
+  return ids;
 }
 
 /** 離した: 描いた線をエンジンへ。無声だけ・短すぎる線は捨てる（描いても効かない）。 */
@@ -737,7 +746,7 @@ function finishStroke() {
   st.points = pts;
   st.phase = S.strokePhase = 'pending';
   enqueue(() => applyDraw(pts, st), {
-    label: '鉛筆', cancel: () => { if (S.stroke === st) { S.stroke = null; S.strokePhase = 'idle'; } },
+    label: '鉛筆', notes: strokeNotes(sd), op: 'pen', cancel: () => dropStrokeAt(st),
   });
   render();
 }
@@ -756,7 +765,7 @@ function rightMove(e) {
   if (!rd.began) {
     if (Math.hypot(e.clientX - rd.x0, e.clientY - rd.y0) < RESTORE_PX) return;
     rd.began = true;
-    if (S.stroke && S.strokePhase !== 'drawing') {
+    if (S.stroke && S.strokePhase !== 'drawing' && !setStrokeAside()) {
       status('前の描線を確定または取り消してから戻してください');
       return;
     }
@@ -805,7 +814,7 @@ function finishRestore() {
   st.points = sd.pts.map(([t, m]) => [+t.toFixed(6), +m.toFixed(4)]);
   st.phase = S.strokePhase = 'pending';
   enqueue(() => applyDraw(st.points, st), {
-    label: '元に戻す', cancel: () => { if (S.stroke === st) { S.stroke = null; S.strokePhase = 'idle'; } },
+    label: '元に戻す', notes: strokeNotes(sd), op: 'pen', cancel: () => dropStrokeAt(st),
   });
   render();
 }
@@ -992,10 +1001,10 @@ function openPop(x, y) {
   closeMenu();
   closeTr();
   clearGuideStatus();
-  popSes = { changeset: null };
   // 対象ノートが決まった時点で、エンジンに 100% の計画を 1 回だけ作らせる。
   // スライダーはこの計画に強度を掛けて描くだけ、離したら同じ計画・同じ強度で確定する。
   const ids = S.sel.filter((id) => S.byId.get(id)?.kind === 'note');
+  popSes = { changeset: null, ids };
   setPlan(null);
   const args = { op: 'guide', note_ids: ids.length ? ids : null };
   const load = (shape) => requestPlan({ ...args, match_pitch_shape: shape })
@@ -1093,7 +1102,9 @@ function releaseMacro() {
       if (switching) setPlan(data, { x0: want.x, pitch0: want.pitch });
       previewMacro();
     }
-  }, { label: 'ガイドに合わせる' });
+  }, { label: 'ガイドに合わせる', op: 'guide',
+    // 反映待ちの縞: 選んだノート（選択が無ければ全体の音程ノート）
+    notes: ses.ids?.length ? ses.ids : S.pitched.filter((n) => n.kind === 'note').map((n) => n.id) });
 }
 
 // ---- つなぎのなだらかさ（ガイドに合わせると同じ形。スライダー 1 本、離すたびに当て直す）

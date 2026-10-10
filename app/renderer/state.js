@@ -61,6 +61,10 @@ export const S = {
   queued: 0,           // 離したが、前の編集を待っていてまだ当てていない操作の数（edits.enqueue）
   // 順番待ちでまだエンジンに渡していない操作（取り消しの名前つき。Ctrl+Z でここから外せる。edits.enqueue）
   pending: [],
+  // エンジンに渡したが、結果をまだ画面に採っていない操作（離した形と反映待ちの縞を出し続ける。edits.run）
+  inflight: [],
+  syncing: new Set(),  // 反映待ちのノートの id（縞を付ける。edits.syncMarks）
+  screenTimings: [],   // 画面の段階の時間（最新 50 件。edits.screenLog）
   openQueued: 0,       // 順番待ちに入っているトラックの追加・切り替え（その間のドロップは断る）
   // 準備の待ちを「待つのをやめる」でやめたトラック { id, view, pv, watch }（issue #63）。その間は下を空にし、
   // 編集は「準備中」で断る。準備が終わったら描き直す（tracks.js）。解析が済めば（engine.analyzeTake）外す
@@ -79,6 +83,8 @@ export const S = {
   // 鉛筆で描いている線: { vals: Map(フレーム → MIDI), last: {i, m} }（離したら set_pitch_curve(mode=draw)）
   stroke: null,
   strokePhase: 'idle', // drawing / pending / checking / failed / committed
+  // 離して送ったが、まだ結果を採っていない前の描線（次の線を描き始めたら S.stroke からここへ移す。採ったら外す）
+  strokesAside: [],
   boundHover: null,
   edgeDraft: null, // 計画待ちの間に見せる仮の端（エンジンには未適用）
   lastEdgeTiming: null, // 直近の端編集の plan / apply / view の実測値
@@ -240,8 +246,7 @@ export function frameTime(i) {
 }
 
 /** 鉛筆の線 → [[編集前の秒, MIDI], ...]（描いた順に後から描いたフレームが勝つ）と、有声に切り詰めた範囲。 */
-export function strokeData() {
-  const st = S.stroke;
+export function strokeData(st = S.stroke) {
   if (!st || st.vals.size === 0) return null;
   const idx = [...st.vals.keys()].sort((a, b) => a - b);
   const lo = idx[0]; const hi = idx[idx.length - 1];
@@ -292,7 +297,7 @@ export function editedCurve() {
   const hasPitch = S.local.pitch.size > 0 || !!(S.plan && S.plan.data && S.plan.data.pitch
     && Object.keys(S.plan.data.pitch).length && (S.plan.pitch || 0) !== (S.plan.pitch0 || 0));
   const cc = planConnChanges();
-  if (!hasPitch && !S.trPreview && !S.stroke && !cc) return base;
+  if (!hasPitch && !S.trPreview && !S.stroke && !S.strokesAside.length && !cc) return base;
   const out = base.slice();
   const fn = frameNoteIds();
   const keep = vd.f0.draw_keep || null;
@@ -335,12 +340,14 @@ export function editedCurve() {
       out[i] += k * (s2 * d2 - s1 * d1) / 100;
     }
   }
-  const sd = S.stroke ? strokeData() : null;
-  if (sd && sd.v0 >= 0) {
+  // 送った順に前の描線、最後に描いている（いちばん新しい）線を重ねる
+  for (const st of [...S.strokesAside, S.stroke]) {
+    const sd = st ? strokeData(st) : null;
+    if (!sd || sd.v0 < 0) continue;
     const R = PITCH.DRAW_RAMP_SEC;
     const t0 = frameTime(sd.v0); const t1 = frameTime(sd.v1);
     const orig = vd.f0.take_midi;
-    const val = (i) => { const v = S.stroke.vals.get(i); return v == null ? interpStroke(sd, i) : v; };
+    const val = (i) => { const v = st.vals.get(i); return v == null ? interpStroke(sd, i) : v; };
     // 描き直し: 新しい線の範囲にすっぽり入る前の鉛筆は、エンジンが外す（draw_specs）。プレビューでも
     // 外した曲線（鉛筆を当てる前の曲線 take_nodraw_midi）から描く（issue #6。以前は端 40 ms で最大 25 セントずれた）
     const nd = vd.f0.take_nodraw_midi;
@@ -755,6 +762,7 @@ export function adopt(vd, { keepView = true } = {}) {
     S.stroke = null;
     S.strokePhase = 'idle';
   }
+  S.strokesAside = S.strokesAside.filter((st) => st.trackId === S.session?.current);
   if (S.edgeDraft && S.edgeDraft.trackId !== S.session?.current) S.edgeDraft = null;
   S.vd = vd;
   // 曲の取り消しの履歴（セッション）の要約。セッションの無いプロジェクトはプロジェクトの changeset から
@@ -832,6 +840,7 @@ export function clearProject() {
   S.sel = [];
   S.plan = null;
   S.stroke = null;
+  S.strokesAside = [];
   S.strokePhase = 'idle';
   S.edgeDraft = null;
   S.lastEdgeTiming = null;
