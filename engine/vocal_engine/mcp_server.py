@@ -2663,6 +2663,9 @@ def main():
         log.get().exception("アドオンを読めなかった")
     log.get().info("=== vocal_engine MCP サーバー起動（%s / pid %d）", __version__, os.getpid())
     server = build_server()
+    from . import warmup
+    warmup.mark_ready()
+    warmup.start()                               # librosa・numba・モデルを裏で読んでおく（ロックは取らない）
     try:
         server.run(transport="stdio")
     finally:
