@@ -30,7 +30,7 @@ import {
   mergeNotes, muteNotes, refresh, requestPlan, restorePreviews, retryDraw, setLyrics, setNoteSyllable, splitNote, unmuteNotes, waitFor,
   wake,
 } from './edits.js';
-import { G, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
+import { G, penSnapOn, pitchSnapOn, saveGrid, snapTime, timeSnapOn } from './grid.js';
 import { markNoteEdited, previewEnabled, previewState, releasePreview, setPreviewEnabled, startPreview, stop, stopPreview, updatePreview } from './audio.js';
 import { ARA, araLoopEditor, araSeekEditor, pullHostState } from './ara.js';
 import { status } from './engine.js';
@@ -119,6 +119,7 @@ export function install(svgEl, rootEl, onViewChanged) {
   svg.addEventListener('pointerleave', () => {
     lastHover = null;
     let dirty = false;
+    if (S.penHud && !S.drag) { S.penHud = null; dirty = true; }
     if (S.cutHover) { S.cutHover = null; dirty = true; }
     if (S.near && !S.drag) { S.near = null; dirty = true; }
     if (S.edgeHover && !S.drag) { S.edgeHover = null; dirty = true; }
@@ -337,6 +338,7 @@ function onMove(e) {
   if (rightDown) { rightMove(e); return; }
   if (!dr) {
     if (S.tool === 'cut') cutHover(e);
+    else if (S.tool === 'draw') penHover(e);
     else connHover(e);
     return;
   }
@@ -359,7 +361,8 @@ function onMove(e) {
   if (dr.type === 'stroke') {
     // 1 フレームの間に来た中間の点も全部使う（速く動かすと pointermove は間引かれる）
     const evs = e.getCoalescedEvents?.();
-    for (const c of evs?.length ? evs : [e]) strokeTo(toSource(T(px(c))), clamp(M(py(c)), ...pitchWorld()));
+    for (const c of evs?.length ? evs : [e]) penTo(c);
+    penHudAt(e);
     dr.moved = true;
     render();
     return;
@@ -469,7 +472,7 @@ function endDrag(e) {
   if (dr.moved && (dr.type === 'note' || dr.type === 'edge')) markNoteEdited(dr.type === 'note' ? dr.ids : [dr.id]);   // 試聴は編集したノートだけ厳密に
   if (dr.type === 'stroke') {
     // 離した位置も線の終わりに入れる（最後の pointermove の後に動いた分）
-    if (e.type === 'pointerup') strokeTo(toSource(T(px(e))), clamp(M(py(e)), ...pitchWorld()));
+    if (e.type === 'pointerup') penTo(e);
     finishStroke();
     return;
   }
@@ -656,11 +659,31 @@ function startStroke(e) {
   }
   S.stroke = { vals: new Map(), last: null, trackId: S.session?.current, phase: 'drawing' };
   S.strokePhase = 'drawing';
-  strokeTo(toSource(T(x)), clamp(M(y), ...pitchWorld()));
+  penTo(e);
+  penHudAt(e);
   S.drag = { type: 'stroke', moved: false };
   svg.setPointerCapture(e.pointerId);
   render();
   return true;
+}
+
+/** ペンの点を 1 つ線に足す。半音に沿うか = 音程スナップ XOR Shift（その点の Shift）。
+ *  隣の半音へ移る余裕は 0.15 半音と 6 px の大きいほう（縦に拡大した画面でも、小さい揺れで行き来しない）。 */
+const penHys = () => Math.max(0.15, 6 / rowH());
+function penTo(c) {
+  strokeTo(toSource(T(px(c))), clamp(M(py(c)), ...pitchWorld()), penSnapOn(c), penHys());
+}
+
+/** 鉛筆の先端の目印（半音の行・音名・鉛筆）の位置。ポインタがピアノロールの上にあるときだけ。 */
+function penHudAt(e) {
+  const x = px(e); const y = py(e);
+  S.penHud = S.drag?.type === 'stroke' || inRoll(x, y) ? { x, y, m: clamp(M(y), ...pitchWorld()) } : null;
+}
+function penHover(e) {
+  penHudAt(e);
+  const show = !!S.penHud && penSnapOn(e);
+  if (show || S.penHudOn) render();
+  S.penHudOn = show;
 }
 
 /** 離した: 描いた線をエンジンへ。無声だけ・短すぎる線は捨てる（描いても効かない）。 */
@@ -1370,6 +1393,9 @@ function onShiftKey(e) {
   if (G.shift === down) return;
   G.shift = down;
   const dr = S.drag;
+  // 鉛筆: 書いている途中の押し離しは、いまの位置で自由 ⇄ 半音を 50 ms でつなぎ始める
+  if (dr?.type === 'stroke' && S.stroke?.raw) { strokeTo(S.stroke.raw.t, S.stroke.raw.m, penSnapOn(), penHys()); render(); return; }
+  if (!dr && S.tool === 'draw' && S.penHud) { render(); S.penHudOn = penSnapOn(); return; }
   if (dr?.last && (dr.type === 'note' || dr.type === 'edge')) onMove({ ...dr.last, shiftKey: down });
   else if (!dr && S.tool === 'cut' && lastHover) cutHover({ ...lastHover, shiftKey: down });
 }

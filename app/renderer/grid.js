@@ -120,6 +120,8 @@ export function snapTime(t, step) {
 /** 時間スナップが効いているか（オンで、Shift を押していない）。 */
 export function timeSnapOn(e) { return G.snapT && !(e ? e.shiftKey : G.shift); }
 export function pitchSnapOn(e) { return G.snapP && !(e ? e.shiftKey : G.shift); }
+/** 鉛筆が半音に沿うか: 音程スナップの設定を、Shift を押している間だけ反転する（2026-10-10 承認）。 */
+export function penSnapOn(e) { return G.snapP !== !!(e ? e.shiftKey : G.shift); }
 
 function fmtSec(t, step) {
   const at = Math.abs(t) < 1e-9 ? 0 : Math.abs(t);

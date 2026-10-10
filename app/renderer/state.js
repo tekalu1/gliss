@@ -397,14 +397,56 @@ function interpStroke(sd, i) {
   return a[1] + (b[1] - a[1]) * (i - a[0]) / (b[0] - a[0]);
 }
 
-/** 鉛筆: (tSrc, midi) まで線を引く（前の点との間のフレームを埋める。戻って描いたら上書き）。
+/** 鉛筆の半音の移動・Shift の押し離しをつなぐ時間（秒。余弦）。 */
+export const PEN_BLEND_SEC = 0.05;
+const rcos = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : (1 - Math.cos(Math.PI * u)) / 2);
+const blendAt = (ev, v0, t) => {
+  for (let i = ev.length - 1; i >= 0; i--) {
+    if (ev[i].tc <= t) return ev[i].from + (ev[i].to - ev[i].from) * rcos((t - ev[i].tc) / PEN_BLEND_SEC);
+  }
+  return v0;
+};
+
+/** 鉛筆: (tSrc, midi) まで線を引く。snap = 半音に沿うか（音程スナップ XOR Shift）、hys = 隣の半音へ移る余裕（半音）。
+ *
+ *   半音に沿う間は、線を「いまの半音の行の中心」に置き、境目をまたいで hys を超えたら隣の半音へ 50 ms の余弦で
+ *   移る（段にならない。揺れて行き来しない）。途中で snap が変わっても、自由 ⇄ 半音を同じ 50 ms でつなぐ。
+ *   時間は元の録音の秒（編集後の秒ではない）。snap をずっと使わない線は、従来どおり自由な線のまま。 */
+export function strokeTo(tSrc, midi, snap = false, hys = 0.15) {
+  const st = S.stroke;
+  if (!st) return;
+  const a = st.raw;
+  st.raw = { t: tSrc, m: midi };
+  const was = st.snapNow;
+  st.snapNow = !!snap;
+  if (!a) {
+    if (snap) { const r = Math.round(midi); st.sn = { cur: r, s0: r, w0: 1, evS: [], evW: [] }; strokeFill(tSrc, r); }
+    else strokeFill(tSrc, midi);
+    return;
+  }
+  if (!st.sn && !snap) { strokeFill(tSrc, midi); return; }
+  const sn = st.sn || (st.sn = { cur: Math.round(a.m), s0: Math.round(a.m), w0: 0, evS: [], evW: [] });
+  const n = Math.max(1, Math.ceil(Math.abs(tSrc - a.t) / 0.002));
+  for (let j = 1; j <= n; j++) {
+    const u = j / n; const tt = a.t + (tSrc - a.t) * u; const mm = a.m + (midi - a.m) * u;
+    if (j === n && !!snap !== !!was) sn.evW.push({ tc: tt, from: blendAt(sn.evW, sn.w0, tt), to: snap ? 1 : 0 });
+    if (Math.abs(mm - sn.cur) > 0.5 + hys) {
+      const nv = Math.round(mm);
+      sn.evS.push({ tc: tt, from: blendAt(sn.evS, sn.s0, tt), to: nv });
+      sn.cur = nv;
+    }
+    const w = blendAt(sn.evW, sn.w0, tt); const sv = blendAt(sn.evS, sn.s0, tt);
+    strokeFill(tt, (1 - w) * mm + w * sv);
+  }
+}
+
+/** 鉛筆の線の下請け: (tSrc, midi) まで直線で結び、間のフレームを埋める（戻って描いたら上書き）。
  *
  *   前の点とこの点を結ぶ線分を、**各フレームの正確な時刻**で読む（フレームに丸めて後勝ちにすると、
  *   描いた向きと逆へ最大で半フレームずれる）。同じフレームをまたがない短い動きは、次の点で線分が
  *   そのフレームを越えるまで値を持たない（先端は画面の strokeTip が生の位置で見せる）。 */
-export function strokeTo(tSrc, midi) {
+function strokeFill(tSrc, midi) {
   const st = S.stroke;
-  if (!st) return;
   const f0 = S.vd.f0;
   const f = (tSrc - f0.t0_sec) / f0.hop_sec;          // 小数のフレーム位置
   const n = f0.take_midi.length;
