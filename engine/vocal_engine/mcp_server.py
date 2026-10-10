@@ -2245,7 +2245,7 @@ def render_view(start_sec: float = None, end_sec: float = None, show_guide: bool
 
 @_tool
 def export_view_data(start_sec: float = None, end_sec: float = None,
-                     peak_ms: float = None, path: str = None) -> dict:
+                     peak_ms: float = None, path: str = None, since: str = None) -> dict:
     """**画面（UI）向け**の描画データを JSON ファイルに書いてパスを返す。
 
     LLM 向けではない。エージェントがこれを読む必要はない（要約が欲しいときは
@@ -2257,11 +2257,15 @@ def export_view_data(start_sec: float = None, end_sec: float = None,
     ガイド F0（ガイドの時刻 + 全体のずれでテイク時間に置いたもの）、ノート一覧（id・開始/終了・音名・
     編集前後の中心ピッチ・ピッチ編集対象外フラグ）、境界一覧（編集前後の秒）、
     編集前→編集後の時間写像、編集リストと取り消し履歴。
+
+    since に前に受け取った view_rev を渡すと、その版との差分だけを書いて返す（diff: true。
+    当て方は engine/docs/MCP.md「描画データの差分」）。その版を覚えていなければ全体（diff: false）。
     """
     p = _project()
     p.reload_if_changed()
-    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path)
-    return _ok(**out, view_rev=p.view_key())
+    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path, since=since)
+    out.setdefault("view_rev", p.view_key())
+    return _ok(**out)
 
 
 @_tool

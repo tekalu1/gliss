@@ -873,7 +873,7 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `render_region(start_sec?, end_sec?, backend?, channels?, path?)` | **区間 → PCM**（32 bit float の WAV のパス。`channels` の既定は `"all"`＝素材のチャンネルそのまま。Python の `render/region.py` の既定は `"mono"`）。長さが変わらず、中身は `export_wav` が同じ範囲に書くものと同じ。`source_start_sec`・`rendered_windows_sec`・`timing_sec` を返す（DAW 連携 段階 0） |
 | `render_audition(note_id, cents?, start_sec?, end_sec?, backend?)` | **画面向け**: つかんだノートのプレビュー音（issue #27）。ノートを `cents` 動かした**つもり**で範囲（既定はノートの範囲）を再合成したモノラルの WAV（`renders/audition-*.wav`。要求ごとに一意）のパス。返却後30秒以上保持し、次の要求時に古いファイルだけ掃除する。native側は応答を受けたら速やかに読み込む。最大1024件/512MiBで、新規要求は上限時にエラーとし、返却済みファイルを早期削除しない。`rev` は `ara_revs` と同じ解析:編集の版、`view_rev` は `export_view_data` と共通の描画入力版（表示範囲引数を含まない）。`track_id`/`ara_id`/`source_id` は対象識別用（単体利用ではnull可）。**プロジェクトは書き換えない**。ARAの同版PCMがある `cents=0` はそこから厳密に切り出す。PCM の窓に収まらない `cents=0` の範囲は、ARA の再生で作った同じ版の Segment 列を使って再合成する（編集の層を作り直さない。音は同じ）。ARA の `cents≠0`（ピッチのドラッグ）は、曲全体ではなく要求範囲の前後 7 秒だけに層を当てる（再合成する窓が範囲の端に触れたら省かず全体で作り直す。音は省かないときとビット一致）。再生用の PCM は版をまたいで、書き直していない窓の分を残す。長い連結窓に時間編集が無ければ試聴だけを局所再合成する（Praatでは全長窓と位相が違う場合がある）。時間編集を含む窓と通常のexport/ARAは全長窓を保つ |
 | `render_view(start_sec?, end_sec?, show_guide?, title?)` | ピアノロール PNG のパス（波形・テイク F0・ガイド F0・ノートの帯・編集区間） |
-| `export_view_data(start_sec?, end_sec?, peak_ms?, path?)` | **画面（UI）向け**の描画データ JSON のパス。応答の `view_rev` は表示範囲引数を含まない入力版で、`render_audition.view_rev` との照合に使う。**LLM 向けではない** |
+| `export_view_data(start_sec?, end_sec?, peak_ms?, path?, since?)` | **画面（UI）向け**の描画データ JSON のパス。応答の `view_rev` は表示範囲引数を含まない入力版で、`render_audition.view_rev` との照合に使う。`since` に前の `view_rev` を渡すと差分だけ（「描画データの差分」）。**LLM 向けではない** |
 | **`measure_against_guide(start_sec?, end_sec?, note_ids?, render?, threshold_cents?, threshold_ms?, suggest_cents?, limit?)`** | **補正の前後の残差**。ノートごと（`rows`）とガイドの平らな区間ごと（`summary.guide_segments`）に、元の音・今の編集・再合成して測り直した音の 3 つ。下の「補正の前後の残差」 |
 | `remeasure(start_sec?, end_sec?, backend?, keep_wav?)` | 編集後の音を測り直した結果。ガイドがあれば `deviation_summary.before/after`（タイミングはノートの頭で測る）と **`onset_timing`**（「ガイドに合わせる」が合わせる**発音の頭の組**ごとのガイドの頭とのずれ。`pairs`・`before`/`after` = `{n, abs_ms_median, abs_ms_p90, ms_median}`、+ はテイクが遅い。after は編集後の音から拾い直した頭。タイミングの補正が効いたかはこちらで見る） |
 | `list_changes(include_undone?)` | changeset と編集リストの一覧 |
@@ -974,6 +974,32 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
 発音の頭・引数・描画形式とエンジンのコード／ビルドの版から作る。最近の 8 件を残す（ガイドの付け外し・トラックの切り替えで戻る分）。裏の準備も、済んだトラックの
 分を作っておく。`path` を渡すとそこに毎回作り直して書く。
 `export_default_path` は書き出し先のファイルの有無で変わるので、結果（ツールの返り値）にも毎回入れる（画面はこちらを使う）。
+
+#### 描画データの差分（`since`。2026-10-10 承認）
+
+曲全体の描画データは長い曲で 1 MB を超え、1 つのノートの編集でも毎回全体を書いて読み直すと重い
+（合成の 180 秒・200 ノートで 1.13 MB。1 回のピッチの編集で変わるのは約 23 KB）。
+`since` に前に受け取った `view_rev` を渡すと、その版からの**差分だけ**を `<project>/cache/view-diff/` に書いて返す。
+
+| 結果のキー | 中身 |
+|---|---|
+| `diff` | `true` = `path` は差分のファイル。`false` = `path` は全体（`since` を渡さない・その版を覚えていない） |
+| `path` / `bytes` | 差分のとき差分のファイル `{diff_from, base_dir, ops}`。`diff_from` = 元の版、`base_dir` = 元のプロジェクト（描画データの `project_dir`） |
+| `full_path` / `full_bytes` | 差分のときも全体は `cache/view/` に書いてある。元が合わないときはこちらを読む |
+| `timing_sec` | `{build, diff}`（作る・読み直す時間と、差分を取る時間） |
+
+- 差分を取るのは**同じプロジェクト・同じ範囲の引数**の版とだけ。エンジンは版ごとに描画データのファイルを最近の 32 件覚え、
+  新しい 3 件は中身もメモリに持つ（それより古い版はファイルから読む。ファイルが消えていたら全体を返す）。エンジンを作り直すと忘れる。
+- `view_rev` は中身から作るので、同じ素材・同じ編集の別のトラックと同じ値になりうる。
+  当てる側は `diff_from` が手元の版と、`base_dir` が手元の `project_dir` と同じときだけ当て、違えば `full_path` を読む
+  （画面の `viewData`。`app/renderer/engine.js`）。
+- `ops` の形（`view_diff`。当てるのは `apply_view_diff`・画面の `applyViewDiff`（`app/renderer/view-diff.js`））:
+  - 辞書: `{"$set": {キー: 新しい値}, "$del": [キー], "$sub": {キー: 中の差分}}`（空のものは省く。変わらないキーは載らない）
+  - 同じ長さの数の列（`null` 混じり。64 個以上）: `{"$spans": [[先頭, [値…]], …]}`。32 個より近い変化は 1 つの区間にまとめる
+  - どの要素も一意の `id` を持つ辞書の列（`notes` など）: `{"$ids": [新しい並びの id], "$put": [変わった・増えた要素]}`
+  - それ以外の値と、半分を超えて変わった列は `$set` で丸ごと
+- `path` を渡したときは `since` を使わない（毎回全体）。差分のファイルは最近の 8 件を残す。
+- エンジンのログ（`vocal_engine.perf`）に `view op=export_view_data diff= cached= bytes= full_bytes= build= view_diff=` を出す。
 
 ```json
 // remeasure
