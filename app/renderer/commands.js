@@ -7,7 +7,7 @@
 // キーとメニューバーからは ctx 無し（選択・再生位置が対象）。
 // スナップ（時間 N・音程 Shift+N）と表示の設定は grid.js（issue #18）。
 // ホイールの操作（縦・横のズームとスクロール。issue #27）も WHEEL の表に持ち、キーと同じ設定画面で変える。
-import { S, histLabel, isSel, spanOf, targets, toSource, totalSec, unwarp } from './state.js';
+import { BLOCK_KINDS, S, histLabel, isSel, spanOf, targets, toSource, totalSec, unwarp } from './state.js';
 import { askAi, canAskAi } from './askai.js';
 import { render, renderToolbar } from './draw.js';
 import {
@@ -80,11 +80,11 @@ function splitAt(ctx) {
     status('このトラックのイベントの外では分割できない'); return null;
   }
   const n = ctx?.noteId ? S.byId.get(ctx.noteId)
-    : S.pitched.find((x) => {
+    : S.blocks.find((x) => {                // 音程ノート・子音・息（エンジンの split はどれも受ける）
       const [a, b] = spanOf(x);
       return t > a && t < b && (!S.sel.length || isSel(x.id));
     });
-  if (!n || n.kind !== 'note') { status('分けるノートが無い（再生位置を選んだノートの上に置く）'); return null; }
+  if (!n || !BLOCK_KINDS.has(n.kind)) { status('分ける区間が無い（再生位置を選んだ区間の上に置く）'); return null; }
   if (!idle()) { status('前の編集を当てている間は分割しない。当て終わってからもう一度'); return null; }
   const src = toSource(edited);
   if (src < n.start_sec + CUT_MIN_SEC || src > n.end_sec - CUT_MIN_SEC) {
