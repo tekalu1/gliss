@@ -1,7 +1,8 @@
 // 補正の度合いを色で見せる・元の長さ（issue #37。モック proposal/v4.html、2026-09-26 の決定）。
+// 2026-10-10: ガイドを青（薄い塗り＋1 px の青の縁・線も青）、AI の縁を紫、手動の帯を濃い塗り＋白の縁にし、対のガイド・差の札・凡例を足した。
 //
-//   (1) 補正なし: 帯・線は黄。ガイドは濃いグレー（線 1.4 px 不透明・帯は薄く）。橙の編集前の線・斜めの線は無い。
-//       トラックビューの波形もガイドは同じ濃いグレー、伴奏は薄いグレー
+//   (1) 補正なし: 帯・線は黄。ガイドは青（薄い塗り＋1 px の縁、線 1.4 px 不透明）。橙の編集前の線・斜めの線は無い。
+//       トラックビューの波形もガイドは同じ青、伴奏は薄いグレー
 //   (2) ピッチのドラッグ = 手動: その線が白。ドラッグ中の色 = 離した後の色
 //   (3) 端のドラッグ = 手動: 帯が白（接続された隣も）。ドラッグ中 = 離した後
 //   (4) 元の長さ: 選択したノートだけ、帯の上に細いグレーの線と両端の縦線
@@ -23,7 +24,9 @@ const GUIDE = M.clip('C2');
 const PROJECT = path.join(REPO, 'projects', '_test-colors');
 const USERDATA = `${PROJECT}-userdata`;
 const TAKE_C = '#e6d24a';
-const GUIDE_C = '#4e4e54';
+const GUIDE_C = '#5aa2ff';
+const GUIDE_HI = '#bcd9ff';
+const AI_C = '#c08cff';
 const WHITE = '#ffffff';
 const SHOTS = path.join(REPO, 'scratchpad');
 
@@ -58,7 +61,7 @@ const corr = () => win.evaluate(() => window.__app.corr());
 const drawn = () => win.evaluate(() => window.__app.drawnColors());
 const byId = (xs) => Object.fromEntries(xs.map((x) => [x.id, x]));
 
-test('(1) 補正なしは黄、ガイドは濃いグレー。橙の線・斜めの線は無い', async () => {
+test('(1) 補正なしは黄、ガイドは青。橙の線・斜めの線は無い', async () => {
   const c = await corr();
   expect(c.every((n) => n.band === TAKE_C && n.line === TAKE_C)).toBe(true);
   const d = await drawn();
@@ -68,7 +71,7 @@ test('(1) 補正なしは黄、ガイドは濃いグレー。橙の線・斜め�
   const look = await win.evaluate(() => {
     const q = (s) => [...document.querySelectorAll(s)];
     return {
-      guideBlobs: q('#roll path[data-guide]').map((p) => [p.getAttribute('fill'), p.getAttribute('opacity')]),
+      guideBlobs: q('#roll path[data-guide]').map((p) => [p.getAttribute('fill'), p.getAttribute('fill-opacity'), p.getAttribute('stroke'), p.getAttribute('stroke-width'), p.getAttribute('stroke-opacity')]),
       guideLines: q('#roll path[data-guide-line]').map((p) => [p.getAttribute('stroke'), p.getAttribute('stroke-width'), p.getAttribute('opacity')]),
       orange: document.querySelector('#roll').innerHTML.includes('#cf7a2e'),
       lanes: q('#lanes path').map((p) => p.getAttribute('fill')),
@@ -77,12 +80,13 @@ test('(1) 補正なしは黄、ガイドは濃いグレー。橙の線・斜め�
     };
   });
   expect(look.guideBlobs.length).toBeGreaterThan(0);
-  expect(new Set(look.guideBlobs.map((g) => g.join(' ')))).toEqual(new Set([`${GUIDE_C} .55`]));
+  // 薄い塗り（青）＋1 px の青の縁。塗りだけのテイクと形でも見分けられる
+  expect(new Set(look.guideBlobs.map((g) => g.join(' ')))).toEqual(new Set([`${GUIDE_C} 0.16 ${GUIDE_C} 1 0.9`]));
   expect(look.guideLines).toEqual([[GUIDE_C, '1.4', null]]);
   expect(look.rollRows).toEqual(expect.arrayContaining(['#0d0d0f', '#121215']));
   expect(look.guideVariable).toBe(GUIDE_C);
   expect(look.orange).toBe(false);
-  // トラックビュー: 編集中は黄、ガイドは同じ濃いグレー
+  // トラックビュー: 編集中は黄、ガイドは同じ青
   expect(look.lanes).toContain(TAKE_C);
   expect(look.lanes).toContain(GUIDE_C);
 });
@@ -154,6 +158,111 @@ test('(4) 元の長さは選択したノートだけ、帯の上の細いグレ�
   expect(+m[2] - +m[3]).toBeCloseTo(5, 1);
   await win.evaluate(() => { window.__app.S.sel = []; window.__app.render(); });
   expect((await drawn()).orig).toEqual([]);
+});
+
+test('(4b) 手動の帯は塗りを濃く・白の縁（灰に見えない）。自動・補正なしの帯は縁なし', async () => {
+  const look = await win.evaluate(() => {
+    const st = (p) => { const c = getComputedStyle(p); return { fo: +c.fillOpacity, so: +c.strokeOpacity, sw: c.strokeWidth, stroke: c.stroke }; };
+    const man = [...document.querySelectorAll('#roll path[data-blob][data-man]')];
+    const plain = [...document.querySelectorAll('#roll path[data-blob]:not([data-man])')];
+    return {
+      man: man.map((p) => [p.dataset.blob, p.getAttribute('fill'), st(p)]),
+      plain: plain.map((p) => st(p)),
+    };
+  });
+  expect(look.man.length).toBeGreaterThan(0);
+  for (const [, fill, st] of look.man) {
+    expect(fill).toBe(WHITE);
+    expect(st.fo).toBeGreaterThan(0.4);           // 灰（#555）に見えた旧 .3 より濃い
+    expect(st.so).toBeGreaterThan(0.4);
+    expect(st.stroke).toBe('rgb(255, 255, 255)');
+  }
+  for (const st of look.plain) expect(st.stroke).toBe('none');
+  // 背景に溶けない: 白の帯の塗りを背景（#121215）に重ねた明るさが、旧ガイドの灰（#4e4e54）より十分明るい
+  const lum = (c) => c.map((v) => v / 255).map((v) => (v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4))
+    .reduce((a, v, i) => a + v * [0.2126, 0.7152, 0.0722][i], 0);
+  const over = (a) => [18, 18, 21].map((b) => 255 * a + b * (1 - a));
+  expect(lum(over(look.man[0][2].fo))).toBeGreaterThan(lum([0x4e, 0x4e, 0x54]) * 1.8);
+});
+
+test('(4c) ホバーしたノートと対のガイドの縁が明るくなり、差の札はホバーのときだけ出る', async () => {
+  await win.evaluate(() => { window.__app.S.sel = []; window.__app.S.noteHover = null; window.__app.render(); });
+  expect(await win.locator('#roll [data-guide-diff]').count()).toBe(0);
+  expect(await win.locator('#roll path[data-pair]').count()).toBe(0);
+  // 対のガイドのあるノートを探して、実際のマウスでホバーする
+  const id = await win.evaluate(async () => {
+    const A = window.__app;
+    for (const n of A.S.pitched) {
+      A.S.noteHover = n.id; A.render();
+      if (document.querySelector('#roll path[data-pair]')) { A.S.noteHover = null; A.render(); return n.id; }
+    }
+    A.S.noteHover = null; A.render();
+    return null;
+  });
+  expect(id).not.toBeNull();
+  const box = await win.locator(`#roll rect[data-note="${id}"]:not([data-edge])`).first().boundingBox();
+  await win.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 3 });
+  await win.waitForFunction((i) => window.__app.S.noteHover === i, id, { timeout: 10000 });
+  const pair = await win.evaluate(() => {
+    const p = document.querySelector('#roll path[data-pair]');
+    const tip = document.querySelector('#roll [data-guide-diff]');
+    return {
+      stroke: p?.getAttribute('stroke'), width: +p?.getAttribute('stroke-width'), fo: +p?.getAttribute('fill-opacity'),
+      tip: tip?.textContent || null,
+      others: [...document.querySelectorAll('#roll path[data-guide]:not([data-pair])')].map((q) => q.getAttribute('stroke')),
+    };
+  });
+  expect(pair.stroke).toBe(GUIDE_HI);
+  expect(pair.width).toBeGreaterThan(1);
+  expect(pair.fo).toBeGreaterThan(0.16);
+  for (const c of pair.others) expect(c).toBe(GUIDE_C);
+  expect(pair.tip).toMatch(/^ガイド(より [+−]\d+ cent|と同じ高さ)・(\d+ ms (遅い|早い)|同じ時刻)$/);
+  // 離すと札は消える（選択だけでは札を出さない）
+  await win.mouse.move(2, 2);
+  await win.waitForFunction(() => window.__app.S.noteHover == null, null, { timeout: 10000 });
+  expect(await win.locator('#roll [data-guide-diff]').count()).toBe(0);
+  await win.evaluate((i) => { window.__app.S.sel = [i]; window.__app.render(); }, id);
+  expect(await win.locator('#roll path[data-pair]').count()).toBe(1);
+  expect(await win.locator('#roll [data-guide-diff]').count()).toBe(0);
+  await win.evaluate(() => { window.__app.S.sel = []; window.__app.render(); });
+});
+
+test('(4d) AI が直したノートの縁は紫', async () => {
+  const id = await win.evaluate(() => {
+    const A = window.__app; const n = A.S.pitched[0];
+    A.S.aiNotes = new Set([n.id]); A.render();
+    return n.id;
+  });
+  const stroke = await win.locator(`#roll path[data-ai="${id}"]`).first().getAttribute('stroke');
+  expect(stroke).toBe(AI_C);
+  await win.evaluate(() => { window.__app.S.aiNotes = new Set(); window.__app.render(); });
+  expect(await win.locator('#roll path[data-ai]').count()).toBe(0);
+});
+
+test('(4e) 色の凡例: 初回は出る・× で閉じると覚える・表示メニューで出し入れ・色は定義の 1 か所から', async () => {
+  const legend = win.locator('#legend');
+  await expect(legend).toBeVisible();
+  const items = await legend.locator('.lg').allTextContents();
+  expect(items).toEqual(['今のテイク', '手で直した', '自動補正', 'AI が直した', 'ガイド']);
+  // 色の変数は palette.js が :root に入れる（index.html に 16 進を重ねて書かない）
+  const vars = await win.evaluate(() => {
+    const c = getComputedStyle(document.documentElement);
+    return ['--take', '--guide', '--ai', '--manual'].map((k) => c.getPropertyValue(k).trim());
+  });
+  expect(vars).toEqual([TAKE_C, GUIDE_C, AI_C, WHITE]);
+  await legend.getByRole('button', { name: '凡例を閉じる' }).click();
+  await expect(legend).toBeHidden();
+  // 覚える: ユーザー設定に書かれ、次の起動（bootstrap）でも閉じたまま
+  await expect.poll(() => win.evaluate(async () => (await window.api.bootstrap()).legend)).toBe(false);
+  // 表示メニュー（コマンド）で出し入れ。メニューのチェックも合わせる
+  const checked = () => win.evaluate(() => {
+    const view = window.__app.appMenuTemplate().find((m) => m.label === '表示');
+    return view.submenu.find((i) => i.cmd === 'legend-view' || i.id === 'legend-view')?.checked;
+  });
+  await win.evaluate(() => window.__app.runCommand('legend-view'));
+  await expect(legend).toBeVisible();
+  await expect.poll(() => win.evaluate(async () => (await window.api.bootstrap()).legend)).toBe(true);
+  expect(await checked()).toBe(true);
 });
 
 test('形の計画に差分フレームがないノートは元の線色を保つ', async () => {

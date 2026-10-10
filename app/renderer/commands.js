@@ -21,6 +21,7 @@ import { ARA, araCompare, araEditorHead, araEditorRegion, araFeatures, araTransp
 import { status } from './engine.js';
 import { startRename } from './tracks.js';
 import { guideShown, guideWhy } from './session.js';
+import { L as LEGEND, setLegend } from './legend.js';
 import { asrRangeAt, asrReady, asrWhy, defaultAsrTime, transcribeAt } from './asr.js';
 import { chooseF0, f0State } from './f0.js';
 import {
@@ -192,6 +193,7 @@ export const COMMANDS = [
   ['guide-view', 'ガイドを重ねて表示', GR.view, [], toggleGuide, guideShown, () => S.showGuide],
   ['phoneme-bounds', '音素境界を全高に表示', GR.view, [], () => { S.showAllBounds = !S.showAllBounds; render(); },
     null, () => S.showAllBounds],
+  ['legend-view', '色の凡例を表示', GR.view, [], () => { setLegend(!LEGEND.show); renderToolbar(); }, null, () => LEGEND.show],
   ['show-all', '全体を表示', GR.view, [], showAll, hasNotes],
   ['zoom-reset', 'ズームを戻す', GR.view, [], () => host.zoomReset(), () => hasNotes() || S.tracks.length > 0],
 
@@ -324,7 +326,7 @@ const MENUBAR = [
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
   ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute', 'unmute',
     SEP, 'ask-ai']],
-  ['表示', ['guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['guide-view', 'phoneme-bounds', 'legend-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
   // 名前・版・アイコン（main の app.setAboutPanelOptions。issue #29）
   ['ヘルプ', ['ai-connect', 'addons', SEP, 'check-updates', { role: 'about', label: 'Gliss について' }]],
 ];
@@ -335,7 +337,7 @@ const MENUBAR_ARA = [
   ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'audition-selected',
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }]],
   MENUBAR[2],
-  ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', 'legend-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
   ['ヘルプ', ['keys']],
 ];
 

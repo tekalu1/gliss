@@ -18,6 +18,7 @@ import { bandColor, desat, lineColorer } from './corr.js';
 import { GUIDE_LOOK as GL, MANUAL } from './palette.js';
 import { guideDiffText, guidePairOf } from './guidepair.js';
 import { createFollower } from './follow.js';
+import { syncLegend } from './legend.js';
 import { ARA, araEditorHead, araEditorRegion, araEditorTrack, araRegions, araScale } from './ara.js';
 
 const { KEYS_W, SCALE_H, LANE_H, EDGE } = LAYOUT;
@@ -1274,6 +1275,7 @@ export function renderToolbar() {
   tip(br, withKey(rd ? `やり直す: ${rd}` : 'やり直す', 'redo'));
   const historyLabel = q('#undoLabel');
   if (historyLabel) historyLabel.textContent = u ? `元に戻す: ${u}` : '元に戻す: なし';
+  syncLegend();
   const strokeActions = q('#strokeActions');
   if (strokeActions) {
     const phase = S.strokePhase;
