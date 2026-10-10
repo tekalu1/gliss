@@ -53,6 +53,8 @@ contextBridge.exposeInMainWorld('api', {
   pickFile: (kind) => ipcRenderer.invoke('app.pickFiles', kind),
   readJson: (path) => ipcRenderer.invoke('app.readJson', path),
   readFile: (path) => ipcRenderer.invoke('app.readFile', path),
+  /** 画面の段階の時間を 1 行、screen.log に足す（main が形を確かめる）。 */
+  screenLog: (line) => ipcRenderer.send('app.screenLog', line),
   saveState: (patch) => ipcRenderer.invoke('app.saveState', patch),
   pushRecent: (entry) => ipcRenderer.invoke('app.pushRecent', entry),
   saveDialog: (defaultPath) => ipcRenderer.invoke('app.saveDialog', defaultPath),
