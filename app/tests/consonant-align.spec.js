@@ -4,6 +4,8 @@
 //        音高のドラッグは音程ノートだけ
 //   (A8) 範囲選択（空白からドラッグ）・Ctrl+A に子音・息が入る。入っても、音程の操作は音程ノートだけに効く
 //   (A9) つかんでいる間は子音・息も鳴る（つかんだノートを鳴らす）。選んだものを聞く（P）も子音・息を対象にする
+//   (A10) 子音・息の上にマウスを置くと濃くなる（.hov）
+//   (A11) 結合は同じ種類どうしだけ（子音どうし・息どうし・音程ノートどうし）。種類の違う組は理由を出して断る
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -218,6 +220,57 @@ test('(A10) 子音の上にマウスを置くと濃くなる（母音と同じ .
   await win.mouse.move(b.x + b.width / 2, 2);
   await win.waitForFunction(() => window.__app.S.noteHover == null);
   await expect(win.locator('#roll .npg.hov')).toHaveCount(0);
+});
+
+const all = () => win.evaluate(() => window.__app.S.notes.map((n) => ({ id: n.id, kind: n.kind })));
+const items = () => win.evaluate(() => window.__app.menuItems());
+
+test('(A11) 分けた子音の 2 つを選ぶと Ctrl+J で 1 つに結合できる。Ctrl+Z で分けた状態に戻る', async () => {
+  await view(U);
+  const mid = (U.start + U.end) / 2;
+  await win.evaluate((t) => { window.__app.S.head = window.__app.S.off + t; window.__app.render(); }, mid);
+  await select([U.id]);
+  const n0 = (await all()).length;
+  await win.keyboard.press('Alt+x');
+  await settle();
+  const split = await all();
+  expect(split.length).toBe(n0 + 1);
+  const right = split.find((n) => n.id.startsWith(`${U.id}@`));
+  expect(right?.kind).toBe('unvoiced');
+  await select([U.id, right.id]);
+  await win.keyboard.press('Control+j');
+  await settle();
+  expect((await all()).length).toBe(n0);
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect((await all()).length).toBe(n0 + 1);
+  // 分けたままにしない
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect((await all()).length).toBe(n0);
+});
+
+test('(A11) 音程ノートと子音は結合できない。キーはステータスに理由を出し、メニューは無効＋理由', async () => {
+  await view(U);
+  await select([U.prev, U.id]);
+  const n0 = (await all()).length;
+  await win.keyboard.press('Control+j');
+  await settle();
+  expect((await all()).length).toBe(n0);
+  await expect(win.locator('#status')).toContainText('同じ種類');
+  // 複数選択の右クリック
+  await body(U.id).click({ button: 'right' });
+  const m = (await items()).find((x) => x.cmd === 'merge');
+  expect(m).toMatchObject({ disabled: true });
+  expect(m.title).toContain('同じ種類');
+  await win.keyboard.press('Escape');
+  // 境目（子音の終わりと次の音程ノート）のメニュー
+  await select([]);
+  await win.locator(`#roll rect[data-nop="${U.id}"][data-nop-edge="end"]`).first().click({ button: 'right' });
+  const b = (await items()).find((x) => x.cmd === 'merge');
+  expect(b).toMatchObject({ disabled: true });
+  expect(b.title).toContain('同じ種類');
+  await win.keyboard.press('Escape');
 });
 
 test('エラーなし', () => {

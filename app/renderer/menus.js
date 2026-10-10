@@ -176,8 +176,8 @@ function boundaryMenu(e, a, b) {
   const conn = !!a.connected_next;
   const gap = spanOf(b)[0] - spanOf(a)[1];
   return [
-    cmd('merge', ctx, { disabled: !touch || a.kind !== 'note' || b.kind !== 'note', run: () => mergeNotes(a.id, b.id),   // 結合は音程ノートどうしだけ
-      title: !touch ? '接していない（隙間がある）' : '結合できるのは音程ノートどうしだけ' }),
+    cmd('merge', ctx, { disabled: !touch || a.kind !== b.kind, run: () => mergeNotes(a.id, b.id),   // 結合は同じ種類どうしだけ
+      title: !touch ? '接していない（隙間がある）' : '結合できるのは同じ種類の区間どうしだけ（音程ノートと子音・息は結合できない）' }),
     conn
       ? { id: 'detach', label: '切り離す', key: 'Alt+ドラッグ', run: () => setConnection(a.id, b.id, false) }
       : { id: 'connect', label: 'つなぐ', key: 'Alt+ドラッグ',

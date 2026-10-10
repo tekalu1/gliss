@@ -49,16 +49,22 @@ export function selectedNotes() {
 }
 /** 選択中の区間（音程ノート・子音・息）。無音にする・戻すは、子音・息にも同じに効く。 */
 const selectedBlocks = () => S.blocks.filter((n) => isSel(n.id));
-/** 選んだノートが隣どうし接して並んでいる（結合できる）。 */
-export function contiguous(ns = selectedNotes()) {
+/** 選んだ区間が隣どうし接して並び、どれも同じ種類（結合できる。音程ノートどうし・子音どうし・息どうし）。 */
+export function contiguous(ns = selectedBlocks()) {
   if (ns.length < 2) return false;
-  const idx = new Map(S.pitched.map((n, i) => [n.id, i]));
+  const idx = new Map(S.notes.map((n, i) => [n.id, i]));
   for (let k = 1; k < ns.length; k++) {
     const a = ns[k - 1]; const b = ns[k];
-    if (idx.get(b.id) !== idx.get(a.id) + 1 || b.kind !== 'note' || a.kind !== 'note') return false;
+    if (idx.get(b.id) !== idx.get(a.id) + 1 || b.kind !== a.kind) return false;
     if (Math.abs(b.start_sec - a.end_sec) > TOUCH_SEC) return false;
   }
   return true;
+}
+/** 選んだ区間が結合できない理由（結合できるときは null）。 */
+export function mergeWhy(ns = selectedBlocks()) {
+  if (ns.length < 2) return null;
+  if (new Set(ns.map((n) => n.kind)).size > 1) return '結合できるのは同じ種類の区間どうしだけ（音程ノートと子音・息は結合できない）';
+  return contiguous(ns) ? null : '隣り合って接している区間だけ結合できる';
 }
 /** 境目 a｜b が接している（結合できる）。 */
 export function touching(a, b) {
@@ -97,8 +103,8 @@ function splitAt(ctx) {
 }
 
 function mergeSelected() {
-  const ns = selectedNotes();
-  if (!contiguous(ns)) { status('隣り合って接しているノートだけ結合できる'); return null; }
+  const ns = selectedBlocks();
+  if (!contiguous(ns)) { status(mergeWhy(ns) || '隣り合って接している区間を 2 つ以上選んでから結合する'); return null; }
   if (!idle()) { status('前の編集を当てている間は結合しない。当て終わってからもう一度'); return null; }
   return mergeMany(ns.map((n) => n.id));
 }
@@ -276,7 +282,7 @@ function typing(el) {
 const NEEDS = {
   semitone: 'ノートを選んでから', mute: 'ノートを選んでから（もう無音のノートは除く）',
   unmute: '無音のノートを選んでから',
-  merge: '隣り合って接しているノートを 2 つ以上選んでから', 'guide-match': guideWhy,
+  merge: () => mergeWhy() || '隣り合って接している区間を 2 つ以上選んでから', 'guide-match': guideWhy,
   'guide-view': guideWhy, transition: '接続された境目が無い', rename: 'トラックが無い',
   'clear-fade': 'フェードのあるノートを選んでから', tempo: 'トラックが無い',
   save: 'プロジェクトが無い', 'save-as': 'プロジェクトが無い',
