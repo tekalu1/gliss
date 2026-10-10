@@ -61,7 +61,7 @@ def _edges(p):
     from vocal_engine.project import timing as TM
     tm = TM.current_map(p)
     return {n.id: (tm.at(n.start_sec, "right"), tm.at(n.end_sec, "left"))
-            for n in TM.pitched_notes(p)}
+            for n in TM.blocks(p)}
 
 
 def _export_diff(p, tmp_path):
@@ -79,6 +79,15 @@ def _export_diff(p, tmp_path):
 def _span(p, *ids):
     ns = {n.id: n for n in p.take_notes}
     return min(ns[i].start_sec for i in ids), max(ns[i].end_sec for i in ids)
+
+
+def _around_breath(p):
+    """息（breath）と、その前後に接した音程のあるノートの id（前, 息, 後ろ）。最初のもの。"""
+    from vocal_engine.project import timing as TM
+    bs = TM.blocks(p)
+    return next((a.id, b.id, c.id) for a, b, c in zip(bs, bs[1:], bs[2:])
+                if b.kind == "breath" and a.kind == c.kind == "note"
+                and b.start_sec - a.end_sec <= 1e-6 and c.start_sec - b.end_sec <= 1e-6)
 
 
 def _check_plan_result(p, plan, x):
@@ -111,9 +120,16 @@ def test_no_ripple_export_matches_outside(mode, case, request, tmp_path):
     elif case == "alt":
         plan, x, touched = TM.plan_edge(p, "n005", "end", detach=True), -0.04, ("n005",)
     elif case == "gap_grow":
-        plan, x, touched = TM.plan_edge(p, "n007", "end"), 0.10, ("n007",)
+        # 区間はどれも接しているので、隙間は Alt で縮めて作る（無音）。切り離された尻をその隙間へ伸ばす
+        nid = _around_breath(p)[0]
+        TM.apply_plan(p, TM.plan_edge(p, nid, "end", detach=True), -0.15)
+        plan, x, touched = TM.plan_edge(p, nid, "end"), 0.10, (nid,)
+        assert plan.info["connected"] is False and plan.x_hi == pytest.approx(0.15, abs=1e-6)
     elif case == "gap_shrink":
-        plan, x, touched = TM.plan_edge(p, "n009", "start"), 0.04, ("n009",)
+        nid = _around_breath(p)[2]
+        TM.apply_plan(p, TM.plan_edge(p, nid, "start", detach=True), 0.02)
+        plan, x, touched = TM.plan_edge(p, nid, "start"), 0.02, (nid,)        # 切り離された頭をさらに縮める（隙間が増える）
+        assert plan.info["connected"] is False
     else:
         plan, x, touched = TM.plan_move(p, ["n012"]), 0.025, ("n011", "n012", "n013")
     assert plan.x_lo <= x <= plan.x_hi
@@ -130,11 +146,9 @@ def test_no_ripple_export_matches_outside(mode, case, request, tmp_path):
     assert abs(out[-1] - src[-1]) < 1e-9, "素材の末尾がずれた（リップル）"
     diff, r = _export_diff(p, tmp_path)
     a, b = _span(p, *touched)
-    # ノートの頭の子音（アタック）はノートと一緒に動くので、その範囲も「編集したノート」
+    # 動いた節（接した隣の区間の端）の範囲も「編集したノート」
     mv = [k.src for k, d in zip(plan.st.knots, plan.d) if abs(d * x) > 1e-9]
     a, b = min(a, min(mv)), max(b, max(mv))
-    if case == "gap_grow":
-        b += x                                   # 隙間へ伸ばしたぶん（切り取り）
     # 出力が 20 ms（クロスフェードの長さ）に足りない伸縮の区間は、再合成のときに隣の編集していない区間から足りない分を
     # 借りて広げる（render/pipeline.py の bundle_short_segments。つなぎ目のクリックを防ぐ）。その区間が編集したノートの
     # 範囲の端にあるときだけ、その側へ足りない分も外へ出てよい
@@ -242,17 +256,19 @@ def test_mcp_stretch_and_move_do_not_ripple(plain, tmp_path):
     from vocal_engine import mcp_server as M
     M._state["project"] = plain
     b0 = _edges(plain)
-    r = M.stretch(1.2, note_id="n007")                # 尻の後ろは息（切り離し）
+    nid, breath, _ = _around_breath(plain)
+    r = M.stretch(1.2, note_id=nid)                   # 尻に接した息とは境目を共有（息が縮む）
     assert r["ok"] and r["changeset"]
     r = M.move_note(-15.0, note_id="n013")            # 両隣は接続
     assert r["ok"] and r["changeset"]
     e = _edges(plain)
-    for nid in b0:
-        if nid in ("n007", "n012", "n013", "n014"):
+    for k in b0:
+        if k in (nid, breath, "n012", "n013", "n014"):
             continue
-        assert abs(e[nid][0] - b0[nid][0]) < 1e-9 and abs(e[nid][1] - b0[nid][1]) < 1e-9, nid
-    n7 = plain.note("n007")
-    assert abs((e["n007"][1] - e["n007"][0]) - 1.2 * (n7.end_sec - n7.start_sec)) < 1e-6
+        assert abs(e[k][0] - b0[k][0]) < 1e-9 and abs(e[k][1] - b0[k][1]) < 1e-9, k
+    assert abs(e[breath][0] - e[nid][1]) < 1e-9 and abs(e[breath][1] - b0[breath][1]) < 1e-9
+    n = plain.note(nid)
+    assert abs((e[nid][1] - e[nid][0]) - 1.2 * (n.end_sec - n.start_sec)) < 1e-6
     src, out = plain.time_map()
     assert abs(out[-1] - src[-1]) < 1e-9
 
