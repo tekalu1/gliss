@@ -398,7 +398,9 @@ def set_lyrics(text: str = None, source: str = "take", start_sec: float = None,
       start_sec / end_sec: text を入れる区間（両方そろえる）
       source: "take"（既定）か "guide"。**ガイドにも入れると**タイミング補正が直接アラインになる
       mode: "replace"（既定。重なる区間を消してから入れる）か "add"（重なりを許さず足す）
-      reanalyze: すぐアラインし直す（既定 True）
+      reanalyze: 変わった区間の音素を合わせ直す（既定 True）。テイクは裏で解析して待たない
+        （返り値の phonemes_state が "analyzing"。済んだかは phoneme_status。2026-10-10 承認）。
+        「歌詞と音素を自動で解析する」が切なら解析しない（"pending"。analyze_phonemes で解析する）
 
     長音「ー」は直前の母音に吸収してからアラインする（段階2 の実測で、
     `トマー` を `t o m a a` と書くと 2 つ目の母音が 8〜10 ms に潰れるため）。
@@ -445,11 +447,14 @@ def set_lyrics(text: str = None, source: str = "take", start_sec: float = None,
            "lyrics": p.lyrics_text(source) or None,
            "changeset": cs.id if cs else None}
     if ent and reanalyze:
+        # 変わった区間だけを合わせ直す（2026-10-10 承認）。テイクは裏の準備に頼んで待たない
+        # （自動の設定のとき。手動なら analyze_phonemes を呼ぶまで未解析）。ガイドはここで計算する
         p.ensure_analyzed()
-        res = p.analyze_phonemes(source, force=True)
+        res = p.analyze_phonemes(source)
         p._save_analysis()
         _invalidate_renderer()
         if res is not None:
+            out.update(_phoneme_pending_info(p, source, res))
             out.update(kana=res.kana,
                        phonemes=len([x for x in res.phonemes if x.label != "silence"]),
                        boundaries=len(res.boundaries),
@@ -618,8 +623,10 @@ def set_note_syllable(note_id: str, kana: str, syllable_index: int = None,
     lex = [s for s in reading.syllables if s.romaji not in (G.SP, G.AP)]
     if len(lex) != 1 or not lex[0].kana:
         raise ProjectError("kana は 1 音節のかなにする（例: か / しゃ / ん）")
-    res = p.phonemes("take")
+    res = p.phonemes("take", complete=True)      # 音節の番号を数えるので、全区間がそろった音素で
     if res is None:
+        if p.phonemes_pending("take"):
+            raise ProjectError("まだ音素を解析していない区間がある。先に analyze_phonemes を呼ぶ")
         raise ProjectError("音素が無い。先に analyze_take を呼ぶ")
     candidates = [s for s in res.syllables
                   if s["end_sec"] > note.start_sec and s["start_sec"] < note.end_sec]
@@ -670,13 +677,85 @@ def set_note_syllable(note_id: str, kana: str, syllable_index: int = None,
                                      label="音節の修正")
     _rec(p, cs, "音節の修正")
     if cs:
-        p.analyze_phonemes("take", force=True)
+        p.analyze_phonemes("take")              # 直した区間だけを裏で合わせ直す（2026-10-10 承認）
         p._save_analysis()
         _invalidate_renderer()
     return _ok(note_id=note_id, syllable_index=target["index"],
                 before=entry.get("reading") or entry["text"],
                 after=normalized[ent_index].get("reading") or normalized[ent_index]["text"],
                 changeset=cs.id if cs else None)
+
+
+@_tool
+def analyze_phonemes(wait: bool = False) -> dict:
+    """「音素を解析」のコマンド: テイクの歌詞と音素のうち、まだ解析していないものを解析する（2026-10-10 承認）。
+
+    歌詞の無い発声区間があれば歌詞を推定し（まだ推定していないとき）、音素の足りない区間を合わせる。
+    「歌詞と音素を自動で解析する」が切（`set_auto_phonemes(False)`）でも解析する。済んだ区間は計算し直さない。
+
+    wait: False（既定）なら裏の準備に急ぎで頼んで待たない（操作の途中でも進める。済んだかは phoneme_status）。
+      True ならここで計算して、全区間がそろった結果を返す。
+    返り値の phonemes_state: "ready" / "analyzing" / "pending"（`set_lyrics` と同じ）。"""
+    from . import prep
+    p = _project()
+    p.reload_if_changed()
+    p.ensure_analyzed()
+    inferred = 0
+    if "auto_lyrics" not in p.analysis:
+        p._infer_missing_lyrics()                # 手動の設定で、まだ歌詞を推定していない
+        inferred = len(p._auto_proposed)
+        if "auto_lyrics" in p.analysis:
+            p._save_analysis()
+    if p.guide is not None and p.has_lyrics("guide") and p.phonemes_pending("guide"):
+        p.analyze_phonemes("guide", compute=True)  # ガイドの音素は表で（手動の設定で、まだ解析していない）
+    if not p.has_lyrics("take"):
+        return _ok(phonemes_state="no_lyrics", pending_entries=[], inferred_entries=inferred,
+                   reason="歌詞が無い。set_lyrics で歌詞を入れる")
+    if not wait and prep.schedule_phonemes(p, "take", urgent=True):
+        res = p.analyze_phonemes("take", compute=False)
+    else:
+        res = p.analyze_phonemes("take", compute=True)
+        p._save_analysis()
+    _invalidate_renderer()
+    return _ok(**_phoneme_pending_info(p, "take", res), inferred_entries=inferred,
+               n_entries=len(p.lyrics_entries("take")))
+
+
+@_tool(lock=False)
+def phoneme_status() -> dict:
+    """**画面向け**: テイクの音素の裏の解析の状態（エンジンのロックを握らないので、ほかの処理の最中でもすぐ返る）。
+
+    state: "queued"（待ち・操作の間は止めている）/ "preparing"（解析中）/ "ready" / "failed"（error）/ null（頼んでいない）
+    gen: 裏の解析が 1 回進むたびに増える（変わったら get_phonemes・export_view_data を取り直す）
+    paused: 利用者の操作の間で、区間の間で待っている
+    auto: 「歌詞と音素を自動で解析する」の設定
+    pending_entries: 表が最後に組んだ音素で、まだ解析していない歌詞の区間の番号（計算はしない）"""
+    from . import prep
+    p = _project(required=False)
+    if p is None or not isinstance(p, Project):
+        from .project.store import auto_phonemes
+        return _ok(state=None, gen=0, auto=auto_phonemes(), pending_entries=[])
+    r = p._phonemes.get("take")
+    pending = list((r.aligner.get("pending_entries") if r is not None else None) or [])
+    return _ok(**prep.phoneme_status(p.dir), pending_entries=pending)
+
+
+@_tool
+def set_auto_phonemes(enabled: bool = None) -> dict:
+    """「歌詞と音素を自動で解析する」の設定（既定 オン。2026-10-10 承認）。enabled を省くと今の値を返す。
+
+    オン: 曲を開いたら・歌詞を直したら、足りない区間を裏で解析する（利用者の操作の間は止めて、手が空いたら続ける。
+    伸ばした・切ったなど編集した区間を先に）。
+    切: 自動では何も解析しない（歌詞の推定も音素も）。「音素を解析」（analyze_phonemes）を呼んだときだけ解析する。
+    切からオンにすると、開いている曲の足りない区間を裏で解析し始める。"""
+    from . import prep
+    from .project.store import auto_phonemes, set_auto_phonemes as _set
+    if enabled is not None:
+        _set(enabled)
+        p = _project(required=False)
+        if enabled and isinstance(p, Project) and p.has_lyrics("take") and p.phonemes_pending("take"):
+            prep.schedule_phonemes(p, "take")
+    return _ok(auto=auto_phonemes())
 
 
 @_tool
@@ -865,6 +944,20 @@ def _count(xs):
     return d
 
 
+def _phoneme_pending_info(p, source, res):
+    """まだ音素を解析していない歌詞の区間と、その状態（2026-10-10 承認）。
+
+    phonemes_state: "ready"（全区間そろった）/ "analyzing"（裏で解析中・解析待ち）/
+    "pending"（解析しない。手動の設定・裏の準備が無い。analyze_phonemes で解析する）。"""
+    from . import prep
+    pending = list((res.aligner.get("pending_entries") if res is not None else None) or [])
+    if not pending:
+        return {"phonemes_state": "ready", "pending_entries": []}
+    st = prep.phoneme_status(p.dir) if source == "take" else {"state": None}
+    busy = st.get("state") in (prep.QUEUED, prep.PREPARING) and (st.get("urgent") or st.get("auto"))
+    return {"phonemes_state": "analyzing" if busy else "pending", "pending_entries": pending}
+
+
 def _phoneme_summary(p):
     """analyze_take の返り値に入れる音素の要約。"""
     from .analysis.phonemes import backend_info
@@ -891,6 +984,7 @@ def _phoneme_summary(p):
            "n_warnings": len(r.warnings),
            # 音素を切れなかった歌詞の区間（その区間は音素なしで続けている。issue #58）
            "failed_entries": list(r.aligner.get("failed_entries") or [])}
+    out.update(_phoneme_pending_info(p, "take", r))
     g = p.phonemes("guide") if p.has_lyrics("guide") else None
     if g is not None:
         out["guide"] = {"voiced": len([x for x in g.phonemes if x.label != "silence"]),
@@ -2590,7 +2684,7 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
 
 TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllable,
          inspect_lyrics_score, import_lyrics, analyze_take, get_pitch, list_notes, list_deviations,
-         get_phonemes,
+         get_phonemes, analyze_phonemes, phoneme_status, set_auto_phonemes,
          shift_pitch, set_pitch_curve, move_note, stretch, move_boundary, correct_to_guide,
          set_transition, split_note, merge_notes,
          plan_edit, apply_plan, list_connections, set_connection,

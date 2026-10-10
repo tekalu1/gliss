@@ -413,7 +413,8 @@ def of_project(project, align_lyrics=True):
         if (not align_lyrics and project._phonemes.get(role) is None
                 and not os.path.exists(project._cache_path("%s-phonemes.json" % role))):
             return None
-        return project.phonemes(role)
+        # 組を作るのは全区間の音素がそろってから（裏で解析中・手動の設定で未解析の区間があれば発音の頭で組む）
+        return project.phonemes(role, complete=align_lyrics)
 
     tp = ph("take")
     gp = ph("guide") if tp is not None else None

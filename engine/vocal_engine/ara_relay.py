@@ -59,7 +59,7 @@ FORBIDDEN = frozenset({"new_project", "load_project", "open_project", "save_proj
 READ_ONLY = frozenset({"export_view_data", "track_overview", "prep_status", "engine_info", "asr_status",
                        "project_status", "plan_edit", "render_audition", "inspect_lyrics_score",
                        "cancel_job", "render_region", "render_preview", "render_view", "remeasure",
-                       "transcribe", "pause_prep", "select_track", "get_job"})
+                       "transcribe", "pause_prep", "select_track", "get_job", "phoneme_status"})
 # セッション（トラックの一覧・ガイド・テンポ）を変えうるもの: 画面に session-changed も知らせる
 SESSION_TOOLS = frozenset({"set_track", "set_guide_track", "set_track_guide", "set_tempo", "undo", "redo"})
 LEVELS = ("off", "read", "edit", "save")
