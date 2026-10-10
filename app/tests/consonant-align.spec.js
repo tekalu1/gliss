@@ -7,6 +7,7 @@
 //   (A10) 子音・息の上にマウスを置くと濃くなる（.hov）
 //   (A13) フェード: 子音・息にも帯の上のつまみが出る。ドラッグで set_fade。「フェードを消す」も効く（1 回の Ctrl+Z で戻る）
 //   (A12) AI に頼むは子音・息も対象。文には id と秒を入れ、「区間、子音・息を含む」と書く
+//   (A14) 半音に合わせる（Q）は音程ノートだけ。子音・息だけを選んでいるときは、理由（音程が無い）を出す
 //   (A11) 結合は同じ種類どうしだけ（子音どうし・息どうし・音程ノートどうし）。種類の違う組は理由を出して断る
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
@@ -351,6 +352,16 @@ test('(A13) 子音のフェードは「フェードを消す」で消せる。�
   await win.keyboard.press('Control+z');          // 付けたフェードも戻す（後の試験のため）
   await settle();
   expect(await fadeOf(U.id)).toEqual({ fi: 0, fo: 0 });
+});
+
+test('(A14) 子音・息だけを選んで Q を押すと、音程が無い理由を出す。何も選んでいなければ従来の文', async () => {
+  await select([U.id]);
+  await win.keyboard.press('q');
+  expect(await win.evaluate(() => window.__app.status())).toBe('半音に合わせる: 今は使えない（子音・息には音程がありません）');
+  await select([]);
+  await win.keyboard.press('q');
+  expect(await win.evaluate(() => window.__app.status())).toBe('半音に合わせる: 今は使えない（ノートを選んでから）');
+  await select([]);
 });
 
 test('エラーなし', () => {

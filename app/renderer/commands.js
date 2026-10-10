@@ -280,7 +280,7 @@ function typing(el) {
 }
 
 const NEEDS = {
-  semitone: 'ノートを選んでから', mute: 'ノートを選んでから（もう無音のノートは除く）',
+  semitone: () => (selectedBlocks().length && !selectedNotes().length ? '子音・息には音程がありません' : 'ノートを選んでから'), mute: 'ノートを選んでから（もう無音のノートは除く）',
   unmute: '無音のノートを選んでから',
   merge: () => mergeWhy() || '隣り合って接している区間を 2 つ以上選んでから', 'guide-match': guideWhy,
   'guide-view': guideWhy, transition: '接続された境目が無い', rename: 'トラックが無い',
