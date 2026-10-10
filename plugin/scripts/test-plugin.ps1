@@ -2,6 +2,7 @@
 #
 #   powershell -File plugin\scripts\test-plugin.ps1            # build + all checks
 #   powershell -File plugin\scripts\test-plugin.ps1 -SkipBuild # checks only
+#   powershell -File plugin\scripts\test-plugin.ps1 -SkipPerf  # without check 12 (about 1.5 minutes)
 #
 # Checks (each one has a timeout and its process tree is killed at the end):
 #   1. ARA SDK TestHost, all test cases, on Gliss.vst3
@@ -36,13 +37,19 @@
 #       test bridge, lyrics only, F0 method only, guide, undo/redo, external edit and guide), selection alone does not,
 #       and restoring the stored document (same and another work folder) tells nothing; an archive of the older renderer
 #       with a pitch curve tells the host that the sound changed. Per-step counts in aratest-changes\changes.json
-#   12. no engine process is left behind
+#   12. GlissARATest -perf 18: an 18 s song of 8-note phrases every 9 s (long render windows); notes are edited through the test
+#       bridge in the screen's order (edit, then view data) and the time until the answers, the host notification and
+#       the changed sound of the realtime playback renderer is measured (same note x8, walking notes x8, bursts of 3
+#       x4, and one edit x4 while the rest of the song is being re-rendered after a pitch shift).
+#       plugin/tests/verify_ara_perf.py compares the medians with plugin/tests/aratest/perf-limits.json
+#   13. no engine process is left behind
 # The engine checks are skipped (reported) when no engine python is found (-EnginePython, GLISS_ENGINE_PYTHON, or the
 # .venv of the main worktree).
 # Nothing is written outside plugin\build and the temp folder (the engine's work and log folders, the plug-in state file
 # are redirected there); the plug-in is never installed.
 param(
     [switch]$SkipBuild,
+    [switch]$SkipPerf,
     [string]$Config = 'Release',
     [string]$Python = 'python',
     [string]$EnginePython = '',
@@ -334,6 +341,32 @@ try {
             Select-String 'changes: \d+ '
         $steps | ForEach-Object { Write-Host ("    " + ($_.Line -replace '^.*changes: ', '')) }
         Report 'GlissARATest -changes (every saved-state change tells the host, restoring does not)' ($code -eq 0) "exit=$code steps=$($steps.Count)"
+
+        # 12. time from an edit to the screen's data, the host notification and the sound
+        if (-not $SkipPerf) {
+            $outP = Join-Path $work 'aratest-perf'
+            $workP = Join-Path $work 'aratest-perf-work'
+            foreach ($d in @($outP, $workP)) { New-Item -ItemType Directory -Force $d | Out-Null }
+            $env12 = $engineEnv.Clone()
+            $env12.VOCAL_ENGINE_WORK_DIR = $workP
+            $env12.GLISS_ARA_SESSIONS_DIR = (Join-Path $work 'perf-sessions')
+            $env12.GLISS_ARA_SYNC_WAIT_MS = '120000'
+            $env12.GLISS_ARA_READ_TIMEOUT_MS = '3000'
+            $env12.GLISS_ARA_TRACE_DIR = (Join-Path $work 'trace-perf')
+            New-Item -ItemType Directory -Force $env12.GLISS_ARA_TRACE_DIR | Out-Null
+            $saved = $TimeoutSec
+            $TimeoutSec = [Math]::Max($TimeoutSec, 900)
+            try {
+                $code = Invoke-Checked $araTest @('-vst3', $gliss, '-out', $outP, '-perf', '18') 'aratest-perf' $env12
+            } finally { $TimeoutSec = $saved }
+            Report 'GlissARATest -perf (edits on long windows)' ($code -eq 0) "exit=$code"
+            if ($code -eq 0) {
+                $verify = & $EnginePython (Join-Path $plugin 'tests\verify_ara_perf.py') $outP 2>&1
+                $verifyCode = $LASTEXITCODE
+                $verify | Where-Object { $_ -match '^(FAIL|RESULT)| median ' } | ForEach-Object { Write-Host "    $_" }
+                Report 'edit -> screen and sound within the limits (verify_ara_perf.py)' ($verifyCode -eq 0) "exit=$verifyCode"
+            }
+        }
     }
 }
 finally {

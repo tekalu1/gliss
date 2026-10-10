@@ -5,6 +5,8 @@
 //   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -relay <relay_client.py>   （外部の AI からの編集の通し。下の runRelay）
 //   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -changes <relay_client.py> -workB <別の作業場所>
 //     （保存するものが変わるたびにホストへ知らせ、戻しただけでは知らせないことの通し。下の runChanges）
+//   GlissARATest -vst3 <Gliss.vst3> -out <フォルダ> -perf <曲の秒数> [-perfraw <float32 のモノラル> -perfrate <Hz>]
+//     （編集してから画面・ホストへの知らせ・再生の音に出るまでの時間。下の runPerf）
 //
 //   N. 合成の歌声もどき（44.1 kHz・モノラル・6.2 秒）を 1 つの AudioSource にし、リージョンを 2 つ（ソース全体をソングの 0 秒、
 //      ソースの 1.5〜4.2 秒をソングの 10 秒）置いたドキュメントを、編集なし（GLISS_TEST_EDIT を消す）で作り、ホストとして解析を頼んで
@@ -34,11 +36,16 @@
 
 #include "ARA_Library/Utilities/ARASamplePositionConversion.h"
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -67,11 +74,17 @@ const std::string secondModificationID { "audioModificationTestPersistentID 1" }
 class VoiceAudioFile : public AudioFileBase
 {
 public:
-    explicit VoiceAudioFile (double sampleRate) : AudioFileBase { "Gliss test voice" }, _sampleRate { sampleRate }
+    struct Note { double start, length; int midi; };
+
+    explicit VoiceAudioFile (double sampleRate)
+        : VoiceAudioFile (sampleRate, { { 0.5, 0.55, 60 }, { 1.65, 0.55, 64 }, { 2.8, 0.55, 67 }, { 3.95, 0.55, 65 }, { 5.1, 0.55, 62 } }, 6.2)
     {
-        struct Note { double start, length; int midi; };
-        const Note notes[] { { 0.5, 0.55, 60 }, { 1.65, 0.55, 64 }, { 2.8, 0.55, 67 }, { 3.95, 0.55, 65 }, { 5.1, 0.55, 62 } };
-        const auto count { static_cast<size_t> (6.2 * sampleRate) };
+    }
+
+    /** 任意のノートと長さ（-perf の長い曲） */
+    VoiceAudioFile (double sampleRate, const std::vector<Note>& notes, double seconds) : AudioFileBase { "Gliss test voice" }, _sampleRate { sampleRate }
+    {
+        const auto count { static_cast<size_t> (seconds * sampleRate) };
         _samples.assign (count, 0.0f);
 
         for (const auto& n : notes)
@@ -100,6 +113,12 @@ public:
             seed = seed * 1664525u + 1013904223u;
             v += static_cast<float> ((static_cast<double> (seed >> 8) / 16777216.0 - 0.5) * 2.0e-4);
         }
+    }
+
+    /** 手元の音（float32 のモノラル。-perf の -perfraw） */
+    VoiceAudioFile (double sampleRate, std::vector<float> samples)
+        : AudioFileBase { "Gliss test voice" }, _sampleRate { sampleRate }, _samples (std::move (samples))
+    {
     }
 
     int64_t getSampleCount () const noexcept override { return static_cast<int64_t> (_samples.size ()); }
@@ -755,6 +774,399 @@ int runChanges (PlugInEntry* plugInEntry, VoiceAudioFile& voice, const ARA::ARAF
     return allPassed ? 0 : 1;
 }
 #endif
+
+#if defined (_WIN32)
+// ---- -perf: 編集してから、画面のデータ・ホストへの知らせ・PlaybackRenderer の音が変わるまでの時間 ----
+
+double perfNowMs ()
+{
+    using namespace std::chrono;
+    return duration<double, std::milli> (steady_clock::now ().time_since_epoch ()).count ();
+}
+
+/** 長い窓になる歌声もどき: 0.8 秒のノート 8 つを間 0.1 秒で並べたフレーズ（7.2 秒）を 9 秒ごとに。
+    間が 0.5 秒より短いので、フレーズの中の編集は 1 つの塊になり、窓はフレーズ全体まで伸びうる。 */
+std::vector<VoiceAudioFile::Note> perfNotes (double seconds)
+{
+    const int pattern[] { 60, 62, 64, 65, 67, 65, 64, 62 };
+    std::vector<VoiceAudioFile::Note> notes;
+
+    for (double phrase { 0.5 }; phrase + 7.3 < seconds; phrase += 9.0)
+        for (int k { 0 }; k < 8; ++k)
+            notes.push_back ({ phrase + 0.9 * k, 0.8, pattern[k] });
+
+    return notes;
+}
+
+/** PlaybackRenderer の役のインスタンスを 1 つ持ち続け、範囲を描く（DAW の再生と同じく、描いている間も同期は進む）。 */
+struct PerfRenderer
+{
+    PlugInEntry* entry;
+    ARADocumentController* dc;
+    double rate;
+    std::unique_ptr<PlugInInstance> instance;
+
+    PerfRenderer (PlugInEntry* e, ARADocumentController* d, double r) : entry { e }, dc { d }, rate { r }
+    {
+        instance = entry->createPlugInInstance ();
+        instance->bindToDocumentControllerWithRoles (dc->getDocumentController ()->getRef (), ARA::kARAPlaybackRendererRole);
+        for (const auto& sequence : dc->getDocument ()->getRegionSequences ())
+            for (const auto& region : sequence->getPlaybackRegions ())
+                instance->getPlaybackRenderer ().addPlaybackRegion (dc->getRef (region));
+        instance->startRendering (1, 2048, rate);
+    }
+
+    /** 準備し直す（GLISS_ARA_SYNC_WAIT_MS の待ちの予算は準備のたびに戻る） */
+    void restart ()
+    {
+        instance->stopRendering ();
+        instance->startRendering (1, 2048, rate);
+    }
+
+    ~PerfRenderer ()
+    {
+        instance->stopRendering ();
+        for (const auto& sequence : dc->getDocument ()->getRegionSequences ())
+            for (const auto& region : sequence->getPlaybackRegions ())
+                instance->getPlaybackRenderer ().removePlaybackRegion (dc->getRef (region));
+    }
+
+    /** idle: 描いている間にメインスレッドで回すもの（DAW と同じく、描いている間もメッセージを配る） */
+    std::vector<float> render (double start, double end, const std::function<void ()>& idle = {})
+    {
+        const auto first { ARA::samplePositionAtTime (start, rate) }, last { ARA::samplePositionAtTime (end, rate) };
+        std::vector<float> out (static_cast<size_t> (last - first), 0.0f);
+        std::atomic<bool> done { false };
+        std::thread worker { [&]
+        {
+            ARAAudioAccessController::registerRenderThread ();
+            for (auto p { first }; p < last; p += 2048)
+            {
+                float* buffers[] { out.data () + (p - first) };
+                instance->renderSamples (static_cast<int> (std::min<ARA::ARASamplePosition> (2048, last - p)), p, buffers);
+            }
+            ARAAudioAccessController::unregisterRenderThread ();
+            done = true;
+        } };
+        while (! done)
+        {
+            if (idle)
+                idle ();
+            else
+                entry->idleThreadForDuration (1);
+        }
+        worker.join ();
+        return out;
+    }
+};
+
+/** 画面の代わり（TestBridgeCalls と同じ口）。答えを待たずに出し、答えが来たかを後から見る。 */
+struct PerfBridge
+{
+    std::string dir;
+    int serial = 0;
+
+    std::string post (const std::string& tool, const std::string& argsJson)
+    {
+        char name[16];
+        std::snprintf (name, sizeof (name), "%04d", ++serial);
+        const auto base { dir + "/" + name };
+        writeText (base + ".call.tmp", "{\"tool\": \"" + tool + "\", \"args\": " + argsJson + "}");
+        std::rename ((base + ".call.tmp").c_str (), (base + ".call.json").c_str ());
+        return base;
+    }
+
+    static bool answered (const std::string& base, std::string* text = nullptr)
+    {
+        std::ifstream in (base + ".result.json", std::ios::binary);
+        if (! in)
+            return false;
+        if (text != nullptr)
+        {
+            std::stringstream s;
+            s << in.rdbuf ();
+            *text = s.str ();
+        }
+        return true;
+    }
+};
+
+/** 答えの JSON から文字列の値を拾う（"key": "…"。\\ だけを戻す） */
+std::string perfString (const std::string& result, const std::string& key)
+{
+    const auto quoted { "\"" + key + "\": \"" };
+    const auto at { result.find (quoted) };
+    if (at == std::string::npos)
+        return {};
+    const auto end { result.find ('"', at + quoted.size ()) };
+    std::string value;
+    for (auto i { at + quoted.size () }; i < end; ++i)
+    {
+        if (result[i] == '\\' && i + 1 < end && result[i + 1] == '\\')
+            ++i;
+        value += result[i];
+    }
+    return value;
+}
+
+long long perfFileBytes (const std::string& path)
+{
+    std::error_code ec;
+    const auto size { std::filesystem::file_size (std::filesystem::u8path (path), ec) };
+    return ec ? -1 : static_cast<long long> (size);
+}
+
+double perfDiff (const std::vector<float>& a, const std::vector<float>& b)
+{
+    double d { 0.0 };
+    for (size_t i { 0 }; i < std::min (a.size (), b.size ()); ++i)
+        d = std::max (d, static_cast<double> (std::abs (a[i] - b[i])));
+    return d;
+}
+
+/** 1 回の測り: 編集の列を画面と同じ順（編集 → 描画データ → 次の編集。app/renderer/edits.js）で流し、
+    最後の編集のノートの音が PlaybackRenderer で変わるまで測る。時刻は最初の編集を出した時からのミリ秒。
+    編集の前の音は同期が落ち着くのを待つ描画（settled。バウンスと同じ）で取り、音の変化はリアルタイムの描画（renderer。
+    DAW の再生と同じく待たない）で見る。prelude: 前の音を取った後・最初の編集の前に流すもの（場面 during の長い再合成）。
+    viewRev: 描画データの前の版（エンジンが since に答えるときだけ送る。画面の viewData と同じ）。 */
+std::string perfMeasure (PlugInEntry* entry, ARADocumentController* dc, PerfBridge& bridge, PerfRenderer& renderer,
+                         PerfRenderer& settled, const std::vector<std::pair<VoiceAudioFile::Note, int>>& edits,
+                         std::string& viewRev, const std::function<void ()>& prelude = {})
+{
+    const auto& last { edits.back ().first };
+    const auto rangeStart { last.start - 0.05 }, rangeEnd { last.start + last.length + 0.05 };
+    settled.restart ();
+    const auto before { settled.render (rangeStart, rangeEnd) };
+    const auto tPrelude { perfNowMs () };
+    if (prelude)
+        prelude ();
+    const auto t0 { perfNowMs () };
+
+    std::vector<double> tEdit, tView, tNotify;
+    std::vector<long long> viewBytes;
+    double tSound { -1.0 }, lastRender { 0.0 }, soundDiff { 0.0 };
+    size_t next { 0 };
+    std::string pending;
+    bool pendingIsView { false };
+    auto seenCounts { modelUpdateCounts ().modificationSamples };
+
+    const auto postEdit = [&] (size_t k)
+    {
+        const auto& n { edits[k].first };
+        char args[256];
+        std::snprintf (args, sizeof (args), "{\"points\": [[0, 0], [%.3f, %d], [%.3f, 0]], \"start_sec\": %.3f, \"end_sec\": %.3f}",
+                       n.length * 0.5, edits[k].second, n.length, n.start, n.start + n.length);
+        pending = bridge.post ("set_pitch_curve", args);
+        pendingIsView = false;
+    };
+    postEdit (next);
+
+    // メッセージを配り、答えと知らせを拾う（PlaybackRenderer が描いている間も。時刻の分解能は pumpHost の 20 ms）
+    const auto poll = [&]
+    {
+        pumpHost (entry, dc, 10);
+        const auto t { perfNowMs () - t0 };
+
+        std::string text;
+        if (! pending.empty () && PerfBridge::answered (pending, &text))
+        {
+            if (! pendingIsView)
+            {
+                tEdit.push_back (t);
+                pending = bridge.post ("export_view_data", viewRev.empty () ? "{}" : "{\"since\": \"" + viewRev + "\"}");
+                pendingIsView = true;
+            }
+            else
+            {
+                tView.push_back (t);
+                viewBytes.push_back (perfFileBytes (perfString (text, "path")));
+                viewRev = text.find ("\"diff\":") != std::string::npos ? perfString (text, "view_rev") : std::string {};
+                pending.clear ();
+                if (++next < edits.size ())
+                    postEdit (next);
+            }
+        }
+
+        if (modelUpdateCounts ().modificationSamples != seenCounts)
+        {
+            seenCounts = modelUpdateCounts ().modificationSamples;
+            tNotify.push_back (t);
+        }
+    };
+
+    while (perfNowMs () - t0 < 90000.0)
+    {
+        poll ();
+        if (tSound < 0.0 && tEdit.size () == edits.size () && perfNowMs () - t0 - lastRender >= 100.0)
+        {
+            const auto now { renderer.render (rangeStart, rangeEnd, poll) };
+            lastRender = perfNowMs () - t0;
+            soundDiff = perfDiff (before, now);
+            if (soundDiff > 1.0e-3)
+                tSound = lastRender;
+        }
+
+        if (pending.empty () && tSound >= 0.0 && ! tNotify.empty () && tNotify.back () >= tEdit.back ())
+            break;
+    }
+
+    pumpHost (entry, dc, 300);
+    if (modelUpdateCounts ().modificationSamples != seenCounts)
+        tNotify.push_back (perfNowMs () - t0);
+
+    const auto list = [] (const auto& xs)
+    {
+        std::ostringstream o;
+        o << "[";
+        for (size_t i { 0 }; i < xs.size (); ++i)
+            o << (i ? ", " : "") << xs[i];
+        o << "]";
+        return o.str ();
+    };
+    std::ostringstream o;
+    o.precision (6);
+    o << "\"ops\": " << edits.size () << ", \"note_start\": " << last.start << ", \"prelude_ms\": " << (t0 - tPrelude)
+      << ", \"t_edit\": " << list (tEdit) << ", \"t_view\": " << list (tView) << ", \"view_bytes\": " << list (viewBytes)
+      << ", \"t_notify\": " << list (tNotify) << ", \"t_sound\": " << tSound << ", \"sound_diff\": " << soundDiff;
+    return o.str ();
+}
+
+/** 手元の音のとき: リージョンのノート（0.12 秒以上）を編集の的にする */
+std::vector<VoiceAudioFile::Note> perfRegionNotes (ARADocumentController* dc)
+{
+    auto* hc { dc->getDocumentController () };
+    std::vector<VoiceAudioFile::Note> notes;
+
+    for (const auto& source : dc->getDocument ()->getAudioSources ())
+        for (const auto& modification : source->getAudioModifications ())
+            for (const auto& region : modification->getPlaybackRegions ())
+            {
+                const auto r { dc->getRef (region.get ()) };
+                if (! hc->isPlaybackRegionContentAvailable (r, ARA::kARAContentTypeNotes))
+                    continue;
+                const auto reader { hc->createPlaybackRegionContentReader (r, ARA::kARAContentTypeNotes, nullptr) };
+                const auto count { hc->getContentReaderEventCount (reader) };
+                for (ARA::ARAInt32 i { 0 }; i < count; ++i)
+                {
+                    const auto* n { static_cast<const ARA::ARAContentNote*> (hc->getContentReaderDataForEvent (reader, i)) };
+                    if (n->noteDuration >= 0.12)
+                        notes.push_back ({ n->startPosition, n->noteDuration, n->pitchNumber });
+                }
+                hc->destroyContentReader (reader);
+            }
+
+    return notes;
+}
+
+/** -perf: 長い窓になる歌声もどき（perfNotes。rawPath を渡せば手元の float32 のモノラル）の文書を作り、画面の口から
+    ノートを編集して測る。場面は 4 つ:
+      same   同じノートを +60 / -60 セントで 8 回
+      walk   同じフレーズのノートを順に 8 回（間 0.1 秒。編集の塊がつながって窓が伸びる）
+      burst  別のフレーズの 3 ノートを続けざまに 4 回（前の同期の最中に次の編集が入る）
+      during 2 つ目のフレーズから終わりまでを ±100 セントにした直後に、頭のフレーズのノートを 4 回（長い再合成の最中の編集）
+    結果は <out>/perf.jsonl（1 行目 = 曲と下ごしらえ、続けて 1 行 = 1 回の測り）。合否は plugin/tests/verify_ara_perf.py。 */
+int runPerf (PlugInEntry* plugInEntry, double seconds, const std::string& outDir, const std::string& rawPath, double rawRate)
+{
+    setEnv ("GLISS_TEST_EDIT", nullptr);
+    PerfBridge bridge { outDir + "/bridge" };
+    CreateDirectoryW (widen (bridge.dir).c_str (), nullptr);
+    setEnv ("GLISS_TEST_BRIDGE_DIR", bridge.dir.c_str ());
+
+    auto notes { perfNotes (seconds) };
+    std::shared_ptr<VoiceAudioFile> voice;
+    if (rawPath.empty ())
+        voice = std::make_shared<VoiceAudioFile> (44100.0, notes, seconds);
+    else
+    {
+        std::ifstream in (std::filesystem::u8path (rawPath), std::ios::binary);
+        std::vector<char> bytes ((std::istreambuf_iterator<char> (in)), std::istreambuf_iterator<char> ());
+        std::vector<float> samples (bytes.size () / sizeof (float));
+        std::memcpy (samples.data (), bytes.data (), samples.size () * sizeof (float));
+        seconds = static_cast<double> (samples.size ()) / rawRate;
+        voice = std::make_shared<VoiceAudioFile> (rawRate, std::move (samples));
+    }
+    AudioFileList files { voice };
+    std::ofstream out (outDir + "/perf.jsonl", std::ios::binary | std::ios::trunc);
+    const auto t0 { perfNowMs () };
+
+    std::unique_ptr<TestHost> testHost;
+    auto dc { createHostAndBasicDocument (plugInEntry, testHost, "GlissARATest P", false, files) };
+    renderDocument (plugInEntry, dc, voice->getSampleRate ());
+    waitForRegionNotes (plugInEntry, dc, ARA::kARAContentGradeDetected, 600000);
+    const auto tNotes { perfNowMs () - t0 };
+
+    const auto waitAnswer = [&] (const std::string& base)
+    {
+        std::string text;
+        for (int waited { 0 }; waited < 600000 && ! PerfBridge::answered (base, &text); waited += 50)
+            pumpHost (plugInEntry, dc, 50);
+        return text;
+    };
+    waitAnswer (bridge.post ("select_track", "{\"track_id\": \"@ara:" + modificationID + "\"}"));
+    waitAnswer (bridge.post ("analyze_take", "{\"background\": false}"));
+    const auto tAnalyzed { perfNowMs () - t0 };
+    pumpHost (plugInEntry, dc, 5000);
+    if (! rawPath.empty ())
+        notes = perfRegionNotes (dc);
+    const auto phrases { notes.size () / 8 };
+    if (phrases < 2)
+    {
+        out << "{\"error\": \"too few notes\", \"notes\": " << notes.size () << "}\n";
+        return 3;
+    }
+    out << "{\"seconds\": " << seconds << ", \"raw\": " << (rawPath.empty () ? "false" : "true") << ", \"notes\": " << notes.size ()
+        << ", \"setup\": {\"notes_detected_ms\": " << tNotes << ", \"analyzed_ms\": " << tAnalyzed << "}}\n";
+    out.flush ();
+
+    // 描画は 2 つ: DAW の再生と同じく同期を待たないもの（音の変化を見る）と、バウンスと同じく同期が落ち着くまで待つもの（編集の前の音）。
+    // プラグインは GLISS_ARA_SYNC_WAIT_MS を準備のときに読む
+    setEnv ("GLISS_ARA_SYNC_WAIT_MS", nullptr);
+    PerfRenderer renderer { plugInEntry, dc, voice->getSampleRate () };
+    setEnv ("GLISS_ARA_SYNC_WAIT_MS", "120000");
+    PerfRenderer settled { plugInEntry, dc, voice->getSampleRate () };
+    const auto mid { (phrases / 2) * 8 };          // 真ん中のフレーズの頭のノート
+    std::string viewRev;
+    const auto measure = [&] (const char* scenario, int i, const std::vector<std::pair<VoiceAudioFile::Note, int>>& edits,
+                              const std::function<void ()>& prelude = {})
+    {
+        const auto line { perfMeasure (plugInEntry, dc, bridge, renderer, settled, edits, viewRev, prelude) };
+        out << "{\"scenario\": \"" << scenario << "\", \"i\": " << i << ", " << line << "}\n";
+        out.flush ();
+        ARA_LOG ("perf: %s %d %s", scenario, i, line.c_str ());
+        pumpHost (plugInEntry, dc, 2500);          // 次の測りの前に同期を落ち着かせる
+    };
+
+    for (int i { 0 }; i < 8; ++i)
+        measure ("same", i, { { notes[mid + 3], (i % 2) != 0 ? -60 : 60 } });
+    for (int i { 0 }; i < 8; ++i)
+        measure ("walk", i, { { notes[mid + static_cast<size_t> (i)], (i % 2) != 0 ? -70 : 70 } });
+    for (int i { 0 }; i < 4; ++i)
+    {
+        const auto base { i % 2 == 0 ? 0 : (phrases - 1) * 8 };
+        const int c { i < 2 ? 50 : -50 };
+        measure ("burst", i, { { notes[base + 1], c }, { notes[base + 3], c }, { notes[base + 5], c } });
+    }
+    // 長い再合成の最中の編集: 2 つ目のフレーズから曲の終わりまでを ±100 セント（画面と同じく答えと描画データを待つ）。
+    // 同期がそれを max_sec ずつ作っている間に、頭のフレーズのノートを 1 つ編集する。時刻はその編集を出した時から
+    const auto& target { notes[3] };
+    const auto from { std::max (notes[8].start - 0.3, target.start + target.length + 2.0) };
+    for (int i { 0 }; i < 4; ++i)
+    {
+        const auto prelude = [&, i]
+        {
+            char args[160];
+            std::snprintf (args, sizeof (args), "{\"cents\": %d, \"start_sec\": %.3f, \"end_sec\": %.3f}",
+                           (i % 2) != 0 ? -100 : 100, from, seconds);
+            waitAnswer (bridge.post ("shift_pitch", args));
+            const auto text { waitAnswer (bridge.post ("export_view_data", viewRev.empty () ? "{}" : "{\"since\": \"" + viewRev + "\"}")) };
+            viewRev = text.find ("\"diff\":") != std::string::npos ? perfString (text, "view_rev") : std::string {};
+        };
+        measure ("during", i, { { target, (i % 2) != 0 ? -60 : 60 } }, prelude);
+    }
+
+    return 0;
+}
+#endif
 } // namespace
 
 int main (int argc, const char* argv[])
@@ -767,8 +1179,19 @@ int main (int argc, const char* argv[])
     const auto relayScript { argument (args, "-relay") };
     const auto changesScript { argument (args, "-changes") };
     const auto otherRate { std::atof (argument (args, "-rate", "48000").c_str ()) };
+    const auto perfSeconds { argument (args, "-perf") };
 
     auto plugInEntry { PlugInEntry::parsePlugInEntry (args) };
+#if defined (_WIN32)
+    if (plugInEntry && ! outDir.empty () && ! perfSeconds.empty ())
+    {
+        plugInEntry->initializeARA (assertFunctionReference);
+        const auto code { runPerf (plugInEntry.get (), std::atof (perfSeconds.c_str ()), outDir, argument (args, "-perfraw"),
+                                   std::atof (argument (args, "-perfrate", "48000").c_str ())) };
+        plugInEntry->uninitializeARA ();
+        return code;
+    }
+#endif
     if (! plugInEntry || outDir.empty () || (workB.empty () && relayScript.empty ()) || (! changesScript.empty () && workB.empty ()))
     {
         ARA_LOG ("usage: GlissARATest -vst3 <Gliss.vst3> -out <folder> (-workB <work folder for document B> [-rate <Hz>] | -relay <relay_client.py>"
