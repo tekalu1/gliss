@@ -1298,21 +1298,32 @@ class Project:
         t0 = now_iso()
         take_cache = self._cache_path("take-analysis.json")
         reuse = not force and os.path.exists(take_cache)
+        before_f0 = None
         if reuse:
             if self._take_f0 is None or self._srcs.get("take") != _src_sig(take_cache):
                 self._load_take_analysis(take_cache)     # 同じファイルをもう読んでいれば読み直さない
             # 方式を替えた（画面の「ピッチ検出の方式」・MCP の estimator）: 解析し直す
             reuse = self._same_take_estimator(self._take_f0.estimator,
                                               self._take_f0.meta.get("version"), estimator, latest)
+            if not reuse:
+                before_f0 = (self._take_f0, self._take_notes)
         if not reuse:
             enter("take_f0")
-            x, sr = self.audio("take")
-            kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
-            old_version = self._gliss_version_for(estimator, latest)
-            if old_version:
-                kwargs["gliss_version"] = old_version
-            f0r = estimate_f0(**kwargs)
-            notes = segment_notes(f0r, source="take")
+            if before_f0 is not None:
+                # 方式を替える: 前の方式の結果を方式ごとの置き場へ残す（ここで残すので、この版より前に
+                # 解析した曲も移行は要らない）。force は残さない（素材を差し替えた後の解析し直しもある）
+                self._store_f0_variant(*before_f0)
+            found = None if force else self._load_f0_variant(estimator, sweep, latest)
+            if found is not None:
+                f0r, notes = found               # 前に同じ方式で解析した: 計算し直さない（2026-10-10 承認）
+            else:
+                x, sr = self.audio("take")
+                kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
+                old_version = self._gliss_version_for(estimator, latest)
+                if old_version:
+                    kwargs["gliss_version"] = old_version
+                f0r = estimate_f0(**kwargs)
+                notes = segment_notes(f0r, source="take")
             self._take_f0, self._take_notes = f0r, notes
             tmp = _tmp_name(take_cache)
             with open(tmp, "w", encoding="utf-8") as f:
@@ -1320,8 +1331,11 @@ class Project:
                           f, ensure_ascii=False)
             replace_file(tmp, take_cache)
             self._srcs["take"] = _src_sig(take_cache)
-            log.get().info("テイクを解析: %d フレーム / %d ノート（%.2f s）",
-                           f0r.n_frames, len(notes), f0r.elapsed_sec)
+            if found is None:
+                log.get().info("テイクを解析: %d フレーム / %d ノート（%.2f s）",
+                               f0r.n_frames, len(notes), f0r.elapsed_sec)
+            else:
+                log.get().info("テイクの解析を方式ごとの保存から戻した: %s / %d ノート", f0r.estimator, len(notes))
         if estimator == "gliss":
             self.f0_model_version = (self._take_f0.meta.get("version")
                                      if self._take_f0.meta.get("version") == f0mod.GLISS_F0_V2_VERSION else None)
@@ -1623,6 +1637,61 @@ class Project:
             return F0Result.from_json(d["f0"]), [_note_from_json(n) for n in d["notes"]]
         except _BROKEN_ERRORS as e:
             raise self._cache_broken(path, e) from e
+
+    def _f0_variant_path(self, estimator, sweep):
+        """方式ごとのテイクの F0 とノート（`cache/f0-<方式>[-sweep].json`。2026-10-10 承認）。
+
+        `take-analysis.json` は今の方式の結果だけを持つ。方式を替えるときに前の方式の結果をここへ残し
+        （初めての解析では書かない）、戻したときは計算し直さずにここから戻す。素材の切り出し（`_clip_cache_identity`）を一緒に書き、
+        素材が替わっていたら使わない。"""
+        return self._cache_path("f0-%s%s.json" % (estimator, "-sweep" if sweep else ""))
+
+    def _f0_variant_fits(self, f0r, sweep):
+        """保存した F0 が、今のテイクと解析の設定（確信度のしきい値・無声の判定・掃引）で作ったものか。"""
+        take = self.take
+        if not take or f0r.sr != int(take["sr"]) or f0r.hop_s != 0.01:
+            return False
+        vuv_rule = "%s f0>0 AND rms > %.1f dBFS" % (f0r.estimator, ENERGY_FLOOR_DB)
+        if bool(f0r.meta.get("sweep")) != bool(sweep) or f0r.meta.get("threshold") != RMVPE_THRESHOLD or \
+                f0r.meta.get("vuv_rule") != vuv_rule:
+            return False
+        expected = int(np.floor(int(take["frames"]) / f0r.sr / f0r.hop_s)) + 1
+        return f0r.n_frames == expected
+
+    def _store_f0_variant(self, f0r, notes):
+        """F0 とノートを方式ごとの置き場へ書く。書けなくても解析は続ける（次に戻したときに計算するだけ）。"""
+        sweep = bool(f0r.meta.get("sweep"))
+        if not self._f0_variant_fits(f0r, sweep):
+            return
+        path = self._f0_variant_path(f0r.estimator, sweep)
+        try:
+            tmp = _tmp_name(path)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"clip": self._clip_cache_identity(self.take), "f0": f0r.to_json(),
+                           "notes": [n.to_json() for n in notes]}, f, ensure_ascii=False)
+            replace_file(tmp, path)
+        except OSError as e:
+            log.get().warning("方式ごとの F0 を残せない: %s: %s", path, e)
+
+    def _load_f0_variant(self, estimator, sweep, latest=False):
+        """estimator で前に解析した F0 とノート（無い・合わない・壊れていれば None）。"""
+        path = self._f0_variant_path(estimator, sweep)
+        if not os.path.exists(path):
+            return None
+        try:
+            d = read_json(path)
+            if d.get("clip") != self._clip_cache_identity(self.take):
+                return None
+            f0r = F0Result.from_json(d["f0"])
+            notes = [_note_from_json(n) for n in d["notes"]]
+        except (OSError, *_BROKEN_ERRORS) as e:
+            log.get().warning("方式ごとの F0 が読めない（外して解析し直す）: %s: %s", path, e)
+            _remove(path)
+            return None
+        if not self._same_take_estimator(f0r.estimator, f0r.meta.get("version"), estimator, latest) or \
+                not self._f0_variant_fits(f0r, sweep):
+            return None
+        return f0r, notes
 
     def _read_alignment(self, path):
         """対応付けのキャッシュを読む。読めなければ `CacheBroken`。"""

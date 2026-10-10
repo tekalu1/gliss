@@ -4,7 +4,8 @@
 - どの方式も 10 ms の格子で F0 を返し、既知の音高に近い。無音は無声
 - 方式の選び方（`resolve_estimator`。既定は RMVPE。RMVPE の重みが無ければ Gliss のモデル）
 - 曲ごとの方式（選んでいなければ、前に解析した方式のまま。RMVPE の重みを後から取っても解析し直さない）
-- 解析のキャッシュが方式で分かれる（方式を替えたら解析し直し、同じ方式なら読むだけ）
+- 解析のキャッシュが方式で分かれる（方式を替えたら解析し直し、同じ方式なら読むだけ。前の方式に戻したら
+  方式ごとの保存を読むだけ）
 """
 import hashlib
 import os
@@ -270,14 +271,69 @@ def test_take_cache_is_split_by_estimator(tmp_path, monkeypatch):
     assert p.take_f0.estimator == "gliss" and p.guide_f0.estimator == "gliss"
     assert "estimator_version" in p.analysis["take"]
 
-    p = analyze("praat")                         # 戻す: テイクは解析し直し、ガイドは鍵付きの保存を読む
-    assert calls == ["praat", "praat", "gliss", "gliss", "praat"]
+    # 戻す: テイクは方式ごとの保存（cache/f0-<方式>.json）、ガイドは鍵付きの保存を読む（2026-10-10 承認）
+    p = analyze("praat")
+    assert calls == ["praat", "praat", "gliss", "gliss"]
     assert p.take_f0.estimator == "praat" and p.guide_f0.estimator == "praat"
+    assert p.analysis["take"]["estimator"] == "praat"
     assert len(os.listdir(os.path.join(directory, "cache", "guide", "analysis"))) == 2
 
-    p.analyze(estimator="gliss", auto_lyrics=False)   # 名前を指定した解析も、別の方式なら解析し直す
+    p.analyze(estimator="gliss", auto_lyrics=False)   # 名前を指定した解析も、前の結果があれば読むだけ
     assert p.take_f0.estimator == "gliss"
-    assert calls[-1] == "gliss"
+    assert calls == ["praat", "praat", "gliss", "gliss"]
+    p.analyze(force=True, estimator="gliss", auto_lyrics=False)   # force は計算し直す
+    assert calls == ["praat", "praat", "gliss", "gliss", "gliss", "gliss"]
+
+
+def test_take_f0_is_kept_per_estimator(tmp_path, monkeypatch):
+    """方式を戻したら、テイクの F0 を計算し直さない（`cache/f0-<方式>.json`。2026-10-10 承認）。
+
+    初めての解析では書かない。前の版で解析した曲（take-analysis.json だけ）も、方式を替えるときに前の結果を残す。
+    素材の切り出しが違う・壊れた保存は使わない。"""
+    import json
+    from vocal_engine.project import Project, store
+    calls = []
+    real = store.estimate_f0
+
+    def counting(x, sr, estimator=None, sweep=False):
+        calls.append(estimator)
+        return real(x=x, sr=sr, estimator=estimator, sweep=sweep)
+
+    monkeypatch.setattr(store, "estimate_f0", counting)
+    monkeypatch.setenv("VOCAL_ENGINE_AUTO_LYRICS", "0")
+    take = str(tmp_path / "take.wav")
+    sf.write(take, _tone(), SR)
+    directory = str(tmp_path / "project")
+    cache = os.path.join(directory, "cache")
+
+    p = Project.open(take, project_dir=directory)
+    p.analyze(estimator="praat", auto_lyrics=False)
+    praat_notes = [n.to_json() for n in p.take_notes]
+    assert not os.path.exists(os.path.join(cache, "f0-praat.json"))     # 前の版と同じ置き方（移行は要らない）
+    p.analyze(estimator="gliss", auto_lyrics=False)
+    assert os.path.exists(os.path.join(cache, "f0-praat.json"))
+    p.analyze(estimator="praat", auto_lyrics=False)                      # 戻す: 読むだけ
+    assert calls == ["praat", "gliss"]
+    assert p.take_f0.estimator == "praat" and p.analysis["take"]["estimator"] == "praat"
+    assert [n.to_json() for n in p.take_notes] == praat_notes            # ノートの区切りと ID も前のまま
+
+    p = Project.open(take, project_dir=directory)                        # 開き直しても
+    p.analyze(estimator="gliss", auto_lyrics=False)
+    assert calls == ["praat", "gliss"] and p.take_f0.estimator == "gliss"
+
+    with open(os.path.join(cache, "f0-praat.json"), "w", encoding="utf-8") as f:
+        f.write("{")                                                     # 壊れた: 外して計算し直す
+    p.analyze(estimator="praat", auto_lyrics=False)
+    assert calls == ["praat", "gliss", "praat"]
+
+    path = os.path.join(cache, "f0-gliss.json")
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    d["clip"][0] = "0" * 64                                              # 別の素材の結果: 使わない
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(d, f)
+    p.analyze(estimator="gliss", auto_lyrics=False)
+    assert calls == ["praat", "gliss", "praat", "gliss"]
 
 
 def test_mcp_set_f0_estimator_and_analyze_take(tmp_path, monkeypatch):
