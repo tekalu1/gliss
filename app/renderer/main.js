@@ -20,8 +20,8 @@ import { loadLegend } from './legend.js';
 import { closeTempoPop, installTempo, openTempoPop, tempoEditing } from './tempo.js';
 import { install, jumpToUtterance, openLyrics, openTr, setTool } from './interact.js';
 import {
-  awaiting, enqueue, exportWav, handleEngineError, idle, lastPending, loadLyricsText, loadLyricsScore, redo, refresh, resetOriginal,
-  setLyrics, undo, waitFor, wake,
+  awaiting, editsPending, enqueue, exportWav, handleEngineError, idle, lastPending, loadLyricsText, loadLyricsScore, redo, refresh,
+  resetOriginal, setLyrics, undo, waitFor, wake,
 } from './edits.js';
 import {
   audioMuted, clearPreviewLog, invalidate, playState, previewEnabled, previewLogOf, previewState, setPreviewEnabled,
@@ -641,7 +641,7 @@ function reopenCurrent() {
 function araHost() {
   return {
     status, render, renderTracks, renderToolbar, follow, movePlayhead, waitFor, idle, isDragging,
-    selectTrack, loadSession, busyState, prepOf, syncMenu: syncAppMenu, reopen: reopenCurrent,
+    selectTrack, loadSession, busyState, prepOf, syncMenu: syncAppMenu, reopen: reopenCurrent, editsPending,
     clearEmpty: () => { clearProject(); render(); renderTracks(); renderToolbar(); },
   };
 }

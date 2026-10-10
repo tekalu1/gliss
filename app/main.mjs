@@ -848,6 +848,24 @@ ipcMain.handle('app.readFile', (_e, p) => {
   return new Uint8Array(buf).buffer;
 });
 
+// 画面の段階の時間（edits.js の screenLog。「screen op=pitch queued= 0.00 … total= 0.26」）。engine.log の隣の
+// screen.log に足す（曲を開く前は既定のログの場所）。決まった形の 1 行だけを受け、1 MB を超えたら 1 世代だけ残す
+const SCREEN_LOG_MAX = 1024 * 1024;
+let screenLogWrite = Promise.resolve();
+ipcMain.on('app.screenLog', (_e, line) => {
+  if (typeof line !== 'string' || line.length > 300 || !/^screen [ -~]*$/.test(line)) return;
+  const file = path.join(state.projectDir || path.dirname(defaultLogPath()), 'screen.log');
+  const text = `${new Date().toISOString()} ${line}\n`;
+  screenLogWrite = screenLogWrite.then(async () => {
+    try {
+      const st = await fs.promises.stat(file).catch(() => null);
+      if (st && st.size > SCREEN_LOG_MAX) await fs.promises.rename(file, `${file}.1`).catch(() => {});
+      await fs.promises.mkdir(path.dirname(file), { recursive: true });
+      await fs.promises.appendFile(file, text, 'utf8');
+    } catch { /* 書けなくても画面は続ける */ }
+  });
+});
+
 ipcMain.handle('app.saveState', (_e, patch) => saveSettings(patch || {}));
 
 ipcMain.handle('app.pushRecent', (_e, entry) => pushRecent(entry));

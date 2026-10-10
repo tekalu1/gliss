@@ -698,7 +698,7 @@ test('(A9) リージョンの枠・キャッシュの状態の印と札・エン
   // 状態を取りこぼしても hostState で引き直せる（画面が見えたとき）
   await win.evaluate(([x]) => window.api.__araSetHost({ tracks: [{ track_id: x, regions: [], cache: { state: 'syncing' } }] }), [a.id]);
   await win.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
-  await expect(win.locator('#araChip .chip.an')).toContainText('編集を反映している');
+  await expect(win.locator('#araChip .chip.an')).toContainText('DAW に反映中…');
 });
 
 test('(A10) プロジェクトの操作（保存・書き出し・開く・ガイドを開く）は通さない', async () => {

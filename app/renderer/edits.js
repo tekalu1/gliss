@@ -1,32 +1,95 @@
 // 編集の確定。**ドラッグ中はローカル、離した時点でエンジンのツールを呼ぶ**。
 // 呼んだあとは必ず export_view_data で引き直して描き直す（画面は常にエンジンが真）。
 //
+// **送り方（2026-10-10 承認）**: 離した形はその場で描き（プレビュー）、エンジンには順に送る。
+// 次の編集は前の編集の描き直し（export_view_data）を待たずに送り、描き直しは列が空いてから最新 1 回にまとめる。
+// 送った編集は、その結果を含む view data を採るまで S.inflight に残し、離した形と「反映待ち」の縞を出し続ける。
+// 編集を送っている間に読んだ view data は、その編集を含むか分からないので採らずに読み直す（古い応答は捨てる）。
+// 失敗したときだけ知らせる: その操作のプレビューを外し、エンジンの状態を読み直し、後の操作をその上に載せ直す。
+//
 // **取り消し（issue #16）**: 履歴はエンジンが持つ（セッションの 1 本の履歴。`session.py`）。
 // Ctrl+Z / Ctrl+Y はエンジンの undo / redo を呼ぶだけ（トラックの操作も、Claude Code の編集も同じ履歴）。
 // 画面が持つのは**まだエンジンに渡していない操作の列**（順番待ち）だけで、Ctrl+Z はまずそこから外す。
 import { EngineError, analyzeTake, call, callJob, status, viewData } from './engine.js';
 import { beginBusy } from './busy.js';
 import { S, adopt, bandOf, fmtTime, histLabel, invalidateWarp, setPlan } from './state.js';
-import { render, renderToolbar } from './draw.js';
+import { render, renderCount, renderToolbar } from './draw.js';
 import { invalidate } from './audio.js';
 import { adoptSession } from './session.js';
-import { ARA } from './ara.js';
+import { ARA, araUpdateChip } from './ara.js';
 
 const AUTHOR = 'human';
 
 let refreshGeneration = 0;
+let opActive = false;     // 編集のツール（と取り消し・やり直し）を呼んでいる間
+let sentSeq = 0;          // 送り始めた編集の通し番号（読んでいる間に増えたら、その view data は採らない）
+let viewDirty = false;    // 当たった編集を、まだ描き直しに採っていない
+let refreshing = 0;
 export async function refresh({ keepView = true, beforeRender = null } = {}) {
   if (awaiting()) { render(); return; }    // 準備を待つのをやめた: 終わるまで空のまま（描画データを頼むと待たされる）
-  const generation = ++refreshGeneration;
-  const trackId = S.session?.current;
-  const projectDir = S.projectDir;
-  const vd = await viewData();
-  if (generation !== refreshGeneration || trackId !== S.session?.current || projectDir !== S.projectDir) return null;
-  adopt(vd, { keepView });
-  restorePreviews();
-  beforeRender?.();
-  render();
-  return vd;
+  refreshing += 1;
+  try {
+    for (;;) {
+      await waitFor(() => !opActive);
+      const generation = ++refreshGeneration;
+      const trackId = S.session?.current;
+      const projectDir = S.projectDir;
+      const seq0 = sentSeq;
+      const vd = await viewData();
+      if (generation !== refreshGeneration || trackId !== S.session?.current || projectDir !== S.projectDir) return null;
+      if (seq0 !== sentSeq) continue;     // 読んでいる間に次の編集を送った: どちらの状態か分からない
+      // ここまでに送った編集は全部当たり終わっている（読む前に呼び出しが無いのを待った）
+      const settled = S.inflight.filter((it) => it.seq != null && it.seq <= seq0 && it.done);
+      S.inflight = S.inflight.filter((it) => !settled.includes(it));
+      viewDirty = false;
+      adopt(vd, { keepView });
+      const now = performance.now();
+      for (const it of settled) settleItem(it, vd, now);
+      restorePreviews();
+      beforeRender?.();
+      render();
+      return vd;
+    }
+  } finally {
+    refreshing -= 1;
+    syncMarks();
+    wake();
+  }
+}
+
+/** 送った編集の結果を画面に採った（vd）・失敗した（vd = null）: 後始末と、段階の時間のログ。 */
+function settleItem(it, vd, now = performance.now()) {
+  for (const fn of it.settles) {
+    try { fn(vd); } catch (err) { console.error(err); }
+  }
+  it.settles.length = 0;
+  if (vd && it.op && it.sentAt != null) screenLog(it, now);
+}
+
+const sec = (ms) => (Math.max(0, ms) / 1000).toFixed(2).padStart(5);
+/** 画面の段階の時間（§7 の書式）。操作の種類と秒だけ（パス・曲名・歌詞は書かない）。 */
+function screenLog(it, now) {
+  const rel = it.releasedAt ?? it.sentAt;
+  const line = `screen op=${it.op} queued=${sec(it.sentAt - rel)} apply=${sec(it.appliedAt - it.sentAt)}`
+    + ` refresh=${sec(now - it.appliedAt)} total=${sec(now - rel)}`;
+  S.screenTimings.push(line);
+  if (S.screenTimings.length > 50) S.screenTimings.shift();
+  try { window.api.screenLog?.(line); } catch { /* 書けなくても編集は続ける */ }
+}
+
+// 列が空いたら、当たった編集をまとめて 1 回で描き直す（連続した操作の間は読まない）
+let kickTimer = null;
+function kickRefresh() {
+  if (kickTimer || !viewDirty) return;
+  kickTimer = setTimeout(async () => {
+    kickTimer = null;
+    if (!viewDirty || S.queued > 0 || opActive) return;
+    try {
+      await refresh();
+    } catch (err) {
+      status(`表示を読み直せなかった: ${err.message}`, { error: true });
+    }
+  }, 0);
 }
 
 // 取り消し・やり直しの結果（編集対象の切り替え・トラックの読み直し）は tracks.js が画面に反映する。
@@ -65,8 +128,11 @@ function discardQueued() {
     try { item.cancel?.(); } catch { /* 古いプレビューは下でまとめて消す */ }
   }
   S.pending.length = 0;
+  // 送った編集の結果は読み直しで採る。競合で捨てた後続の分のピッチの量も消す
+  queuedPitch.clear();
   S.drag = null;
   S.stroke = null;
+  S.strokesAside = [];
   S.trPreview = null;
   S.local.pitch.clear();
   S.local.btime.clear();
@@ -98,6 +164,7 @@ export async function handleEngineError(err, { partial = false } = {}) {
   if (err.preparing) {
     S.drag = null;
     S.stroke = null;
+    S.strokesAside = [];
     S.local.pitch.clear();
     S.local.btime.clear();
     S.local.fade.clear();
@@ -146,21 +213,25 @@ export function wake() {
 }
 
 let chain = Promise.resolve();
+let current = null;       // 列の先頭で動いている操作（run がその操作の送った編集として扱う）
 
 /** 離した操作を順番待ちに入れる。前に入れたものと S.busy（Ctrl+Z など）が終わってから fn を呼ぶ。
- * 待たされたときは、待っていることをステータスに出す（黙って止まって見えないように）。
+ * 止める処理（Ctrl+Z・書き出しなど）を待たされたときは、待っていることをステータスに出す。
  *
  * label（取り消しの名前。「元に戻す: ピッチ」）を渡した操作は、**当たる前なら Ctrl+Z で列から外せる**。
- * cancel: 外したときにプレビューを消す。preview: 描き直し（前の操作の確定）の後にプレビューを載せ直す。 */
+ * cancel: 外したときにプレビューを消す。preview: 描き直し（前の操作の確定）の後にプレビューを載せ直す
+ * （当たった結果を画面に採るまで載せ続ける）。settle(vd): 結果を採った（失敗は vd = null）ときの後始末。
+ * notes: 反映待ちの縞を付けるノート。op: 段階の時間のログの操作名。 */
 const WAIT_MSG = '前の編集を当て終わったら続けて当てる…';
-export function enqueue(fn, { label = null, cancel = null, preview = null, waitMsg = WAIT_MSG } = {}) {
-  const wait = S.busy || S.queued > 0;
-  if (wait) status(waitMsg);
+export function enqueue(fn, { label = null, cancel = null, preview = null, settle = null, notes = null,
+  op = null, waitMsg = WAIT_MSG } = {}) {
+  if (S.busy && !opActive) status(waitMsg);   // 止める処理（Ctrl+Z・保存など）を待つときだけ。編集どうしは黙って続ける
   S.queued += 1;
-  const item = { label, cancel, preview, canceled: false, started: false };
+  const item = { label, cancel, preview, settles: settle ? [settle] : [], notes: notes ? [...notes] : [], op,
+    canceled: false, started: false, seq: null, done: false, releasedAt: performance.now() };
   queuedItems.add(item);
   if (label) S.pending.push(item);
-  renderToolbar();
+  syncMarks();
   const p = chain
     .then(() => waitFor(() => !S.busy))
     .then(() => {
@@ -168,18 +239,63 @@ export function enqueue(fn, { label = null, cancel = null, preview = null, waitM
       const i = S.pending.indexOf(item);
       if (i >= 0) S.pending.splice(i, 1);
       if (item.canceled) return null;
+      S.inflight.push(item);              // 結果を採るまで、離した形のまま（プレビューを載せ続ける）
+      current = item;
+      sentSeq += 1;                       // run を通らない操作（トラックの操作など）もエンジンを変える
       return fn();
     })
     .finally(() => {
+      if (current === item) current = null;
       queuedItems.delete(item);
       S.queued -= 1;
-      // run を通らずに終わった（動かしていなかった・計画が作れなかった）ときに「待っている」を残さない
+      // 送らずに終わった（動かしていなかった・計画が作れなかった・止める処理）: 待つものは無い
+      if (!item.done && S.inflight.includes(item)) {
+        S.inflight = S.inflight.filter((it) => it !== item);
+        settleItem(item, null);
+      }
       if (!S.queued && document.querySelector('#status')?.textContent === WAIT_MSG) status('');
-      renderToolbar();
+      syncMarks();
       wake();
+      if (!S.queued) kickRefresh();
     });
   chain = p.catch(() => {});
   return p;
+}
+
+/** 反映待ちのノート（縞）と、ツールバーの「反映中…」。単体は 300 ms を超えたときだけ出す（2026-10-10 承認）。 */
+const SYNC_CHIP_MS = 300;
+let chipTimer = null;
+// 反映待ちに数える操作: 取り消しの名前つき（離した編集）か、編集を送ったもの（Ctrl+Z・保存などの止める処理は数えない）
+const live = (it) => !it.canceled && (!!it.label || it.seq != null);
+/** 編集を送っている・離した編集が順番を待っている（画面に採っていない）。ARA の札「DAW に反映中…」も見る。 */
+export const editsPending = () => S.inflight.some(live) || S.pending.some(live) || viewDirty;
+let markRender = null;
+export function syncMarks() {
+  const ids = new Set();
+  for (const it of [...S.inflight, ...S.pending]) {
+    if (!live(it)) continue;
+    for (const id of it.notes) ids.add(id);
+  }
+  const changed = ids.size !== S.syncing.size || [...ids].some((id) => !S.syncing.has(id));
+  S.syncing = ids;
+  araUpdateChip();
+  if (changed && markRender == null) {
+    // 縞が変わった: 呼び出し側がこの後に描かなければ描く（離した操作は、ふつう同じ流れで描く）
+    const at = renderCount();
+    markRender = at;
+    queueMicrotask(() => { markRender = null; if (renderCount() === at) render(); });
+  }
+  const chip = document.querySelector('#syncChip');
+  if (chip) {
+    if (!editsPending()) { clearTimeout(chipTimer); chipTimer = null; chip.hidden = true; }
+    else if (chip.hidden && !chipTimer) {
+      chipTimer = setTimeout(() => {
+        chipTimer = null;
+        if (editsPending()) chip.hidden = false;
+      }, SYNC_CHIP_MS);
+    }
+  }
+  renderToolbar();
 }
 
 /** 順番待ちでまだ当たっていない操作のうち最後のもの（取り消しの名前つき）。 */
@@ -190,71 +306,138 @@ export function lastPending() {
   return null;
 }
 
-/** 当たっていない操作のプレビュー（ピッチの量など）を載せ直す。描き直し（adopt）で消えるため。
- * ピッチのドラッグ中はそのドラッグが順番待ちの分も足して持っているので、ピッチは触らない。 */
-export const draggingPitch = () => S.drag?.type === 'note' && S.drag.axis === 'pitch';
-export function restorePreviews() {
-  if (!draggingPitch()) S.local.pitch.clear();
-  for (const it of S.pending) if (!it.canceled) it.preview?.();
-}
-
-/** いままでに順番待ちに入れた操作が全部当たり、S.busy も外れたら解ける。 */
-export function afterQueued() {
-  return chain.then(() => waitFor(() => !S.busy));
-}
-
-/** 前の操作が全部当たり終わった（新しい計画を頼んでよい・外部の変更を読み直してよい）。 */
-export const idle = () => !S.busy && !S.pendingPlan && S.queued === 0;
-
-/** 編集を 1 つ当てる。fn は当たった呼び出しの数を数える関数（done）を受け取る。複数の呼び出しでできた操作は
- * 呼び出しが当たるたびに done() を呼ぶ（途中で失敗したら「一部だけ当たった可能性がある」と伝える）。 */
-async function run(fn, label, beforeRender = null,
-  { failureBeforeRender = beforeRender, onError = null, onTiming = null } = {}) {
-  if (S.busy) return null;
-  if (await refuseWhileAwaiting()) return null;
-  S.busy = true;
-  renderToolbar();
-  // 呼び出しと描き直しをまとめて 1 本の線にする（描画データの読み直しは裏方なので、それだけでは出さない）
-  const line = beginBusy({ label: `${label || '編集'}を反映している…` });
-  let applied = 0;
-  try {
-    const startedAt = performance.now();
-    const r = await fn(() => { applied += 1; });
-    const appliedAt = performance.now();
-    invalidate();
-    // 計画のプレビューは、新しい view data と**同じ描画で**差し替える（ちらつかせない）
-    await refresh({ beforeRender });
-    onTiming?.({ applyMs: appliedAt - startedAt, viewMs: performance.now() - appliedAt });
-    status('');
-    return r;
-  } catch (err) {
-    onError?.(err);
-    const partial = applied > 0;
-    if (!await handleEngineError(err, { partial })) {
-      status(`${label || '編集'}に失敗: ${err.message}${partial ? PARTIAL_SUFFIX : ''}`);
-      await refresh({ beforeRender: failureBeforeRender }).catch(() => {});
-    }
-    return null;
-  } finally {
-    line.finish();
-    S.busy = false;
-    renderToolbar();
-    wake();
+/** 離したが、まだ画面に採っていないピッチの量（ノートごとの合計、半音）。順番待ち・送った編集の分の和。
+ * ピッチのプレビューはこれで描く（shift_pitch は相対なので、続けてドラッグするときの基準にもなる）。 */
+export const queuedPitch = new Map();
+/** deltas（id → 半音）を queuedPitch に足す（sign = -1 で引く）。 */
+export function queuePitch(deltas, sign = 1) {
+  for (const [id, v] of deltas) {
+    const r = (queuedPitch.get(id) || 0) + sign * v;
+    if (Math.abs(r) < 1e-9) queuedPitch.delete(id); else queuedPitch.set(id, r);
   }
 }
 
-let groupSeq = 0;
-/** blob の中央を上下 → ピッチ。半音スナップはしない（連続値）。複数ノートは取り消し 1 回にまとめる（group）。 */
+/** 当たっていない操作のプレビュー（ピッチの量など）を載せ直す。描き直し（adopt）で消えるため。
+ * 送った操作（S.inflight）・順番待ち（S.pending）の順に載せる。ピッチは queuedPitch から描き、
+ * ピッチのドラッグ中は、そのドラッグの分（S.drag.deltas）も足す。 */
+export const draggingPitch = () => S.drag?.type === 'note' && S.drag.axis === 'pitch';
+export function restorePreviews() {
+  S.local.pitch.clear();
+  for (const [id, v] of queuedPitch) S.local.pitch.set(id, v);
+  if (draggingPitch()) {
+    for (const [id, d] of S.drag.deltas || []) S.local.pitch.set(id, (queuedPitch.get(id) || 0) + d);
+  }
+  for (const it of S.inflight) if (!it.canceled) it.preview?.();
+  for (const it of S.pending) if (!it.canceled) it.preview?.();
+}
+
+/** いままでに順番待ちに入れた操作が全部当たり、S.busy も外れ、その結果を画面に採ったら解ける
+ * （計画は当たった後の view data の上に描く）。 */
+export function afterQueued() {
+  return chain.then(() => waitFor(() => !S.busy)).then(async () => {
+    if (viewDirty) await refresh().catch(() => {});
+  });
+}
+
+/** 前の操作が全部当たり終わり、結果を画面に採った（新しい計画を頼んでよい・外部の変更を読み直してよい）。 */
+export const idle = () => !S.busy && !S.pendingPlan && S.queued === 0
+  && !S.inflight.length && !viewDirty && !refreshing && !opActive;
+
+/** 編集を 1 つ当てる。fn は当たった呼び出しの数を数える関数（done）を受け取る。複数の呼び出しでできた操作は
+ * 呼び出しが当たるたびに done() を呼ぶ（途中で失敗したら「一部だけ当たった可能性がある」と伝える）。
+ *
+ * 既定は**描き直しを待たずに戻る**（列が空いたら最新 1 回にまとめて描き直す）。beforeRender は、
+ * この編集の結果を採った描画の直前に呼ぶ（計画のプレビューを同じ描画で外す）。
+ * wait: 描き直しまで列の中で待つ（歌詞・方式の切り替え・ポップアップの当て直しなど、結果の上で次を決めるもの）。
+ * line: 止める処理の線を出す（方式の切り替え・歌詞。ふつうの編集は出さない）。 */
+async function run(fn, label, beforeRender = null,
+  { failureBeforeRender = beforeRender, onError = null, onTiming = null, settle = null, wait = false, line = false } = {}) {
+  if (opActive || S.busy) return null;
+  if (await refuseWhileAwaiting()) return null;
+  let item = current;
+  if (!item || item.seq != null) {        // 列を通らない呼び出し（鉛筆の再試行など）・1 つの操作の 2 回目
+    item = { label, settles: [], notes: [], op: null, canceled: false, started: true, seq: null, done: false,
+      releasedAt: performance.now() };
+    S.inflight.push(item);
+  }
+  item.seq = ++sentSeq;
+  item.sentAt = performance.now();
+  opActive = true;
+  S.busy = true;                          // 呼び出している間だけ（入力は止めない。順番は列が守る）
+  const busyLine = line ? beginBusy({ label: `${label || '編集'}を反映している…` }) : null;
+  syncMarks();
+  let applied = 0;
+  let r;
+  try {
+    r = await fn(() => { applied += 1; });
+  } catch (err) {
+    opActive = false;
+    S.busy = false;
+    busyLine?.finish();
+    onError?.(err);
+    // 失敗: この操作のプレビューを外し、エンジンの状態を読み直す（後の操作はその上に載せ直す）
+    S.inflight = S.inflight.filter((it) => it !== item);
+    settleItem(item, null);
+    const partial = applied > 0;
+    if (partial) viewDirty = true;
+    if (!await handleEngineError(err, { partial })) {
+      const vd = await refresh({ beforeRender: failureBeforeRender }).catch(() => null);
+      if (!vd && failureBeforeRender) { failureBeforeRender(); render(); }   // 後の読み直しに負けた
+      status(`反映できなかった（${label || '編集'}）: ${err.message}${partial ? PARTIAL_SUFFIX : ''}`, { error: true });
+    }
+    syncMarks();
+    wake();
+    return null;
+  }
+  opActive = false;
+  S.busy = false;
+  item.done = true;
+  item.appliedAt = performance.now();
+  viewDirty = true;
+  invalidate();
+  if (settle) item.settles.push((vd) => { if (vd) settle(vd); });
+  if (beforeRender) item.settles.push(() => beforeRender());
+  if (onTiming) {
+    item.settles.push((vd) => {
+      if (vd) onTiming({ applyMs: item.appliedAt - item.sentAt, viewMs: performance.now() - item.appliedAt });
+    });
+  }
+  busyLine?.finish();
+  syncMarks();
+  wake();
+  // 列を通らない呼び出し（鉛筆の再試行など）は、列の終わりの描き直しが無い: 列が空ならここで頼む
+  if (!S.queued && !wait) kickRefresh();
+  if (wait) {
+    // 結果の上で次を決める操作: この操作の結果を画面に採るまで列の中で待つ
+    try { await refresh(); } catch (err) { status(`表示を読み直せなかった: ${err.message}`, { error: true }); }
+    await waitFor(() => !S.inflight.includes(item) || !refreshing);
+  }
+  if (line) status('');                   // 「音素を切っている…」などの途中の表示を消す
+  return r;
+}
+
+/** blob の中央を上下 → ピッチ。半音スナップはしない（連続値）。複数ノートは 1 回の呼び出し（取り消し 1 回）。 */
 export function applyPitch(deltas, { label = null } = {}) {
   const items = [...deltas.entries()].filter(([, d]) => Math.abs(d) > 1e-4);
-  if (!items.length) { S.local.pitch.clear(); restorePreviews(); render(); return Promise.resolve(); }
-  const group = `pitch-${Date.now().toString(36)}-${++groupSeq}`;
-  return run(async (done) => {
-    for (const [id, d] of items) {
-      await call('shift_pitch', { note_id: id, cents: d * 100, author: AUTHOR, group, label });
-      done();
-    }
+  if (!items.length) { restorePreviews(); render(); return Promise.resolve(); }
+  return run(async () => {
+    const notes = items.map(([id, d]) => ({ note_id: id, cents: d * 100 }));
+    await call('shift_pitch', { notes, author: AUTHOR, label }, { busy: false });
   }, label || 'ピッチの編集');
+}
+
+/** ピッチの操作（ドラッグ・Q）を順番待ちに入れる。離した量はすぐ queuedPitch に入れて描き、
+ * 結果を画面に採った・失敗した・Ctrl+Z で外したときに引く。 */
+export function enqueuePitch(deltas, { label = 'ピッチ', applyLabel = null, op = 'pitch' } = {}) {
+  const d = new Map([...deltas].filter(([, v]) => Math.abs(v) > 1e-4));
+  queuePitch(d);
+  let out = false;
+  const unqueue = () => { if (!out) { out = true; queuePitch(d, -1); } };
+  restorePreviews();
+  render();
+  return enqueue(() => applyPitch(d, { label: applyLabel }), {
+    label, op, notes: [...d.keys()], settle: unqueue, cancel: unqueue,
+  });
 }
 
 /** 半音に合わせる（Q）: 帯の高さ（ノートの平均の音程）をいちばん近い半音へ（Melodyne と同じ）。
@@ -269,27 +452,21 @@ export function snapToSemitone(ids) {
     if (Math.abs(d) > 1e-3) deltas.set(id, d);
   }
   if (!deltas.size) { status('もう半音に合っている'); return Promise.resolve(); }
-  const preview = () => { for (const [id, v] of deltas) S.local.pitch.set(id, (S.local.pitch.get(id) || 0) + v); };
-  preview();
-  render();
-  return enqueue(() => {
-    restorePreviews();                  // 前の操作の描き直しで消えたプレビューを載せ直してから当てる
-    if (!draggingPitch()) preview();
-    return applyPitch(deltas, { label: '半音に合わせる' });
-  }, { label: '半音に合わせる', preview, cancel: () => {} });
+  return enqueuePitch(deltas, { label: '半音に合わせる', applyLabel: '半音に合わせる', op: 'q' });
 }
 
+let groupSeq = 0;
 /** 結合（Ctrl+J）: 接して並ぶノートをまとめて 1 つに（取り消し 1 回）。ids は並び順。 */
 export function mergeMany(ids) {
   if (ids.length < 2) return Promise.resolve();
   const group = `merge-${Date.now().toString(36)}-${++groupSeq}`;
   return enqueue(() => run(async (done) => {
     for (let k = 1; k < ids.length; k++) {
-      await call('merge_notes', { note_a: ids[0], note_b: ids[k], author: AUTHOR, group });
+      await call('merge_notes', { note_a: ids[0], note_b: ids[k], author: AUTHOR, group }, { busy: false });
       done();
     }
     S.sel = [ids[0]];
-  }, 'ノートの結合'), { label: '結合' });
+  }, 'ノートの結合'), { label: '結合', notes: ids, op: 'merge' });
 }
 
 /** 無音にする（Del）／無音を戻す（右クリック）。長さ・位置は変えず、戻すのは無音だけ（ピッチ等の編集は残る）。
@@ -299,10 +476,12 @@ function applyMute(ids, to) {
   if (!ids.length) return Promise.resolve();
   const label = to ? '無音にする' : '無音を戻す';
   const preview = () => { for (const id of ids) S.local.mute.set(id, to); };
+  preview();                            // 離した（押した）形をその場で描く
+  render();
   return enqueue(() => run(async () => {
-    const r = await call(to ? 'mute_notes' : 'unmute_notes', { note_ids: ids, author: AUTHOR });
+    const r = await call(to ? 'mute_notes' : 'unmute_notes', { note_ids: ids, author: AUTHOR }, { busy: false });
     if (!r.changeset) status(to ? 'もう無音になっている' : '無音のノートが無かった');
-  }, label), { label, preview, cancel: () => { for (const id of ids) S.local.mute.delete(id); } });
+  }, label), { label, preview, notes: ids, op: 'mute', cancel: () => { for (const id of ids) S.local.mute.delete(id); } });
 }
 export const muteNotes = (ids) => applyMute(ids, true);
 export const unmuteNotes = (ids) => applyMute(ids, false);
@@ -310,7 +489,8 @@ export const unmuteNotes = (ids) => applyMute(ids, false);
 /** フェード（issue #20）: `set_fade`。fadeIn / fadeOut は編集後の秒（省くとそのまま、0 で消す）。**順番待ちの中から呼ぶ**。 */
 export function applyFade(ids, { fadeIn = null, fadeOut = null } = {}) {
   return run(async () => {
-    const r = await call('set_fade', { note_ids: ids, fade_in_sec: fadeIn, fade_out_sec: fadeOut, author: AUTHOR });
+    const r = await call('set_fade', { note_ids: ids, fade_in_sec: fadeIn, fade_out_sec: fadeOut, author: AUTHOR },
+      { busy: false });
     return r;
   }, 'フェード');
 }
@@ -318,14 +498,19 @@ export function applyFade(ids, { fadeIn = null, fadeOut = null } = {}) {
 /** フェードを消す（右クリック）。 */
 export function clearFades(ids) {
   if (!ids.length) return Promise.resolve();
-  return enqueue(() => applyFade(ids, { fadeIn: 0, fadeOut: 0 }), { label: 'フェードを消す' });
+  const preview = () => { for (const id of ids) S.local.fade.set(id, { fi: 0, fo: 0 }); };
+  preview();
+  render();
+  return enqueue(() => applyFade(ids, { fadeIn: 0, fadeOut: 0 }), {
+    label: 'フェードを消す', preview, notes: ids, op: 'fade', cancel: () => { for (const id of ids) S.local.fade.delete(id); },
+  });
 }
 
 /** 境目の接続／切り離し（右クリックの「切り離す」「つなぐ」。音は変わらない）。 */
 export function setConnection(a, b, connected) {
   return enqueue(() => run(
-    () => call('set_connection', { note_a: a, note_b: b, connected, author: AUTHOR }),
-    connected ? 'つなぐ' : '切り離し'), { label: connected ? 'つなぐ' : '切り離し' });
+    () => call('set_connection', { note_a: a, note_b: b, connected, author: AUTHOR }, { busy: false }),
+    connected ? 'つなぐ' : '切り離し'), { label: connected ? 'つなぐ' : '切り離し', notes: [a, b], op: 'connection' });
 }
 
 /** 隙間のある境目を「つなぐ」: 前のノートの尻を次のノートの頭まで伸ばして接続する
@@ -336,15 +521,15 @@ export function connectGap(a) {
     if (!data) return;
     if (data.snap_x == null) { status('隣のノートまで伸ばせない'); return; }
     await applyPlan({ planId: data.plan_id, x: data.snap_x, label: 'つなぐ' });
-  }, { label: 'つなぐ' });
+  }, { label: 'つなぐ', notes: [a], op: 'connection' });
 }
 
 /** 子音｜母音の境目を元に戻す（その音素の両側の境目の move_boundary を外す）。 */
 export function resetBoundaries(ids) {
   if (!ids.length) return Promise.resolve();
   return enqueue(() => run(
-    () => call('reset_to_original', { boundary_ids: ids, author: AUTHOR }), '音素の境目を元に戻す'),
-  { label: '音素の境目を元に戻す' });
+    () => call('reset_to_original', { boundary_ids: ids, author: AUTHOR }, { busy: false }), '音素の境目を元に戻す'),
+  { label: '音素の境目を元に戻す', op: 'bound' });
 }
 
 /** エンジンに計画を作らせて中身（JSON）を読む。
@@ -366,6 +551,7 @@ export async function requestPlan(args) {
  * （取り消しの履歴でも前回の項目と入れ替わる = ポップアップ 1 回 = 取り消し 1 回）。 */
 export async function applyPlan({ planId, x = null, pitch = null, replaces = null, drag = true, label = null,
   onTiming = null }) {
+  // ドラッグは結果を待たずに次へ（計画のプレビューは結果を採るまで残す）。ポップアップは当て直しの基準が要るので待つ
   let ok = false;
   const after = () => {
     // ドラッグは成功しても失敗してもプレビューを外す。ただし**この計画のときだけ**
@@ -386,12 +572,12 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
   const cs = await run(async () => {
     const r = await call('apply_plan', {
       plan_id: planId, x, pitch, replaces, author: AUTHOR, label,
-    });
+    }, { busy: false });
     ok = true;
     if (r.snapped) status('接続した');
     else if (r.clamped) status('隣にぶつかる手前で止めた');
     return r.changeset || null;
-  }, drag ? 'タイミングの編集' : 'ガイドに合わせる', after, { onTiming });
+  }, drag ? 'タイミングの編集' : 'ガイドに合わせる', after, { onTiming, wait: !drag });
   return { ok, changeset: cs };
 }
 
@@ -399,59 +585,78 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
  *
  * 範囲はエンジンが有声のフレームに切り詰める（無声には音程が無いので描いても効かない）。
  * 確定後の view data で描き直すまで、描いた線（S.stroke）のプレビューを残す（ちらつかせない）。 */
+/** 描線の段階。描いている次の線があれば、前の線の段階では S.strokePhase（描いている線の段階）を変えない。 */
+function strokePhase(stroke, phase) {
+  stroke.phase = phase;
+  if (S.stroke === stroke || !S.stroke) S.strokePhase = phase;
+}
+/** 描線を画面から外す（結果を採った・捨てた）。 */
+function dropStroke(stroke, phase) {
+  S.strokesAside = S.strokesAside.filter((st) => st !== stroke);
+  if (S.stroke === stroke) S.stroke = null;
+  if (!S.stroke) S.strokePhase = phase;
+}
+/** 確かめ・再送が要る描線を S.stroke に戻す（描線の操作の札は S.stroke に対して出る）。
+ * 次の線を描いている間は戻せないので外し、知らせだけを出す。戻したとき true。 */
+function holdStroke(stroke) {
+  if (S.stroke === stroke) return true;
+  S.strokesAside = S.strokesAside.filter((st) => st !== stroke);
+  if (S.stroke) return false;
+  S.stroke = stroke;
+  return true;
+}
+
 export async function applyDraw(points, stroke = S.stroke) {
   if (!stroke || stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir) {
-    if (S.stroke === stroke) { S.stroke = null; S.strokePhase = 'idle'; render(); }
+    if (stroke) dropStroke(stroke, 'idle');
+    render();
     status('編集対象が変わったため描線を送信しませんでした');
     return null;
   }
   const baseline = stroke.baselineIds || new Set((S.vd?.edits || []).map((e) => e.id));
   stroke.baselineIds = baseline;
-  stroke.phase = S.strokePhase = 'pending';
+  strokePhase(stroke, 'pending');
   let failure = null;
+  const gone = () => stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir;
+  // 当たった: 結果を採った描画で描線を外す（それまでは描いた線のまま。待たずに次の編集へ）
+  const settled = (vd) => {
+    if (gone()) { dropStroke(stroke, 'idle'); return; }
+    if (drawObserved(vd, stroke, points)) { dropStroke(stroke, 'committed'); return; }
+    if (!holdStroke(stroke)) { status('描いたピッチが表示に見当たらない。表示を確かめてください', { error: true }); return; }
+    strokePhase(stroke, 'checking');
+    status('編集は受け付けられました。表示を確認中です');
+  };
   const r = await run(async () => {
     // 元に戻す線（ペンの右ドラッグ）は points を持たず、範囲だけを渡す（エンジンが録音のピッチを入れる）
     const r = await call('set_pitch_curve', stroke.restore
       ? { mode: 'restore', start_sec: stroke.range[0], end_sec: stroke.range[1], author: AUTHOR }
-      : { points, mode: 'draw', author: AUTHOR });
+      : { points, mode: 'draw', author: AUTHOR }, { busy: false });
     return r;
-  }, stroke.restore ? 'ピッチを元に戻す' : 'ピッチを描く', null, { failureBeforeRender: null, onError: (err) => { failure = err; } });
-  if (r) {
-    if (stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir) {
-      if (S.stroke === stroke) { S.stroke = null; S.strokePhase = 'idle'; render(); }
-      return r;
-    }
-    let vd = S.vd;
-    if (!drawObserved(vd, stroke, points)) {
-      try { vd = await refresh(); } catch { vd = null; }
-    }
-    if (vd && drawObserved(vd, stroke, points)) {
-      if (S.stroke === stroke) S.stroke = null;
-      S.strokePhase = 'committed';
-      status('手描きピッチを確定しました');
-      render();
-      return r;
-    }
-    stroke.phase = S.strokePhase = 'checking';
-    status('編集は受け付けられました。表示を確認中です');
-    render();
-    return r;
-  }
+  }, stroke.restore ? 'ピッチを元に戻す' : 'ピッチを描く', null,
+  { failureBeforeRender: null, onError: (err) => { failure = err; }, settle: settled });
+  if (r) return r;
   // 応答だけが失われた可能性がある。編集 ID と描線の重なる区間を照合してから再試行可能にする。
-  stroke.phase = S.strokePhase = 'checking';
+  strokePhase(stroke, 'checking');
   let vd = null;
   try { vd = await refresh(); } catch { /* 状態を読めない間は再送しない */ }
   if (vd && drawObserved(vd, stroke, points)) {
-    if (S.stroke === stroke) S.stroke = null;
-    S.strokePhase = 'committed';
-    status('手描きピッチを確定しました');
+    dropStroke(stroke, 'committed');
+    status('');                          // 応答は失われたが当たっていた: 失敗の知らせを消す
+    render();
     return { ok: true, reconciled: true };
   }
   // ツールが明示的に拒否した場合だけ再送できる。通信断など結果不明の呼び出しは
   // 遅れて適用される可能性があるため、表示を読み直しても再送しない。
-  stroke.phase = S.strokePhase = failure instanceof EngineError && !failure.conflict ? 'failed' : 'checking';
-  status(S.strokePhase === 'failed' ? '手描きピッチを確定できませんでした。描線を保持しています'
-    : '適用状態が不明です。描線を保持し、再送を保留しています');
+  const failed = failure instanceof EngineError && !failure.conflict;
+  if (!holdStroke(stroke)) {
+    // 次の線を描いている: 前の線は外して、知らせだけを出す（描いている線は消さない）
+    status(failed ? '前に描いたピッチを確定できませんでした' : '前に描いたピッチの適用状態が不明です', { error: true });
+    render();
+    return null;
+  }
+  strokePhase(stroke, failed ? 'failed' : 'checking');
+  status(failed ? '手描きピッチを確定できませんでした。描線を保持しています'
+    : '適用状態が不明です。描線を保持し、再送を保留しています', { error: true });
   render();
   return null;
 }
@@ -485,8 +690,7 @@ export async function retryDraw(stroke = S.stroke) {
   try { vd = await refresh(); } catch { status('適用状態を確認できません。再試行は保留しています'); return null; }
   if (!vd) return null;
   if (drawObserved(vd, stroke, stroke.points)) {
-    if (S.stroke === stroke) S.stroke = null;
-    S.strokePhase = 'committed';
+    dropStroke(stroke, 'committed');
     status('手描きピッチは既に確定しています');
     render();
     return { ok: true, reconciled: true };
@@ -502,15 +706,15 @@ export async function retryDraw(stroke = S.stroke) {
 /** はさみ: sec（編集前の秒）でノートを分ける。吸着は画面側で済ませた時刻を渡す。 */
 export function splitNote(noteId, sec) {
   return enqueue(() => run(
-    () => call('split_note', { sec, note_id: noteId, author: AUTHOR }), 'ノートの分割'),
-  { label: '分割' });
+    () => call('split_note', { sec, note_id: noteId, author: AUTHOR }, { busy: false }), 'ノートの分割'),
+  { label: '分割', notes: [noteId], op: 'cut' });
 }
 
 /** はさみ: 境目のダブルクリックで結合。 */
 export function mergeNotes(a, b) {
   return enqueue(() => run(
-    () => call('merge_notes', { note_a: a, note_b: b, author: AUTHOR }), 'ノートの結合'),
-  { label: '結合' });
+    () => call('merge_notes', { note_a: a, note_b: b, author: AUTHOR }, { busy: false }), 'ノートの結合'),
+  { label: '結合', notes: [a, b], op: 'merge' });
 }
 
 /** つなぎのなだらかさ（ポップアップのスライダーを離したとき）。**順番待ちの中から呼ぶ**。
@@ -526,7 +730,7 @@ export async function applyTransition({ value, noteIds, pair = null, replaces = 
     });
     ok = true;
     return r.changeset || null;
-  }, 'つなぎのなだらかさ');
+  }, 'つなぎのなだらかさ', null, { wait: true });
   return { ok, changeset: cs };
 }
 
@@ -541,7 +745,7 @@ export function applyBoundary(boundaryId, dt) {
   return run(async () => {
     const r = await call('move_boundary', {
       boundary_id: boundaryId, ms: dt * 1000, author: AUTHOR,
-    });
+    }, { busy: false });
     if (r.moved?.clamped) status(r.moved.note || '20 ms の下限に当たった');
   }, '音素境界の移動');
 }
@@ -567,7 +771,7 @@ export function setLyrics(text, range) {
     });
     await analyzeTake({ label: '音素を切り直している', target: S.take?.name || '',
       onProgress: (sec) => status(`音素を切っている… ${sec} 秒`) });
-  }, '歌詞の設定'), { label: '歌詞' });
+  }, '歌詞の設定', null, { wait: true, line: true }), { label: '歌詞' });
 }
 
 /** ピッチ検出の方式を替えて、開いているトラックを解析し直す。
@@ -580,7 +784,7 @@ export function setF0Estimator(estimator, onChanged) {
       onProgress: (sec) => status(`ピッチを解析し直している… ${sec} 秒`), background: !ARA });
     onChanged?.(result);
     return result;
-  }, 'ピッチ検出の方式'), { label: 'ピッチ検出の方式' });
+  }, 'ピッチ検出の方式', null, { wait: true, line: true }), { label: 'ピッチ検出の方式' });
 }
 
 /** 歌詞レーンの 1 音節を直す。エンジンの changeset なので Ctrl+Z で戻せる。 */
@@ -589,7 +793,7 @@ export function setNoteSyllable(noteId, syllableIndex, kana) {
     status('音節を直している…');
     await call('set_note_syllable', { note_id: noteId, syllable_index: syllableIndex,
       kana, author: AUTHOR });
-  }, '音節の修正'), { label: '音節' });
+  }, '音節の修正', null, { wait: true, line: true }), { label: '音節' });
 }
 
 /** 歌詞のテキストファイルをまるごと渡す（ファイル > 歌詞を読み込む）。 */
@@ -601,7 +805,7 @@ export function loadLyricsText(content) {
     await analyzeTake({ label: '音素を切り直している', target: S.take?.name || '',
       onProgress: (sec) => status(`音素を切っている… ${sec} 秒`) });
     return r;
-  }, '歌詞の読み込み'), { label: '歌詞' });
+  }, '歌詞の読み込み', null, { wait: true, line: true }), { label: '歌詞' });
 }
 
 /** 譜面と録音の対応をエンジンに判定させ、確かな区間だけ歌詞として確定する。 */
@@ -609,7 +813,7 @@ export function loadLyricsScore(path, track) {
   return enqueue(() => run(async () => {
     status('譜面と発音の位置を照合している…');
     return call('import_lyrics', { path, track, author: AUTHOR, reanalyze: true });
-  }, '譜面の読み込み'), { label: '歌詞' });
+  }, '譜面の読み込み', null, { wait: true, line: true }), { label: '歌詞' });
 }
 
 /** WAV を書き出す。**元と同じ長さ・開始位置**で、編集区間だけ差し替わる。
@@ -664,8 +868,8 @@ async function exportNow(path) {
 export function resetOriginal(ids) {
   if (!ids.length) return Promise.resolve();
   return enqueue(() => run(async () => {
-    await call('reset_to_original', { note_ids: ids, author: AUTHOR });
-  }, 'オリジナルに戻す'), { label: 'オリジナルに戻す' });
+    await call('reset_to_original', { note_ids: ids, author: AUTHOR }, { busy: false });
+  }, 'オリジナルに戻す'), { label: 'オリジナルに戻す', notes: ids, op: 'reset' });
 }
 
 /** Ctrl+Z: **まだ当たっていない操作があれば列から外すだけ**（画面からすぐ消える。エンジンは呼ばない）。
@@ -706,7 +910,10 @@ async function historyStep(kind) {
   renderToolbar();
   let hold = null;
   try {
-    const r = await call(kind, {});
+    sentSeq += 1;                        // 呼んでいる間に読んだ描画データは採らない
+    opActive = true;
+    let r;
+    try { r = await call(kind, {}); } finally { opActive = false; wake(); }
     const e = r.undone || r.redone || {};
     hold = await historyHandler(r);
     invalidate();

@@ -420,7 +420,7 @@ test('(7) 確定の途中でもう一度離しても、最後の値で当たる'
   const preview = await shapes();
   await win.waitForFunction(() => {
     const p = window.__app.plan();
-    return p && p.pitch0 === 0.8 && !window.__app.S.busy;
+    return p && p.pitch0 === 0.8 && window.__app.idle();   // 当たった結果を画面に採るまで（S.busy は呼び出しの間だけ）
   }, null, { timeout: 60000 });
   expectSame(preview, await shapes(), '続けて離す');
   const cs = await win.evaluate(() => window.__app.S.vd.history.changesets.filter((c) => !c.undone));

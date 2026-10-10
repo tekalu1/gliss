@@ -15,6 +15,8 @@
 //    鳴っている位置のまま差し替える。作り直しは 1 本ずつ・間を置いて間引く。離したら止める。再生中は鳴らさない。
 //    設定（つかんだノートを鳴らす）で切り替え（既定は鳴らす）。
 //  - **テストの起動では音を一切出さない**（--mute。出力の音量 0）。プレビューは「鳴らそうとしたもの」を記録する。
+//  - **編集が約 300 ms 落ち着いたら、裏で音を作っておく**（render_tracks と読み込み。2026-10-10 承認）。再生を押したら
+//    作ってある音で鳴らす。編集の順番待ち・描き直しが残っている間は始めず、作っている間に次の編集が来たら、その結果は使わない。
 //  - **プラグイン（ARA。ara.js）では Web Audio で鳴らさない**。再生・停止は DAW（ホストの再生の制御）へ、再生位置は DAW から来る
 //    （S.head・S.playing は ara.js が入れる）。つかんだノートのプレビュー音は C++ の EditorRenderer が DAW の出力で鳴らす。
 import { call, callJob, status } from './engine.js';
@@ -22,7 +24,7 @@ import { ARA, araPreview, araSelectedModification, araTransport } from './ara.js
 import { S, audible, shownTrack, timelineRange } from './state.js';
 import { dbToGain, gainOf, panOf } from './mixer.js';
 import { follow, movePlayhead, renderToolbar } from './draw.js';
-import { waitFor } from './edits.js';
+import { idle, waitFor } from './edits.js';
 import { gainRegions, planClipGain } from './clipedit.js';
 
 let ctx = null;
@@ -32,6 +34,7 @@ let loading = false;
 let sched = null;             // ループの次の周回の予約（requestAnimationFrame はウィンドウが隠れると止まるので使わない）
 const MIN_LOOP = 0.05;
 const buffers = new Map();    // ファイルのパス → AudioBuffer（編集を当てた音はパスに版が入るので、編集が変われば別のもの）
+const decoding = new Map();   // ファイルのパス → 読み込み中の Promise（裏の作り置きと再生で同じ音を 2 回読まない）
 const LOOKAHEAD = 0.4;        // ループの次の周回をこれだけ前に予約する
 
 let master = null;            // すべての音はここを通す（テストの起動では音量 0。issue #27）
@@ -57,8 +60,64 @@ export function audioMuted() {
   return !!window.api?.muted && (!master || master.gain.value === 0);
 }
 
-/** 編集のたびに呼ばれる（音はパスで引き直すので、ここで捨てるものは無い）。 */
-export function invalidate() {}
+/** 編集のたびに呼ばれる（音はパスで引き直すので、ここで捨てるものは無い）。落ち着いたら裏で音を作り直す。 */
+export function invalidate() {
+  warmGen += 1;
+  scheduleWarm();
+}
+
+// 裏の作り置き: 最後の編集から WARM_QUIET_MS 何も来なければ render_tracks を頼み、音を読み込んでおく
+const WARM_QUIET_MS = 300;
+let warmGen = 0;              // 編集のたびに増える（作っている間に増えたら、その結果は古い）
+let warmTimer = 0;
+let warmBusy = false;
+const QUIET_BUSY = { update() {}, cancelWith() {}, finish() {} };   // 線もポップアップも出さない
+function scheduleWarm() {
+  if (ARA) return;
+  clearTimeout(warmTimer);
+  warmTimer = setTimeout(warm, WARM_QUIET_MS);
+}
+async function warm() {
+  warmTimer = 0;
+  if (!S.vd || S.opening || S.awaitPrep || loading || warmBusy) { if (S.vd && !S.opening) scheduleWarm(); return; }
+  if (!idle()) { scheduleWarm(); return; }   // 編集が続いている・描き直しが残る: 落ち着くまで待つ
+  const gen = warmGen;
+  const projectDir = S.projectDir;
+  warmBusy = true;
+  try {
+    const r = await callJob('render_tracks', {}, null, { busy: QUIET_BUSY, cancel: false, abandon: false });
+    if (gen !== warmGen || projectDir !== S.projectDir) return;   // 作っている間に編集が来た: 古い版は読まない
+    for (const st of r.tracks || []) {
+      if (st.error || !st.path || buffers.has(st.path)) continue;
+      await loadBuffer(st.path);
+      if (gen !== warmGen || projectDir !== S.projectDir) return;
+    }
+    const keep = new Set((r.tracks || []).map((st) => st.path));   // 前の版の音は持ち越さない（1 トラックで数十 MB）
+    for (const k of [...buffers.keys()]) if (!keep.has(k)) buffers.delete(k);
+  } catch (err) {
+    console.warn('裏で音を作れなかった', err?.message || err);   // 再生のときに作り直す（そこで理由を出す）
+  } finally {
+    warmBusy = false;
+  }
+}
+
+/** 音のファイルを読み込んで AudioBuffer にする（読み込み中なら、その終わりを待つ）。 */
+function loadBuffer(path) {
+  if (buffers.has(path)) return Promise.resolve(buffers.get(path));
+  if (!decoding.has(path)) {
+    decoding.set(path, (async () => {
+      try {
+        const bytes = await window.api.readFile(path);
+        const buf = await audioCtx().decodeAudioData(bytes);
+        buffers.set(path, buf);
+        return buf;
+      } finally {
+        decoding.delete(path);
+      }
+    })());
+  }
+  return decoding.get(path);
+}
 
 /** 読み込んだ音を捨てる（別のセッションを開いた。1 トラックで数十 MB あるので持ち越さない）。 */
 export function dropBuffers() { buffers.clear(); }
@@ -72,9 +131,7 @@ async function stems() {
     let buf = buffers.get(st.path);
     if (!buf) {
       status('音を読み込んでいる…');
-      const bytes = await window.api.readFile(st.path);
-      buf = await audioCtx().decodeAudioData(bytes);
-      buffers.set(st.path, buf);
+      buf = await loadBuffer(st.path);
     }
     out.push({ ...st, buf });
   }
@@ -174,8 +231,9 @@ export async function play() {
   loading = true;
   let list;
   try {
-    // 編集の確定・トラックの切り替えの途中は待つ（開き直し中のプロジェクトから音を作らない）
-    await waitFor(() => !S.busy && !S.opening);
+    // 編集の確定・トラックの切り替えの途中は待つ（開き直し中のプロジェクトから音を作らない）。
+    // 離した編集が順番を待っていたら、当たるまで待つ（当たる前の音を鳴らさない）
+    await waitFor(() => !S.busy && !S.opening && S.queued === 0);
     list = await stems();
   } catch (err) {
     status(`再生できなかった: ${err.message}`);

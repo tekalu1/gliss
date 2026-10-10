@@ -233,6 +233,7 @@
     pickFile: async (kind) => (kind === 'guide' ? native('pickFile', 'guide') : null),
     readJson: async (p) => (await fetchFs(p)).json(),
     readFile: async (p) => (await fetchFs(p)).arrayBuffer(),
+    screenLog: noop,                       // 画面の段階の時間は単体アプリの screen.log だけ（プラグインは書かない）
     saveState: async (patch) => { try { return await native('saveState', patch || {}); } catch { return false; } },
     pushRecent: none,
     saveDialog: none,
