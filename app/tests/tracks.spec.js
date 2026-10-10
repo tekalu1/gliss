@@ -187,7 +187,7 @@ test('(V1) 上下に分割。見出しは 名前・ガイドのボタン・M・S
   await settle();
   const st = await tstate();
   expect(st.height).toBe(st.fit);                          // 既定は全トラックが入る高さ
-  expect(st.fit).toBe(20 + 3 * TH + 1);
+  expect(st.fit).toBe(24 + 3 * TH + 1);
   expect(st.heads.map((h) => [h.cur, h.guide])).toEqual([[true, false], [false, true], [false, false]]);
   // 伴奏にはガイドのボタンが無い。見出しのボタンは ガイド・M・S の 3 つだけ
   const btns = await win.evaluate(() => [...document.querySelectorAll('#heads .th')]
@@ -321,7 +321,7 @@ test('(V7) M・S の見た目と、聞こえないトラックの見出しを暗
   await expect.poll(offs).toEqual([false, false, false]);
 });
 
-test('(V8) 境界のドラッグで高さ、ダブルクリックで上を畳む／戻す', async () => {
+test('(V8) 境界のドラッグで高さ、ダブルクリックで一覧を帯だけに畳む／戻す', async () => {
   const h0 = (await tstate()).height;
   const sb = await win.locator('#split').boundingBox();
   await win.mouse.move(sb.x + 300, sb.y + 2);
@@ -331,12 +331,14 @@ test('(V8) 境界のドラッグで高さ、ダブルクリックで上を畳む
   // 画面の拡大率（Windows の表示スケール 150% など）では、ポインタの座標がデバイスのピクセルに丸められて
   // CSS の px で ±1/DPR ずれる（以前 1 度だけ落ちた原因。高さは整数に丸めるので 59 や 61 になりうる）
   expect(Math.abs((await tstate()).height - (h0 + 60))).toBeLessThanOrEqual(1);
+  const h1 = (await tstate()).height;
   const sb2 = await win.locator('#split').boundingBox();
   await win.mouse.dblclick(sb2.x + 300, sb2.y + 2);
-  expect((await tstate()).height).toBe(20 + TH);           // 1 トラック分に畳む
+  await expect.poll(async () => (await tstate()).height).toBe(24);   // 帯だけに畳む（docs/track-view.md §10）
   const sb3 = await win.locator('#split').boundingBox();
   await win.mouse.dblclick(sb3.x + 300, sb3.y + 2);
-  expect((await tstate()).height).toBe(h0);                // 全トラックが入る高さに戻す
+  await expect.poll(async () => (await tstate()).height).toBe(h0);   // 開くときは自動（全トラックが入る高さ）に戻す
+  expect(h1).toBeGreaterThan(h0);
 });
 
 test('(V9) スクリーンショット', async () => {
@@ -585,7 +587,7 @@ test('(A1) ファイル > トラックを追加… で足す（編集対象は�
   expect(await win.evaluate(() => window.__app.S.session.current)).toBe(cur);
   const st = await tstate();
   expect(st.height).toBe(Math.min(st.fit, st.height));     // 全トラックが入る高さ（40% まで）
-  expect(st.fit).toBe(20 + 4 * TH + 1);
+  expect(st.fit).toBe(24 + 4 * TH + 1);
   await expect.poll(async () => (await tstate()).overviews).toBe(4);
 });
 
@@ -649,7 +651,7 @@ test('(A4) トラックを外す（編集中なら残りの最初のボーカル
   await win.locator('#menu [data-item="remove"]').click();
   await expect.poll(async () => (await tracks()).length).toBe(3);
   await settle();
-  expect((await tstate()).height).toBe(20 + 3 * TH + 1);    // 高さは入るぶんに戻る
+  expect((await tstate()).height).toBe(24 + 3 * TH + 1);    // 高さは入るぶんに戻る
   // 外したファイルを Shift で落とすと、トラックに足し直してガイドに指定する（編集中のテイクはそのまま）
   await drop(TAKE2, { shift: true });
   await win.waitForFunction((p) => window.__app.S.guide?.path === p, TAKE2, { timeout: 120000 });

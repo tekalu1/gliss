@@ -19,7 +19,7 @@ import { beginSelectedAudition, closePop, closeTr, endAudition, openPop, openTr,
 import { play, previewEnabled, setPreviewEnabled, stop } from './audio.js';
 import { ARA, araCompare, araEditorHead, araEditorRegion, araFeatures, araTransport } from './ara.js';
 import { status } from './engine.js';
-import { startRename } from './tracks.js';
+import { setTvOpen, startRename, tvIsOpen } from './tracks.js';
 import { guideShown, guideWhy } from './session.js';
 import { asrRangeAt, asrReady, asrWhy, defaultAsrTime, transcribeAt } from './asr.js';
 import { chooseF0, f0State } from './f0.js';
@@ -194,6 +194,8 @@ export const COMMANDS = [
     null, () => S.showAllBounds],
   ['show-all', '全体を表示', GR.view, [], showAll, hasNotes],
   ['zoom-reset', 'ズームを戻す', GR.view, [], () => host.zoomReset(), () => hasNotes() || S.tracks.length > 0],
+  // トラック一覧を畳む／開く（畳むと高さ 24 px の帯だけ。プラグインは既定で畳む。docs/track-view.md §10）
+  ['track-list', 'トラック一覧を表示', GR.view, ['L'], () => { setTvOpen(!tvIsOpen()); syncAppMenu(); }, () => S.tracks.length > 0, () => tvIsOpen()],
 
   ['rename', 'トラックの名前を変える', GR.track, ['F2'], renameCurrent, () => S.tracks.length > 0],
 
@@ -324,7 +326,7 @@ const MENUBAR = [
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
   ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute', 'unmute',
     SEP, 'ask-ai']],
-  ['表示', ['guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset', SEP, 'track-list']],
   // 名前・版・アイコン（main の app.setAboutPanelOptions。issue #29）
   ['ヘルプ', ['ai-connect', 'addons', SEP, 'check-updates', { role: 'about', label: 'Gliss について' }]],
 ];
@@ -335,7 +337,7 @@ const MENUBAR_ARA = [
   ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'audition-selected',
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }]],
   MENUBAR[2],
-  ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset', SEP, 'track-list']],
   ['ヘルプ', ['keys']],
 ];
 

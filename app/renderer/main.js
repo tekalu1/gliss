@@ -45,6 +45,7 @@ import {
   addTrackFile, installTracks, isDragging, prepOf, removeTrack, renameTrack, renderTracks, selectTrack, setGuide,
   setKind, setTrackHeight, setViewTimeline, soundRegion, TRACK_H, trackHeight, tracksState, tvT, tvX,
   commitOrder, panTracks, setTracksView, tracksView, zoomTracks, savedHeadWidth, setHeadWidth,
+  setTvOpen, tvIsOpen,
 } from './tracks.js';
 import { ARA, araAfterSession, araBoot, araFeatures } from './ara.js';
 
@@ -59,7 +60,7 @@ function saveView() {
   clearTimeout(saveView._t);
   saveView._t = setTimeout(() => {
     savedView = { t0: S.view.t0, span: S.view.span, take: S.take?.path || null,
-      pv: S.pv ? { ...S.pv } : null, trackH: trackHeight(), tv: tracksView(), headW: savedHeadWidth() };
+      pv: S.pv ? { ...S.pv } : null, trackH: trackHeight(), tv: tracksView(), headW: savedHeadWidth(), tvOpen: tvIsOpen() };
     window.api.saveState({ view: savedView });
   }, 400);
 }
@@ -703,6 +704,10 @@ async function boot() {
   savedView = (b.view && b.view.span > 0) ? b.view : null;   // 前回のズーム・スクロール位置
   if (savedView?.trackH) setTrackHeight(savedView.trackH);
   if (b.view?.headW) setHeadWidth(b.view.headW, { save: false });   // 見出しの幅（全体で 1 つ）
+  if (typeof b.view?.tvOpen === 'boolean') {        // トラック一覧の開閉（全体で 1 つ）
+    setTvOpen(b.view.tvOpen, { animate: false, save: false });
+    syncAppMenu();                  // 表示メニューのチェックも合わせる
+  }
   onAnalyzed(adoptAnalysis);      // ARA でも修飾ごとの実効方式を選択表示へ反映する
   if (ARA) {
     // プラグイン: 開く操作は DAW が持つ。DAW の選択のトラックを選んで解析し、描く（ara.js の araBoot）
