@@ -342,6 +342,11 @@ def test_failed_result_of_older_revision_is_realigned(project, fake_aligner):
         d = json.load(open(path, encoding="utf-8"))
         d["aligner"]["revision"] = 1
         json.dump(d, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+    # 区間ごとの結果（2026-10-10 承認）も前の版の鍵で残っている
+    path = p2._phoneme_parts_path("take")
+    d = json.load(open(path, encoding="utf-8"))
+    d["parts"] = {json.dumps([1] + json.loads(k)[1:], ensure_ascii=False): v for k, v in d["parts"].items()}
+    json.dump(d, open(path, "w", encoding="utf-8"), ensure_ascii=False)
     fake_aligner.fail = set()
     p3 = Project(p2.dir).load()
     assert not p3.phonemes("take").aligner["failed_entries"] and fake_aligner.calls > n

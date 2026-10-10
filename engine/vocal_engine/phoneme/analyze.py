@@ -23,6 +23,10 @@
 """
 from __future__ import annotations
 
+import json
+import threading
+from dataclasses import asdict
+
 import numpy as np
 
 from .. import log
@@ -43,6 +47,8 @@ ALIGN_REVISION = 2              # 2: 促音 cl を無音のクラスとして渡
 CLOSURE_QUIET_DB = 15.0         # 促音の閉鎖 = 前の音素の山より これだけ下がった区間
 CLOSURE_KEEP_PREV_SEC = 0.03    # 閉鎖を広げても前の音素に残す長さ
 CLOSURE_KEEP_NEXT_SEC = 0.02    # 同じく次の音素（破裂・摩擦）に残す長さ
+# g2p（pyopenjtalk）とアライナーを 1 本ずつ通す（裏の準備のスレッドと MCP の呼び出しが重なるため）
+_ALIGN_LOCK = threading.RLock()
 
 
 def align_lyrics(x, sr, lyrics, f0r=None, source="take", use_pyopenjtalk=True,
@@ -54,7 +60,8 @@ def align_lyrics(x, sr, lyrics, f0r=None, source="take", use_pyopenjtalk=True,
 
 
 def align_lyrics_ranges(x, sr, entries, f0r=None, source="take", use_pyopenjtalk=True,
-                        detect_breath=True, duration_sec=None, pad_sec=PAD_SEC):
+                        detect_breath=True, duration_sec=None, pad_sec=PAD_SEC, parts=None,
+                        compute=True, order=None, on_part=None, should_stop=None):
     """**区間ごと**にアラインして 1 本の `PhonemeResult` にまとめる。
 
     `entries` は `phoneme/lyrics.py` の形（文字列なら素材全体の 1 区間）。
@@ -67,6 +74,18 @@ def align_lyrics_ranges(x, sr, entries, f0r=None, source="take", use_pyopenjtalk
       - 確信度・警告・境界は**まとめてから**付ける（素材全体の F0 とエネルギーを見るため）。
       - **区間のアラインが失敗しても全体は落とさない**（issue #58）。その区間は音素なし（`SP`）で続け、
         `warnings` に `align_failed` を入れる。重み・辞書が無いなど環境の問題（`AlignerSetupError`）は上げる。
+
+    区間ごとのアラインの結果（part）は `part_key` を鍵にして使い回せる（2026-10-10 承認: 歌詞を直したら
+    変わった区間だけを合わせ直す）。part は、その区間の切り出し（隣の区間の範囲で決まる）と歌詞・読みだけで
+    決まるので、使い回してまとめた結果は、全区間を計算し直したものと同じになる。
+
+      parts: 鍵 -> part（dict。足りない区間を計算したら足す）
+      compute: False なら足りない区間を計算せず「未解析」にする（`entries[i]["pending"]` と
+        `aligner["pending_entries"]`。その区間は音素なし）
+      order: 計算する区間の順（番号の列。省略時は前から。漏れた区間は後に回す）
+      on_part(i, key, part): 1 区間を計算するたびに呼ぶ（保存など）
+      should_stop(): 各区間を計算する前に呼ぶ。True なら残りを計算せずに「未解析」のまままとめる
+        （裏の解析が利用者の操作に道を譲るため。待たせたいなら中で待ってよい）
     """
     from . import lyrics as LY
     entries = LY.normalize(entries)
@@ -75,7 +94,25 @@ def align_lyrics_ranges(x, sr, entries, f0r=None, source="take", use_pyopenjtalk
         return PhonemeResult(source=source, lyrics="", kana="", phonemes=[], boundaries=[],
                              duration_sec=dur)
     ranges = LY.spans(entries, dur)
-    al = get_aligner()
+    parts = {} if parts is None else parts
+    plan = entry_plan(entries, ranges, dur, sr, pad_sec, use_pyopenjtalk, detect_breath)
+    if compute:
+        idx = [i for i in (order or []) if 0 <= i < len(plan)]
+        idx += [i for i in range(len(plan)) if i not in idx]
+        todo = [i for i in idx if plan[i][-1] not in parts]
+        if todo:
+            al = get_aligner()
+            for i in todo:
+                _i, e, s0, s1, a, b, ia, ib, key = plan[i]
+                if key in parts:
+                    continue
+                if should_stop is not None and should_stop():
+                    break
+                part = _align_entry(x, sr, e, i, s0, s1, ia, ib, al, detect_breath,
+                                    use_pyopenjtalk)
+                parts[key] = part
+                if on_part is not None:
+                    on_part(i, key, part)
 
     spans, warnings, ent_info = [], [], []
     kana_parts, lab_parts, unknown, devoiced = [], [], [], []
@@ -83,71 +120,58 @@ def align_lyrics_ranges(x, sr, entries, f0r=None, source="take", use_pyopenjtalk
     elapsed = 0.0
     audio_sec = 0.0
     total_confs = []
-    failed = []
-    for i, (e, (s0, s1)) in enumerate(zip(entries, ranges)):
-        lo = 0.0 if i == 0 else ranges[i - 1][1]
-        hi = dur if i == len(entries) - 1 else ranges[i + 1][0]
-        a = max(0.0, lo, s0 - pad_sec)
-        b = min(dur, hi, s1 + pad_sec)
-        ia, ib = int(round(a * sr)), int(round(b * sr))
-        res = None
-        try:
-            seg = np.asarray(x)[ia:ib]
-            if len(seg) < int(0.05 * sr):
-                raise ValueError("歌詞の区間 %.3f〜%.3f 秒に音が無い" % (s0, s1))
-            res = G.g2p(e.get("reading") or e["text"],
-                        use_pyopenjtalk=use_pyopenjtalk, merge_long=True)
-            out = al.align(seg, sr, res.romaji_seq, detect_breath=detect_breath)
-            part = _attach_text(out["phonemes"], res, out.get("used_words"))
-        except AlignerSetupError:
-            raise
-        except Exception as err:                         # noqa: BLE001  区間の失敗は区間に閉じ込める
-            msg = str(err) or type(err).__name__
-            log.get("phoneme").warning("歌詞の区間 %d（%.2f〜%.2f 秒 %r）の音素アラインに失敗: %s",
-                                       i, s0, s1, e["text"][:30], msg)
+    failed, pending = [], []
+    al_info = None
+    for i, e, s0, s1, a, b, ia, ib, key in plan:
+        part = parts.get(key)
+        if part is None:
+            pending.append(i)
+            ent_info.append({"index": i, "text": e["text"], "kana": None,
+                             "start_sec": _r(s0), "end_sec": _r(s1),
+                             "aligned_start_sec": None, "aligned_end_sec": None,
+                             "window_sec": [_r(a), _r(b)], "n_phonemes": 0,
+                             "pending": True})
+            syll_base += _n_syllables(e, use_pyopenjtalk)
+            continue
+        al_info = al_info or part.get("al")
+        if part.get("error") is not None:
+            msg = part["error"]
             failed.append(i)
             warnings.append({"kind": "align_failed", "entry_index": i,
                              "start_sec": _r(s0), "end_sec": _r(s1), "error": msg,
                              "message": "%.2f〜%.2f 秒の歌詞の音素を切れなかった（%s）。"
                                         "この区間は音素なしで続ける" % (s0, s1, msg)})
-            ent_info.append({"index": i, "text": e["text"],
-                             "kana": res.kana if res is not None else None,
+            ent_info.append({"index": i, "text": e["text"], "kana": part.get("kana"),
                              "start_sec": _r(s0), "end_sec": _r(s1),
                              "aligned_start_sec": None, "aligned_end_sec": None,
                              "window_sec": [_r(a), _r(b)], "n_phonemes": 0,
                              "failed": True, "error": msg})
-            if res is not None:
-                syll_base += len(res.syllables)
+            syll_base += int(part.get("n_syll") or 0)
             continue
-        if detect_breath and out["breaths"]:
-            part = _insert_breaths(part, out["breaths"])
-        off = ia / float(sr)
-        for p in part:
-            p.start_sec = round(p.start_sec + off, 4)
-            p.end_sec = round(p.end_sec + off, 4)
-        part = _trim_edges(part)
-        for p in part:
+        seg = [PhonemeSpan.from_json(dict(d, flags=list(d.get("flags") or [])))
+               for d in part["spans"]]
+        for p in seg:
             if p.syllable_index is not None:
                 p.syllable_index += syll_base
-        syll_base += len(res.syllables)
-        elapsed += out["elapsed_sec"]
+        syll_base += int(part["n_syll"])
+        elapsed += part["elapsed"]
         audio_sec += (b - a)
-        total_confs.append(out["total_confidence"])
-        unknown += out["unknown_syllables"]
-        devoiced += list(res.devoiced)
-        kana_parts.append(res.kana)
-        lab_parts.append(res.lab_line())
-        spans += part
+        total_confs.append(part["total_conf"])
+        unknown += part["unknown"]
+        devoiced += part["devoiced"]
+        kana_parts.append(part["kana"])
+        lab_parts.append(part["lab"])
+        spans += seg
         ent_info.append({
-            "index": i, "text": e["text"], "kana": res.kana,
+            "index": i, "text": e["text"], "kana": part["kana"],
             "start_sec": _r(s0), "end_sec": _r(s1),
-            "aligned_start_sec": _r(part[0].start_sec) if part else None,
-            "aligned_end_sec": _r(part[-1].end_sec) if part else None,
+            "aligned_start_sec": _r(seg[0].start_sec) if seg else None,
+            "aligned_end_sec": _r(seg[-1].end_sec) if seg else None,
             "window_sec": [_r(a), _r(b)],
-            "n_phonemes": len([p for p in part if p.label != "silence"]),
-            "rtf": out["rtf"], "elapsed_sec": out["elapsed_sec"],
+            "n_phonemes": len([p for p in seg if p.label != "silence"]),
+            "rtf": part["rtf"], "elapsed_sec": part["elapsed"],
         })
-        if not part:
+        if not seg:
             warnings.append({"kind": "empty_entry", "entry_index": i,
                              "message": "%.2f〜%.2f 秒の歌詞から音素が取れなかった"
                                         % (s0, s1)})
@@ -158,7 +182,8 @@ def align_lyrics_ranges(x, sr, entries, f0r=None, source="take", use_pyopenjtalk
     if unknown:
         warnings.append({"kind": "unknown_syllable",
                          "message": "辞書に無い音節を飛ばした: %s" % ", ".join(unknown)})
-    global_mul, blob_info, blob_warn = _blob_check(spans, f0r, ranges)
+    done = [r for i, r in enumerate(ranges) if i not in pending]
+    global_mul, blob_info, blob_warn = _blob_check(spans, f0r, done)
     warnings += blob_warn
     _score(spans, f0r, float(np.mean(total_confs)) if total_confs else 0.5, global_mul)
     warnings += _length_warnings(spans)
@@ -169,16 +194,18 @@ def align_lyrics_ranges(x, sr, entries, f0r=None, source="take", use_pyopenjtalk
     voiced = [p for p in spans if p.label != "silence"]
     conf = float(np.mean([p.confidence for p in voiced])) if voiced else 0.0
     syll = _syllables_of(spans)
-    aligner = dict(_al_info(al), revision=ALIGN_REVISION, failed_entries=failed,
+    aligner = dict(al_info or {}, revision=ALIGN_REVISION, failed_entries=failed,
                    rtf=round(elapsed / max(audio_sec, 1e-6), 4),
                    elapsed_sec=round(elapsed, 4),
                    total_confidence=(round(float(np.mean(total_confs)), 3)
                                      if total_confs else None),
                    entries=len(entries), aligned_sec=round(audio_sec, 3))
+    if pending:
+        aligner["pending_entries"] = pending
     aligner.update(blob_info)
     log.get("phoneme").info(
-        "%s を %d 音素にアライン（区間 %d / 音 %.1f s / %.2f s / RTF %.3f / 確信度 %.2f）",
-        source, len(voiced), len(entries), audio_sec, elapsed,
+        "%s を %d 音素にアライン（区間 %d・未解析 %d / 音 %.1f s / %.2f s / RTF %.3f / 確信度 %.2f）",
+        source, len(voiced), len(entries), len(pending), audio_sec, elapsed,
         elapsed / max(audio_sec, 1e-6), conf)
     return PhonemeResult(
         source=source, lyrics=LY.text_of(entries), kana=" ".join(kana_parts),
@@ -189,6 +216,79 @@ def align_lyrics_ranges(x, sr, entries, f0r=None, source="take", use_pyopenjtalk
              "n_syllables": len(syll), "merge_long_vowels": True,
              "devoiced": devoiced},
         duration_sec=dur)
+
+
+def entry_plan(entries, ranges, dur, sr, pad_sec=PAD_SEC, use_pyopenjtalk=True,
+               detect_breath=True):
+    """区間ごとの切り出しと鍵: [(i, entry, s0, s1, a, b, ia, ib, key)]。
+    切り出しは前後 `pad_sec` だけ広げ、隣の区間には食い込まない。"""
+    out = []
+    for i, (e, (s0, s1)) in enumerate(zip(entries, ranges)):
+        lo = 0.0 if i == 0 else ranges[i - 1][1]
+        hi = dur if i == len(entries) - 1 else ranges[i + 1][0]
+        a = max(0.0, lo, s0 - pad_sec)
+        b = min(dur, hi, s1 + pad_sec)
+        ia, ib = int(round(a * sr)), int(round(b * sr))
+        out.append((i, e, s0, s1, a, b, ia, ib,
+                    part_key(e, ia, ib, sr, detect_breath, use_pyopenjtalk)))
+    return out
+
+
+def part_key(entry, ia, ib, sr, detect_breath=True, use_pyopenjtalk=True):
+    """part の鍵（切り出しの範囲・歌詞・読み・設定・アラインの版）。音声そのものは鍵に入れない
+    （part の置き場が音声ごとに分かれている。`Project._phoneme_parts`）。"""
+    return json.dumps([ALIGN_REVISION, int(sr), int(ia), int(ib), entry["text"],
+                       entry.get("reading"), bool(detect_breath),
+                       bool(use_pyopenjtalk and G.pyopenjtalk_available())],
+                      ensure_ascii=False)
+
+
+def _n_syllables(entry, use_pyopenjtalk):
+    """まだ計算していない区間の音節の数（後ろの区間の音節の番号を、全部計算したときと揃える）。"""
+    try:
+        with _ALIGN_LOCK:
+            return len(G.g2p(entry.get("reading") or entry["text"],
+                             use_pyopenjtalk=use_pyopenjtalk, merge_long=True).syllables)
+    except Exception:                                    # noqa: BLE001  計算するときに失敗として残る
+        return 0
+
+
+def _align_entry(x, sr, e, i, s0, s1, ia, ib, al, detect_breath, use_pyopenjtalk):
+    """1 区間をアラインして part（JSON にそのまま書ける dict）にする。
+
+    音素の秒は切り出しの位置を足した後（頭・尻の無音を落とした後）、音節の番号は区間の中の番号。
+    失敗は `error` に入れる（区間に閉じ込める。issue #58）。環境の問題（`AlignerSetupError`）は上げる。"""
+    res = None
+    try:
+        seg = np.asarray(x)[ia:ib]
+        if len(seg) < int(0.05 * sr):
+            raise ValueError("歌詞の区間 %.3f〜%.3f 秒に音が無い" % (s0, s1))
+        with _ALIGN_LOCK:
+            res = G.g2p(e.get("reading") or e["text"],
+                        use_pyopenjtalk=use_pyopenjtalk, merge_long=True)
+            out = al.align(seg, sr, res.romaji_seq, detect_breath=detect_breath)
+        part = _attach_text(out["phonemes"], res, out.get("used_words"))
+    except AlignerSetupError:
+        raise
+    except Exception as err:                             # noqa: BLE001  区間の失敗は区間に閉じ込める
+        msg = str(err) or type(err).__name__
+        log.get("phoneme").warning("歌詞の区間 %d（%.2f〜%.2f 秒 %r）の音素アラインに失敗: %s",
+                                   i, s0, s1, e["text"][:30], msg)
+        return {"error": msg, "kana": res.kana if res is not None else None,
+                "n_syll": len(res.syllables) if res is not None else 0, "al": _al_info(al)}
+    if detect_breath and out["breaths"]:
+        part = _insert_breaths(part, out["breaths"])
+    off = ia / float(sr)
+    for p in part:
+        p.start_sec = round(p.start_sec + off, 4)
+        p.end_sec = round(p.end_sec + off, 4)
+    part = _trim_edges(part)
+    return {"spans": [asdict(p) for p in part], "n_syll": len(res.syllables),
+            "kana": res.kana, "lab": res.lab_line(),
+            "elapsed": out["elapsed_sec"], "rtf": out["rtf"],
+            "total_conf": out["total_confidence"],
+            "unknown": list(out["unknown_syllables"]), "devoiced": list(res.devoiced),
+            "al": _al_info(al)}
 
 
 def _r(v, nd=4):

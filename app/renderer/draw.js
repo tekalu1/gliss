@@ -8,6 +8,7 @@ import {
 } from './state.js';
 import { withKey } from './keys.js';
 import { asrCandidate, asrRunning } from './asr.js';
+import { analyzing, pendingEntries } from './phonemes.js';
 import { syncAppMenu, undoLabels } from './commands.js';
 import { guideShown } from './session.js';
 import {
@@ -1248,6 +1249,7 @@ export function render() {
       s += `<text x="${f1(mx)}" y="${ROLL_B + 19}" text-anchor="middle" font-size="13" fill="${isSel(n.id) ? SEL : '#d6d6d6'}" pointer-events="none">${esc(n.text)}</text>`;
     }
   }
+  s += pendingLane(ROLL_B);
   s += asrLane(ROLL_B, cand);
   if (dr && dr.type === 'lane' && dr.moved) {
     const lx = Math.min(dr.x0, dr.x1); const lw = Math.abs(dr.x1 - dr.x0);
@@ -1263,6 +1265,23 @@ export function render() {
   svg.innerHTML = s;
   renderToolbar();
   for (const fn of hooks.render) fn();
+}
+
+/** 音素をまだ解析していない歌詞の区間（2026-10-10 承認）: 点線の枠と「解析中…」（裏で解析している）・「未解析」。 */
+function pendingLane(ROLL_B) {
+  let s = '';
+  const label = analyzing() ? '解析中…' : '未解析';
+  for (const i of pendingEntries()) {
+    const e = S.lyricsEntries[i];
+    if (!e) continue;
+    const whole = e.start_sec == null;
+    const x0 = Math.max(KEYS_W, X(toEdited(whole ? 0 : e.start_sec)));
+    const x1 = Math.min(W, X(toEdited(whole ? S.vd.duration_sec : e.end_sec)));
+    if (x1 - x0 < 2) continue;
+    s += `<rect data-ph-pending="${i}" x="${f1(x0)}" y="${ROLL_B + 26}" width="${f1(x1 - x0)}" height="16" rx="2" fill="#18181b" stroke="#5c5c62" stroke-dasharray="3 3" pointer-events="none"/>`;
+    if (x1 - x0 > 46) s += `<text x="${f1(x0 + 5)}" y="${ROLL_B + 38}" font-size="10" fill="#7a7a80" pointer-events="none">${label}</text>`;
+  }
+  return s;
 }
 
 /** 聞き取り（issue #54）: 聞き取っている区間の枠と、候補の文字（歌詞レーンの上段に薄く。語は聞こえた時刻に置く）。 */

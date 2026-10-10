@@ -116,6 +116,12 @@ F0 のモデルや既定を替えて素材のテストが落ちたら、環境�
 回帰値（`regression-baseline.json`）は素材が変われば変わるので、素材を差し替えたら作り直す:
 `python engine/tests/regression_measure.py`（素材と重みが要る）。
 
+**音素の解析を待たせない速さの試験**（`engine/tests/test_phoneme_speed.py`。2026-10-10 承認）: `SONG` と HubertFA の重みが要る（無ければ skip）。
+歌詞の 1 区間を 3 回直したときの応答（`set_lyrics` → `analyze_take` → `export_view_data`）と、直した区間を裏で解析し終える
+までの時間、音素のキャッシュを消した曲を開くまでと、開いた後に裏で解析し終えるまでの時間を測る。上限は直した後の実測の
+中央値の 1.5 倍（直す前のテイク全体の合わせ直しに戻れば落ちる）で、ほかの重い処理と並べて流すと落ちることがある。落ちたら単独で
+流し直し、`-s` で出る実測を見る。
+
 ## テストの決まりごと
 
 - **テストは音を一切出さない**: `app/playwright.config.js` が `VOCAL_EDITOR_MUTE=1` を入れ、各テストも `--mute` で起動する

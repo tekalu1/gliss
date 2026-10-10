@@ -139,7 +139,7 @@ undo()                        # 修正を戻す
 | `from_text` | string | null | 歌詞ファイルの中身。1 行 = `開始 終了 歌詞`（`2:24.30` 形式も可）。`#` と空行は飛ばす |
 | `source` | string | `"take"` | `"take"` か `"guide"`。**ガイドにも入れるとタイミング補正が直接アラインになる** |
 | `mode` | string | `"replace"` | `"replace"`（重なる区間を消してから入れる）/ `"add"`（重なりを許さず足す） |
-| `reanalyze` | bool | true | すぐアラインし直す。false なら次の `analyze_take` に任せる |
+| `reanalyze` | bool | true | 変わった区間の音素を合わせ直す。テイクは裏で解析して待たない（下）。false なら次の `analyze_take` に任せる |
 
 歌詞の書き方（どれでも通る）:
 
@@ -174,6 +174,34 @@ warnings[], aligner, rtf, elapsed_sec, aligned_sec, per_entry[], next}`
 
 > **アラインするのは歌詞を付けた区間だけ。** 158 秒のテイクでも、4 区間 9.6 秒ぶんを
 > 1.2 秒で処理する（区間の外の 148 秒は触らない）。
+
+**変わった区間だけを、テイクは裏で合わせ直す**（2026-10-10 承認）: 音素は歌詞の区間（フレーズ）ごとに計算して
+`cache/phonemes/` に区間の歌詞・範囲・音声の鍵で残す。歌詞を直すと、変わった区間だけが未解析になり、ほかの区間は残した
+結果をそのまま使う（テイク全体をアラインし直さない。区間の境目の音素は、全体をアラインし直したときと同じ位置・ラベル）。
+
+- テイクの未解析の区間は裏の準備（§3-2）が解析する。`set_lyrics` は解析を待たずに返り、返り値に
+  `phonemes_state`（`"ready"` = 全区間そろった / `"analyzing"` = 裏で解析中・解析待ち / `"pending"` = 自動では解析しない）と
+  `pending_entries`（まだ音素の無い区間の番号）が入る。済んだかは `phoneme_status`。それまでの音素は、未解析の区間を
+  除いたもの（`get_phonemes` の `aligner.pending_entries` にも同じ番号）。
+- ガイドの音素は `set_lyrics` の中で計算する（待つ）。
+- 「歌詞と音素を自動で解析する」（`set_auto_phonemes`）が切なら解析しない（`"pending"`）。`analyze_phonemes` を呼んだときに解析する。
+- 音節を組にする操作（`set_note_syllable`）は全区間がそろった音素で数えるので、その場で足りない区間を計算する
+  （手動の設定で未解析の区間があれば、`analyze_phonemes` を先に呼ぶようエラーで返す）。
+
+### `analyze_phonemes(wait?)` / `phoneme_status()` / `set_auto_phonemes(enabled?)`（2026-10-10 承認）
+
+画面の「編集 > 音素を解析」と「歌詞と音素を自動で解析する」の設定。
+
+| ツール | 動き |
+|---|---|
+| `analyze_phonemes(wait=false)` | テイクの歌詞と音素のうち、まだ解析していないものを解析する。歌詞の無い発声区間があれば、まだ推定していないとき歌詞を推定する。設定が切でも解析する。済んだ区間は計算し直さない。`wait=false` は裏の準備に急ぎで頼んで返る（操作の途中でも止まらない）。`wait=true` はここで計算して全区間がそろった結果を返す。返り値 `{phonemes_state, pending_entries, inferred_entries, n_entries}`。歌詞が無ければ `phonemes_state: "no_lyrics"` |
+| `phoneme_status()` | 裏の音素の解析の状態。**エンジンのロックを取らない**（ほかの処理の最中でもすぐ返る）。`state`: `"queued"`（解析待ち。操作の間は止めている）/ `"preparing"`（解析中）/ `"ready"` / `"failed"`（`error`）/ null（頼んでいない）。`gen`（区間を足すたびに増える。変わったら `get_phonemes`・`export_view_data` を取り直す）・`paused`（操作の間で待っている）・`auto`（設定）・`pending_entries`（最後に組んだ音素で未解析の区間の番号。計算はしない） |
+| `set_auto_phonemes(enabled?)` | 「歌詞と音素を自動で解析する」（既定 オン）。オンなら、曲を開いた・歌詞を直したときに足りない区間を裏で解析する。切なら自動では何も解析しない（歌詞の推定も音素も）。切からオンにすると、開いている曲の足りない区間を裏で解析し始める。省くと今の値を返す。返り値 `{auto}` |
+
+- 画面は設定を `state.json` の `autoPhonemes` に残し、起動時に環境変数 `GLISS_AUTO_PHONEMES`（`1` / `0`）でエンジンに渡す。
+  既定値はエンジンの `project/store.py` の 1 か所だけ（切に変えると、完全に手動 = 「音素を解析」を押したときだけ解析する）。
+- 画面は未解析の区間を歌詞のレーンに点線の枠で示し（裏で解析中は「解析中…」、手動の設定で未解析なら「未解析」）、
+  未解析の区間がある間だけ `phoneme_status` を読んで、区間が増えたら描き直す。
 
 ### `inspect_lyrics_score(path)` / `import_lyrics(path, track?, dry_run?, song_start_sec?, reanalyze?, author?)`
 
@@ -1137,6 +1165,14 @@ DAW（ARA）の文書で、修飾ごとにガイドを決める手順（外部�
 - 表で解析が要るとき（`analyze_take` を呼ばずに `list_notes` などを呼んだ・歌詞を入れて音素を取る）は、そのトラックの
   準備が順番待ち・準備中なら最優先にして待ち、計算は裏の 1 回で済ませる。表が自分で計算する間は、裏は同じトラックを
   始めない。
+- **テイクの音素はトラックの準備に含めない**（2026-10-10 承認）。開いた曲・直した歌詞の足りない区間は、プロジェクトごとの
+  音素の仕事にして区間ごとに計算し、`cache/phonemes/` に足す（表は次に読んだときに組み直す。`set_lyrics` の
+  「変わった区間だけを、テイクは裏で合わせ直す」）。曲を開いても歌詞を直しても待たせない。
+  - 順番: 合流・今のトラックの準備 → 「音素を解析」（`analyze_phonemes`）と表から頼まれた音素 → ほかのトラックの準備 →
+    裏の準備から頼まれた音素。仕事の中は、編集した区間（伸ばす・切るなどの範囲に重なる歌詞の区間）から先に。
+  - 利用者が操作している間は進めない: 表の重い処理・`pause_prep` の間と、表の保存（編集）から 1 秒は区間の間で待つ
+    （`analyze_phonemes` は待たない）。歌詞がまた変わったら、区間の間で止めて新しい歌詞で続ける。
+  - 「歌詞と音素を自動で解析する」が切なら頼まない（`analyze_phonemes` だけ）。
 - 別のプロセスのエンジン（画面と Claude Code）とは、準備の間 `<プロジェクト>/prep.lock` の OS のロックを握って
   同じトラックを同時に準備しない（握られていれば後回し。落ちたプロセスのロックは OS が外す）。`cache/preparing.json`
   （pid と時刻）は状態を見る人向けの印で、準備の間 5 秒ごとに時刻を更新する。
@@ -1438,7 +1474,7 @@ AI のエンジンは**呼び出しをプラグインのエンジンへ転送す
 | **保存・書き出し** | `save_project`・`export_wav`・`prepare_asr_model`（聞き取り用の数 GB のモデルをダウンロードして書く）、`render_region(path=…)`・`export_view_data(path=…)`・`render_preview(name=<フォルダーを含むパス>)`（ユーザーが指定した場所に書くとき） |
 | AI からは呼べない | DAW のプラグイン専用の `ara_*`（§3-4。`bridge.py` の `ARA_TOOLS`。`permission: "ara"` で断る） |
 | 許可なしで呼べる（DAW の文書） | `ara_documents`・`ara_attach`・`ara_detach`・`export_edits`（§3-4・§3-5。選んだ後のツールは DAW の Gliss の `GLISS_ARA_AI` に従い、`bridge.json` の許可は見ない） |
-| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`measure_against_guide`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info`・`set_render_version()`（替えずに音が変わる所を見るだけ） |
+| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`measure_against_guide`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・音素の解析（`analyze_phonemes`・`phoneme_status`・`set_auto_phonemes`）・`engine_info`・`set_render_version()`（替えずに音が変わる所を見るだけ） |
 
 `select_track` は編集対象を切り替えるだけ（履歴に入らない）なので許可なし。`plan_edit` は計画を作るだけで、当てるのは `apply_plan`（編集）。
 `transcribe` は候補を返すだけで確定の歌詞を変えない（取り込む `set_lyrics` / `set_note_syllable` が編集）。`prepare_asr_model` は大きなダウンロードを AI が勝手に始めないよう「保存・書き出し」に入れている。

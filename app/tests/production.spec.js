@@ -87,6 +87,8 @@ test('(1) 歌詞レーンのダブルクリックは「その位置の発声区�
   await win.locator('#lyrIn').fill(M.text('C.part1'));
   await win.keyboard.press('Enter');
   await settle();
+  // 直した区間の音素は裏で解析する（2026-10-10 承認）
+  await win.waitForFunction(() => window.__app.phonemeState().pending.length === 0, null, { timeout: 60000 });
 
   const es = await entries();
   expect(es.length).toBe(1);

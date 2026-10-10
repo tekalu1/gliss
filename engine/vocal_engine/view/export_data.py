@@ -290,7 +290,8 @@ def _phoneme_block(project, pres, src_pts, out_pts, t0, t1):
         project.estimated_excluded_note_ids())
     devs = []
     try:
-        if project.guide is not None:
+        # 未解析の区間がある間は出さない（全区間の音素が要るので、ここで計算すると編集・曲を開くのを待たせる）
+        if project.guide is not None and not pres.aligner.get("pending_entries"):
             devs, _ = project.boundary_deviations()
     except Exception:                          # noqa: BLE001
         devs = []
@@ -342,6 +343,8 @@ def _phoneme_block(project, pres, src_pts, out_pts, t0, t1):
         "phonemes": phs, "boundaries": bds, "syllables": sylls,
         "warnings": pres.warnings, "entries": list(pres.entries),
         "min_phoneme_ms": 20.0,
+        # まだ音素を解析していない歌詞の区間の番号（裏で解析中・手動の設定。2026-10-10 承認）
+        "pending_entries": list(pres.aligner.get("pending_entries") or []),
     }
 
 
@@ -350,6 +353,11 @@ def _no_phonemes(project, pres=None):
 
     全体の失敗（`phoneme_error`）と、すべての区間が失敗して音素が 1 つも無い結果の両方。"""
     err = project.phoneme_error("take") if project.has_lyrics("take") else None
+    pending = list((pres.aligner.get("pending_entries") if pres is not None else None) or [])
+    if err is None and pending:
+        return {"supported": True, "has_lyrics": True, "phonemes": [], "boundaries": [],
+                "syllables": [], "entries": list(pres.entries), "pending_entries": pending,
+                "reason": "音素をまだ解析していない"}
     if err is None and pres is not None:
         fails = [w for w in pres.warnings if w.get("kind") == "align_failed"]
         if fails:

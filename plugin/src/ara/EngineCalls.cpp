@@ -28,7 +28,7 @@ bool shouldSyncAfter (const juce::String& tool, const juce::var& result)
     static const juce::StringArray readOnly { "export_view_data", "track_overview", "prep_status", "engine_info", "asr_status",
                                               "project_status", "plan_edit", "render_audition", "inspect_lyrics_score",
                                               "cancel_job", "render_region", "render_preview", "render_view", "remeasure",
-                                              "transcribe", "pause_prep" };
+                                              "transcribe", "pause_prep", "phoneme_status" };
     return ! (readOnly.contains (tool) || tool.startsWith ("list_") || tool.startsWith ("get_"));
 }
 
