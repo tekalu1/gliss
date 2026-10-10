@@ -495,6 +495,7 @@ class Project:
         self._media_changed = False
         self._onset_sigs = {}
         self.guide_take_cache_path = None  # セッション中のガイドトラック自身の解析結果
+        self.guide_peer_dirs = ()          # 同じガイドを使うほかのトラック・ガイドのトラックのプロジェクト（`_shared_guide_f0`）
         self._guide_cache_path = None
         # 裏の準備用のインスタンス（`prep.py`。issue #63）: project.json と、今の組み合わせを指す写し
         # （cache/guide-analysis.json など）は書かず、鍵付きの保存だけに書く。project.json へは
@@ -1102,20 +1103,26 @@ class Project:
                 int(info["sr"]), int(info.get("offset_frames") or 0), int(info["frames"]),
                 bool(info.get("pad"))]
 
+    @staticmethod
+    def _guide_cache_name(key):
+        return hashlib.sha256(json.dumps(key, ensure_ascii=False, sort_keys=True).encode(
+            "utf-8")).hexdigest()[:24]
+
     def _guide_cache_dir(self, kind, key):
         """別トラックの Project で準備しても同じ結果に到達する鍵付きの置き場。"""
-        digest = hashlib.sha256(json.dumps(key, ensure_ascii=False, sort_keys=True).encode(
-            "utf-8")).hexdigest()[:24]
-        return os.path.join(self.sub(os.path.join("cache", "guide", kind)), digest)
+        return os.path.join(self.sub(os.path.join("cache", "guide", kind)), self._guide_cache_name(key))
 
-    def _guide_analysis_cache_dir(self, estimator, sweep):
-        """F0・音符・発音の頭はガイドの切り出しと解析設定だけに依存する。"""
-        key = [1, self._clip_cache_identity(self.guide), estimator, bool(sweep),
+    def _guide_analysis_key(self, info, estimator, sweep):
+        key = [1, self._clip_cache_identity(info), estimator, bool(sweep),
                RMVPE_THRESHOLD, ENERGY_FLOOR_DB]
         version = self._gliss_version_for(estimator) or f0mod.estimator_version(estimator)
         if version is not None:
             key.append(version)   # 方式の中身を変えたら作り直す（RMVPE は前と同じ鍵）
-        return self._guide_cache_dir("analysis", key)
+        return key
+
+    def _guide_analysis_cache_dir(self, estimator, sweep):
+        """F0・音符・発音の頭はガイドの切り出しと解析設定だけに依存する。"""
+        return self._guide_cache_dir("analysis", self._guide_analysis_key(self.guide, estimator, sweep))
 
     def _alignment_cache_dir(self):
         """歌詞や編集で取り直し区間が変わっても、従来どおり DTW を使い回す。"""
@@ -1157,15 +1164,38 @@ class Project:
                 result = F0Result.from_json(json.load(f)["f0"])
         except (OSError, ValueError, KeyError, TypeError):
             return None
-        same_estimator = self._same_take_estimator(result.estimator, result.meta.get("version"), estimator)
+        return result if self._f0_fits(result, g, estimator, sweep) else None
+
+    def _f0_fits(self, result, info, estimator, sweep, latest=False):
+        """ほかのプロジェクトで解析した F0 が、info の音声をこの方式・設定で解析したものと同じか。"""
+        same_estimator = self._same_take_estimator(result.estimator, result.meta.get("version"), estimator, latest)
         vuv_rule = "%s f0>0 AND rms > %.1f dBFS" % (result.estimator, ENERGY_FLOOR_DB)
         if not same_estimator or bool(result.meta.get("sweep")) != bool(sweep) or \
                 result.meta.get("threshold") != RMVPE_THRESHOLD or \
-                result.meta.get("vuv_rule") != vuv_rule or result.sr != int(g["sr"]) or \
+                result.meta.get("vuv_rule") != vuv_rule or result.sr != int(info["sr"]) or \
                 result.hop_s != 0.01:
-            return None
-        expected = int(np.floor(int(g["frames"]) / result.sr / result.hop_s)) + 1
-        return result if result.n_frames == expected else None
+            return False
+        expected = int(np.floor(int(info["frames"]) / result.sr / result.hop_s)) + 1
+        return result.n_frames == expected
+
+    def _shared_guide_f0(self, name, info, estimator, sweep, latest=False):
+        """同じガイドを使うほかのトラックが、鍵付きの置き場 `cache/guide/analysis/<name>` にもう作ったガイドの F0。
+
+        置き場の名前はガイドの切り出しと解析の設定だけで決まる（`_guide_analysis_key`）ので、ほかのトラックの
+        同じ名前の置き場は同じ入力から作ったもの。開いた順・準備の順に関係なく、ガイドの F0 を 1 回だけ計算する
+        （2026-10-10 承認）。無ければ None。"""
+        for pdir in self.guide_peer_dirs:
+            path = os.path.join(pdir, "cache", "guide", "analysis", name, "guide-analysis.json")
+            if not os.path.exists(path):
+                continue
+            try:
+                result = F0Result.from_json(read_json(path)["f0"])
+            except (OSError, *_BROKEN_ERRORS):
+                continue                                 # 書きかけ・壊れている: そのトラックのものは使わない
+            if self._f0_fits(result, info, estimator, sweep, latest):
+                log.get().info("ガイドの F0 をほかのトラックの解析から使う: %s", os.path.basename(pdir))
+                return result
+        return None
 
     def guide_timing(self):
         """ガイドのリズムの基準（ガイドの時刻 + 全体のずれ）と発音の頭の組（`analysis/guide_timing.py`）。
@@ -1317,12 +1347,17 @@ class Project:
             if found is not None:
                 f0r, notes = found               # 前に同じ方式で解析した: 計算し直さない（2026-10-10 承認）
             else:
-                x, sr = self.audio("take")
-                kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
-                old_version = self._gliss_version_for(estimator, latest)
-                if old_version:
-                    kwargs["gliss_version"] = old_version
-                f0r = estimate_f0(**kwargs)
+                # ガイドのトラック: それをガイドにするトラックがもう解析したガイドの F0 があれば、それを使う
+                f0r = None if force or not self.guide_peer_dirs else self._shared_guide_f0(
+                    self._guide_cache_name(self._guide_analysis_key(self.take, estimator, sweep)),
+                    self.take, estimator, sweep, latest)
+                if f0r is None:
+                    x, sr = self.audio("take")
+                    kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
+                    old_version = self._gliss_version_for(estimator, latest)
+                    if old_version:
+                        kwargs["gliss_version"] = old_version
+                    f0r = estimate_f0(**kwargs)
                 notes = segment_notes(f0r, source="take")
             self._take_f0, self._take_notes = f0r, notes
             tmp = _tmp_name(take_cache)
@@ -1380,6 +1415,8 @@ class Project:
             else:
                 enter("guide_f0")
                 gf0 = self._guide_f0_from_track(estimator, sweep)
+                if gf0 is None and not force:
+                    gf0 = self._shared_guide_f0(os.path.basename(guide_dir), self.guide, estimator, sweep, latest)
                 if gf0 is None:
                     gx, gsr = self.audio("guide")
                     kwargs = {"x": gx, "sr": gsr, "estimator": estimator, "sweep": sweep}

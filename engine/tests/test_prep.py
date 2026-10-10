@@ -161,9 +161,9 @@ def test_added_track_is_prepared_and_select_uses_cache(env):
     tb = r["track"]
     _until(_ready(prep, t1, tb, g))
     assert fake.f0_count("take") == 1 and fake.f0_count("b") == 1
-    # ガイドの F0: 今のトラック（最優先）のためにガイドとして 1 回、ガイドのトラック自身のテイクとして 1 回。
-    # 後から準備した b は、ガイドのトラックの F0 を使い回す
-    assert fake.f0_count("g1") == 2
+    # ガイドの F0 は 1 回: 今のトラック（最優先）のためにガイドとして求め、ガイドのトラック自身のテイクと
+    # 後から準備した b はそれを使い回す（2026-10-10 承認）
+    assert fake.f0_count("g1") == 1
     assert sorted(fake.calls["dtw"]) == [(220, 330), (440, 330)]
     lt = _ok(mt.list_tracks())
     prepd = {t["id"]: t["prep"] for t in lt["tracks"]}

@@ -156,3 +156,33 @@ def test_set_lyrics_then_analyze_take_keeps_guide_f0_and_dtw(tmp_path, monkeypat
     assert p._alignment_cache_dir() == alignment_dir
     for kind in ("analysis", "alignment"):
         assert len(os.listdir(os.path.join(p.dir, "cache", "guide", kind))) == 1
+
+
+def test_guide_f0_is_shared_between_tracks_of_the_same_guide(tmp_path, monkeypatch):
+    """同じガイドを使うトラックの間で、ガイドの F0 を分け合う（`guide_peer_dirs`。2026-10-10 承認）。
+    ガイドのトラック自身のテイクの F0 にも使う。force（解析し直し）は分け合わずに求め直す。"""
+    calls = _fake_analysis(monkeypatch)
+    guide = _audio(tmp_path, "guide", 330)
+    a = Project.open(_audio(tmp_path, "a", 220), guide, project_dir=str(tmp_path / "a"))
+    a.analyze(auto_lyrics=False)
+    assert calls["f0"] == 2
+
+    b = Project.open(_audio(tmp_path, "b", 440), guide, project_dir=str(tmp_path / "b"))
+    b.guide_peer_dirs = (a.dir,)
+    b.analyze(auto_lyrics=False)
+    assert calls["f0"] == 3  # b のテイクだけ
+    np.testing.assert_array_equal(b.guide_f0.f0, a.guide_f0.f0)
+
+    g = Project.open(guide, project_dir=str(tmp_path / "g"))
+    g.guide_peer_dirs = (str(tmp_path / "missing"), a.dir)
+    g.analyze(auto_lyrics=False)
+    assert calls["f0"] == 3  # ガイドのトラックのテイクは a のガイドの F0
+    np.testing.assert_array_equal(g.take_f0.f0, a.guide_f0.f0)
+
+    other = Project.open(_audio(tmp_path, "c", 550), guide, project_dir=str(tmp_path / "c"))
+    other.guide_peer_dirs = (a.dir,)
+    other.analyze(auto_lyrics=False, estimator="praat")
+    assert calls["f0"] == 5  # 方式が違えば使わない
+
+    b.analyze(force=True, auto_lyrics=False)
+    assert calls["f0"] == 7  # 解析し直し: テイクもガイドも求め直す

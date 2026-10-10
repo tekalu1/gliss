@@ -634,6 +634,7 @@ class Session:
             p = Project.open(tclip, gclip, project_dir=pdir,
                              reuse=reuse, lyrics=lyrics, guide_lyrics=guide_lyrics)
             p.estimator_pref = self.estimator_of(t)
+            p.guide_peer_dirs = self._guide_peer_dirs(t)
             if gclip is not None:
                 p.guide_take_cache_path = self._guide_take_cache_path(t)
             missing = (why or "").startswith("ガイドの音声が見つからない") or (
@@ -649,6 +650,16 @@ class Session:
         if gt is None or not gt.get("project_dir"):
             return None
         return os.path.join(self.project_dir_of(gt), "cache", "take-analysis.json")
+
+    def _guide_peer_dirs(self, t):
+        """ガイドの F0 を分け合うトラックのプロジェクト（`Project._shared_guide_f0`。2026-10-10 承認）:
+        同じガイドを使うほかのトラックと、t をガイドにしているトラック。"""
+        users = self.guide_users()
+        g = self.effective_guide_id(t)
+        ids = [u for u in users.get(g, []) if u != t["id"]] if g else []
+        ids += [u for u in users.get(t["id"], []) if u not in ids]
+        by_id = {x["id"]: x for x in self.tracks}
+        return tuple(self.project_dir_of(by_id[u]) for u in ids if by_id.get(u, {}).get("project_dir"))
 
     def take_matches(self, t, take):
         """プロジェクトのテイク（media の dict）が、トラックの素材（中身・範囲）と同じか。"""
@@ -702,6 +713,7 @@ class Session:
                 q = Project(pdir).load()
         q.background = True
         q.estimator_pref = self.estimator_of(t)      # 表で明示した方式を、準備が既定の方式で上書きしない
+        q.guide_peer_dirs = self._guide_peer_dirs(t)
         if ginfo is None:
             q.guide = None
             q.lyrics.pop("guide", None)
