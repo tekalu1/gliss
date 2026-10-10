@@ -150,7 +150,7 @@ export const COMMANDS = [
   ['preview-notes', 'つかんだノートを鳴らす', GR.play, [], () => setPreviewEnabled(!previewEnabled()), null,
     () => previewEnabled()],
   ['audition-selected', '選択ノートを試聴', GR.play, ['P'], (ctx) => beginSelectedAudition({ once: ctx?.source !== 'keyboard' }),
-    () => selectedNotes().some((n) => n.kind === 'note')],
+    () => selectedBlocks().length > 0],
   // 原音と比べる（プラグインだけ。Melodyne の比較と同じ）: キャッシュを読まずに原音を返す
   ...(ARA ? [['ara-compare', '原音と比べる', GR.play, [], () => araCompare(!araFeatures().compare), null,
     () => araFeatures().compare]] : []),

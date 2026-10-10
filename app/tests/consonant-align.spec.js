@@ -3,6 +3,7 @@
 //   (A7) 選んである子音を押しても選択を保つ。複数を選んで動かすと、選んだ区間（音程ノートも子音も）がまとめて横に動く。
 //        音高のドラッグは音程ノートだけ
 //   (A8) 範囲選択（空白からドラッグ）・Ctrl+A に子音・息が入る。入っても、音程の操作は音程ノートだけに効く
+//   (A9) つかんでいる間は子音・息も鳴る（つかんだノートを鳴らす）。選んだものを聞く（P）も子音・息を対象にする
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -181,6 +182,30 @@ test('(A8) 空白からの範囲選択で、範囲にかかった子音・息も
   await win.mouse.up();
   expect(await sel()).not.toContain(U.id);
   await select([]);
+});
+
+test('(A9) 子音を押している間は鳴る。離すと止まる', async () => {
+  await select([]);
+  await view(U);
+  await win.evaluate(() => window.__app.setPreviewEnabled(true, { save: false }));
+  const b = await body(U.id).boundingBox();
+  await win.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await win.mouse.down();
+  await win.waitForFunction((id) => window.__app.previewState().note === id, U.id);
+  await win.mouse.up();
+  await win.waitForFunction(() => window.__app.previewState().note == null);
+});
+
+test('(A9) 子音だけを選んで P（押している間）で試聴する。何も選んでいなければ使えない理由が出る', async () => {
+  await select([U.id]);
+  await win.locator('#mock').focus();
+  await win.keyboard.down('p');
+  await win.waitForFunction((id) => window.__app.previewState().note === id, U.id);
+  await win.keyboard.up('p');
+  await win.waitForFunction(() => window.__app.previewState().note == null);
+  await select([]);
+  await win.keyboard.press('p');
+  expect(await win.evaluate(() => window.__app.status())).toContain('今は使えない');
 });
 
 test('エラーなし', () => {

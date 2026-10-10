@@ -95,7 +95,7 @@ function dragBlocks(id) {
 }
 
 export function beginSelectedAudition({ once = false } = {}) {
-  const id = S.sel.find((n) => S.byId.get(n)?.pitch_editable);
+  const id = S.sel.find((n) => AUDITION_KINDS.has(S.byId.get(n)?.kind));
   if (!id) { status('試聴するノートを選んでください'); return; }
   beginAudition(id);
   if (once) {
@@ -212,6 +212,7 @@ function onDown(e) {
     }
     svg.setPointerCapture(e.pointerId);
     if (ARA) beginAudition(n.id);
+    else startPreview(n.id);                 // 音程ノートと同じ（つかんだ区間を鳴らす。cents 0）
     render();
     return;
   }
