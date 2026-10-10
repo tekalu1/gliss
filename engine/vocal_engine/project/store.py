@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import threading
+import time
 from collections import OrderedDict
 from threading import Lock
 
@@ -271,8 +272,12 @@ def front(pdir, wait=True):
     @contextlib.contextmanager
     def ctx():
         held.add(key)
+        t0 = time.perf_counter()
         try:
             with PREP_FRONT(pdir, wait=wait):
+                waited = time.perf_counter() - t0
+                if waited >= 0.05:
+                    log.get().info("front wait=%.2f（裏の準備の終わりを待った）", waited)
                 yield True
         finally:
             held.discard(key)
@@ -1258,6 +1263,15 @@ class Project:
             elif cancel is not None and cancel.is_set():
                 raise InterruptedError("解析を取り消した")
 
+        laps = {}
+        lap_at = [time.perf_counter()]
+
+        def lap(name):
+            # 段ごとの秒（ログの `analyze …` の行。キャッシュを読んだだけの段も載る）
+            t = time.perf_counter()
+            laps[name] = laps.get(name, 0.0) + t - lap_at[0]
+            lap_at[0] = t
+
         def enter(name):
             if stage is not None:
                 stage(name)
@@ -1323,6 +1337,7 @@ class Project:
         }
         if self._take_f0.meta.get("version") is not None:
             self.analysis["take"]["estimator_version"] = self._take_f0.meta["version"]
+        lap("take_f0")
         advance(0.45)
 
         # 歌詞が未設定の発声区間だけを推定する。初回解析のベース状態とし、
@@ -1334,6 +1349,7 @@ class Project:
                 self._infer_missing_lyrics()
             except Exception as e:  # 推定失敗はピッチ解析を妨げない
                 log.get("phoneme").warning("歌詞の自動推定をスキップ: %s", e)
+            lap("lyrics")
 
         if with_guide and self.guide is not None:
             guide_dir = self._guide_analysis_cache_dir(estimator, sweep)
@@ -1370,6 +1386,7 @@ class Project:
             self.analysis["guide"] = {
                 "analyzed_at": t0, "n_frames": int(self._guide_f0.n_frames),
                 "n_notes": len(self._guide_notes), "cache": g_cache}
+            lap("guide_f0")
             advance(0.65)
 
             a_cache = self._cache_path("alignment.json")
@@ -1415,6 +1432,7 @@ class Project:
                     if publish:
                         self._publish_cache(keyed_alignment, a_cache)
             self.analysis["alignment"] = dict(self._alignment.summary(), cache=a_cache)
+            lap("alignment")
             advance(0.82)
             # 発音の頭（「ガイドに合わせる」のタイミングの単位）も先に取っておく
             enter("onsets")
@@ -1422,6 +1440,7 @@ class Project:
             self.onsets("guide")
             self._prune_guide_cache("analysis")
             self._prune_guide_cache("alignment")
+            lap("onsets")
             advance(0.9)
 
         # ---- 歌詞があれば音素の強制アラインメント（段階2）
@@ -1443,9 +1462,13 @@ class Project:
                 if isinstance(e, AlignerError):
                     persist()
                     raise
+            lap("phonemes")
 
         advance(1.0)
         persist()
+        lap("persist")
+        log.get().info("analyze method=%s total=%.2f %s", estimator, sum(laps.values()),
+                       " ".join("%s=%.2f" % kv for kv in laps.items()))
         return self.analysis
 
     def _save_analysis(self):
