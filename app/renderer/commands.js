@@ -278,6 +278,9 @@ const NEEDS = {
   'guide-view': guideWhy, transition: '接続された境目が無い', rename: 'トラックが無い',
   'clear-fade': 'フェードのあるノートを選んでから', tempo: 'トラックが無い',
   save: 'プロジェクトが無い', 'save-as': 'プロジェクトが無い',
+  split: '分ける区間が無い（再生位置を選んだ区間の上に置く）', 'select-all': 'ノートが無い',
+  'show-all': 'ノートが無い', 'reset-original': 'ノートが無い', 'ask-ai': 'ノートを選ぶか、ループの範囲を決めてから',
+  'audition-selected': 'ノートを選んでから',
   transcribe: () => (asrReady() ? '発声のある所で（ノートを選ぶか、再生位置を発声の上に置く）' : asrWhy()),
 };
 /** コマンドが使えない理由（ガイドは重ならない理由をその場で。issue #32）。 */

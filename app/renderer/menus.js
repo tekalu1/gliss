@@ -7,7 +7,7 @@ import {
   S, isSel, lyricEntryAt, offsetOf, spanOf, toSource, utteranceAt,
 } from './state.js';
 import { T, X, Y, render, rollBottom } from './draw.js';
-import { command, isEnabled, runCommand, touching } from './commands.js';
+import { command, isEnabled, needs, runCommand, touching } from './commands.js';
 import { keyText } from './keys.js';
 import { closePop, closeTr, editCandidate, openLyrics } from './interact.js';
 import { acceptCandidate, asrReady, asrWhy, dismissCandidate, inCandidate } from './asr.js';
@@ -25,6 +25,8 @@ import { renderTracks as redrawTracks } from './tracks.js';
 import { ARA, araLoop } from './ara.js';
 
 const SEP = { sep: true };
+/** 子音・息に音程の要る操作の無効の理由。 */
+const NO_PITCH = '子音・息には音程がありません';
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 let menu = null;
@@ -85,17 +87,19 @@ export function menuOpen() { return !!menu && !menu.hidden; }
 /** 外を押して閉じたばかりのボタンか（そのボタンの click でもう一度開かない）。 */
 export function justClosed(el) { return closedAt.el === el && performance.now() - closedAt.t < 500; }
 
-/** コマンドの項目（名前・キー・有効はコマンドの表から）。over で名前・実行を差し替える。 */
+/** コマンドの項目（名前・キー・有効はコマンドの表から）。over で名前・実行を差し替える。
+ * 無効の項目は、ホバーで理由を出す（over.title があればそれ。無ければコマンドの表の NEEDS の文）。有効なら出さない。 */
 function cmd(id, ctx, over = {}) {
   const c = command(id);
+  const disabled = over.disabled ?? !isEnabled(id, ctx);
   return {
     cmd: id,
     label: over.label || c.label,
     key: keyText(id),
-    disabled: over.disabled ?? !isEnabled(id, ctx),
+    disabled,
     checked: over.checked ?? (c.checked ? c.checked() : false),
     run: over.run || (() => runCommand(id, ctx)),
-    title: over.title,
+    title: disabled ? over.title || needs(id) : '',
   };
 }
 
@@ -146,11 +150,13 @@ function noteMenu(e, n, t) {
   if (!isSel(n.id)) { S.sel = [n.id]; render(); }
   const ctx = { ...at(e), noteId: n.id, t };
   const multi = S.sel.length > 1;
+  // 選んだのが子音・息だけなら、音程の要る項目は無効（ホバーの理由は「音程がありません」）
+  const why = S.pitched.some((p) => isSel(p.id)) ? undefined : NO_PITCH;
   return [
     cmd('guide-match', ctx),
-    cmd('semitone', ctx),
+    cmd('semitone', ctx, { title: why }),
     multi ? cmd('merge', ctx) : cmd('split', ctx),
-    cmd('transition', ctx),
+    cmd('transition', ctx, { title: why }),
     SEP,
     // フェード（issue #20）: フェードのあるノートのときだけ出す
     { ...cmd('clear-fade', ctx), hidden: !isEnabled('clear-fade', ctx) },
@@ -170,12 +176,14 @@ function boundaryMenu(e, a, b) {
   const conn = !!a.connected_next;
   const gap = spanOf(b)[0] - spanOf(a)[1];
   return [
-    cmd('merge', ctx, { disabled: !touch || a.kind !== 'note' || b.kind !== 'note', run: () => mergeNotes(a.id, b.id) }),   // 結合は音程ノートどうしだけ
+    cmd('merge', ctx, { disabled: !touch || a.kind !== 'note' || b.kind !== 'note', run: () => mergeNotes(a.id, b.id),   // 結合は音程ノートどうしだけ
+      title: !touch ? '接していない（隙間がある）' : '結合できるのは音程ノートどうしだけ' }),
     conn
       ? { id: 'detach', label: '切り離す', key: 'Alt+ドラッグ', run: () => setConnection(a.id, b.id, false) }
       : { id: 'connect', label: 'つなぐ', key: 'Alt+ドラッグ',
         run: () => (gap > 0.0005 ? connectGap(a.id) : setConnection(a.id, b.id, true)) },
-    cmd('transition', ctx, { disabled: !conn || a.kind !== 'note' || b.kind !== 'note' }),   // なだらかさは音程ノートどうしだけ
+    cmd('transition', ctx, { disabled: !conn || a.kind !== 'note' || b.kind !== 'note',   // なだらかさは音程ノートどうしだけ
+      title: a.kind !== 'note' || b.kind !== 'note' ? NO_PITCH : '接続された境目が無い' }),
   ];
 }
 
@@ -203,7 +211,8 @@ function laneMenu(e, tSrc, phRow) {
     const bs = (S.bounds || []).filter((b) => b.before_index === ph.index || b.after_index === ph.index);
     const moved = bs.filter((b) => b.moved).map((b) => b.id);
     return [
-      { id: 'reset-boundary', label: '子音｜母音の境目を元に戻す', disabled: !moved.length, run: () => resetBoundaries(moved) },
+      { id: 'reset-boundary', label: '子音｜母音の境目を元に戻す', disabled: !moved.length, run: () => resetBoundaries(moved),
+        title: moved.length ? '' : '動かした境目が無い' },
       { id: 'edit-lyrics', label: '歌詞を編集…', key: 'ダブルクリック', run: () => openLyrics(tSrc) },
     ];
   }
@@ -224,10 +233,10 @@ function laneMenu(e, tSrc, phRow) {
   const has = !!(ent && (ent.text || '').trim());
   return [
     { id: 'edit-lyrics', label: has ? '歌詞を編集…' : '歌詞を入力…', key: 'ダブルクリック', run: () => openLyrics(tSrc) },
-    { id: 'clear-lyrics', label: 'この区間の歌詞を消す', disabled: !has,
+    { id: 'clear-lyrics', label: 'この区間の歌詞を消す', disabled: !has, title: has ? '' : '消す歌詞が無い',
       run: () => setLyrics('', ent.whole ? null : { start_sec: ent.start_sec, end_sec: ent.end_sec }) },
     // 聞き取る（issue #54）: 使えないとき（faster-whisper が無い）は理由をツールチップに
-    cmd('transcribe', { t: tSrc }, { title: asrReady() ? '' : asrWhy() }),
+    cmd('transcribe', { t: tSrc }, { title: asrReady() ? '' : asrWhy() }),     // 使えるのに無効なときは表の NEEDS の文
     SEP,
     load,
   ];
@@ -246,9 +255,10 @@ function rulerMenu(e) {
   const bars = !!t && G.fmt !== 'sec';
   const p = at(e);
   return [
-    { id: 'clear-loop', label: 'ループを解除', disabled: !S.loop,
+    { id: 'clear-loop', label: 'ループを解除', disabled: !S.loop, title: S.loop ? '' : 'ループが無い',
       run: () => { S.loop = null; render(); if (ARA) araLoop(null); } },
-    { id: 'tempo', label: 'テンポと拍子…', disabled: !S.tracks.length, run: () => openTempoPop(p.x, p.y) },
+    { id: 'tempo', label: 'テンポと拍子…', disabled: !S.tracks.length, title: S.tracks.length ? '' : 'トラックが無い',
+      run: () => openTempoPop(p.x, p.y) },
     SEP,
     { id: 'fmt-bars', label: '表示: 小節・拍', disabled: !t, checked: bars, run: () => setFmt('bars'),
       title: t ? '' : 'テンポが無い（ヘッダーの「— BPM」か「テンポと拍子…」で入れる）' },
@@ -367,6 +377,8 @@ export function openGuideMenu(t, anchorFn) {
   openMenu({ clientX: b.left, clientY: b.bottom + 2 }, guideItems(t), { label: `${t.name} のガイド`, anchor: anchorFn });
 }
 
+const ZERO_WHY = (t) => (Math.abs(offsetOf(t)) < 1e-9 ? 'もう元の位置にある' : '');
+
 /** トラック見出し（とクリップの外のレーン）。 */
 export function trackItems(t) {
   const vocals = S.tracks.filter((x) => x.kind === 'vocal').length;
@@ -380,14 +392,17 @@ export function trackItems(t) {
   return [
     cmd('rename', { trackId: t.id }, { label: '名前を変える', disabled: false, run: () => startRename(t) }),
     ...guide,
-    { id: 'zero', label: '元の位置に戻す', disabled: Math.abs(offsetOf(t)) < 1e-9,
+    { id: 'zero', label: '元の位置に戻す', disabled: Math.abs(offsetOf(t)) < 1e-9, title: ZERO_WHY(t),
       run: () => commitOffset(t.id, offsetOf(t), 0) },
     // 編集中のトラック・最後のボーカルは伴奏にできない
     { id: 'kind', label: t.kind === 'vocal' ? '伴奏として扱う' : 'ボーカルとして扱う',
       disabled: t.kind === 'vocal' && (t.id === S.session?.current || vocals <= 1),
+      title: t.kind !== 'vocal' || (t.id !== S.session?.current && vocals > 1) ? ''
+        : t.id === S.session?.current ? '編集中のトラックは伴奏にできない' : '最後のボーカルのトラックは伴奏にできない',
       run: () => setKind(t.id, t.kind === 'vocal' ? 'inst' : 'vocal') },
     SEP,
     { id: 'remove', label: 'トラックを外す', disabled: t.kind === 'vocal' && vocals <= 1,
+      title: t.kind === 'vocal' && vocals <= 1 ? '最後のボーカルのトラックは外せない' : '',
       run: () => removeTrack(t.id) },
   ];
 }
@@ -395,15 +410,16 @@ export function trackItems(t) {
 /** クリップ（tl: クリックしたタイムラインの秒）。 */
 export function clipItems(t, tl) {
   const vocals = S.tracks.filter((x) => x.kind === 'vocal').length;
-  if (ARA) return [{ id: 'show', label: 'ここを下に表示', disabled: t.kind !== 'vocal',
+  if (ARA) return [{ id: 'show', label: 'ここを下に表示', disabled: t.kind !== 'vocal', title: t.kind !== 'vocal' ? '伴奏のトラックは下に表示できない' : '',
     run: () => selectTrack(t.id, { view: soundRegion(t, tl) }) }];
   return [
-    { id: 'show', label: 'ここを下に表示', disabled: t.kind !== 'vocal',
+    { id: 'show', label: 'ここを下に表示', disabled: t.kind !== 'vocal', title: t.kind !== 'vocal' ? '伴奏のトラックは下に表示できない' : '',
       run: () => selectTrack(t.id, { view: soundRegion(t, tl) }) },
-    { id: 'zero', label: '元の位置に戻す', disabled: Math.abs(offsetOf(t)) < 1e-9,
+    { id: 'zero', label: '元の位置に戻す', disabled: Math.abs(offsetOf(t)) < 1e-9, title: ZERO_WHY(t),
       run: () => commitOffset(t.id, offsetOf(t), 0) },
     SEP,
     { id: 'remove', label: 'トラックを外す', disabled: t.kind === 'vocal' && vocals <= 1,
+      title: t.kind === 'vocal' && vocals <= 1 ? '最後のボーカルのトラックは外せない' : '',
       run: () => removeTrack(t.id) },
   ];
 }
@@ -417,6 +433,6 @@ export function menuItems() {
   if (!menu || menu.hidden) return null;
   return items.filter((it) => !it.sep).map((it) => ({
     label: it.label, key: it.key || '', disabled: !!it.disabled, checked: !!it.checked,
-    cmd: it.cmd || null, id: it.id || null,
+    cmd: it.cmd || null, id: it.id || null, title: it.title || '',
   }));
 }

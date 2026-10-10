@@ -118,6 +118,33 @@ for (const [name, get] of [['子音', () => U], ['息', () => B]]) {
   });
 }
 
+test('(M2) 無効の項目はホバーで理由が出る（ノート・空白・ルーラー・歌詞の段）', async () => {
+  const r = U;
+  await view(r);
+  // 子音（はさみのツール）: 半音・なだらかさは音程が無いので無効。有効の項目には理由を出さない
+  await win.evaluate(() => window.__app.setTool('cut'));
+  await win.locator(`#roll rect[data-note="${r.id}"]`).first().click({ button: 'right' });
+  let it = await items();
+  const by = (c) => it.find((x) => x.cmd === c);
+  expect(by('semitone')).toMatchObject({ disabled: true, title: '子音・息には音程がありません' });
+  expect(by('transition')).toMatchObject({ disabled: true, title: '子音・息には音程がありません' });
+  expect(by('split')).toMatchObject({ disabled: false, title: '' });
+  await expect(win.locator('#menu [data-cmd="semitone"]')).toHaveAttribute('title', '子音・息には音程がありません');
+  await escape();
+  await win.evaluate(() => window.__app.setTool('main'));
+  // ルーラー: ループが無い
+  const rb = await win.locator('#roll').boundingBox();
+  await win.mouse.click(rb.x + rb.width / 2, rb.y + 8, { button: 'right' });
+  it = await items();
+  expect(it.find((x) => x.id === 'clear-loop')).toMatchObject({ disabled: true, title: 'ループが無い' });
+  await escape();
+  // 歌詞の段（歌詞なし）: 消す歌詞が無い
+  await win.mouse.click(rb.x + rb.width / 2, rb.y + rb.height - 30, { button: 'right' });
+  it = await items();
+  expect(it.find((x) => x.id === 'clear-lyrics')).toMatchObject({ disabled: true, title: '消す歌詞が無い' });
+  await escape();
+});
+
 test('エラーが出ていない', async () => {
   expect(errors).toEqual([]);
 });
