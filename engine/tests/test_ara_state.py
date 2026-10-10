@@ -7,8 +7,14 @@
 """
 import copy
 
+import pytest
+
 from test_ara_tools import _add, _ok, _open, _wav
 from test_f0_switch_and_curve import _legato, _notes, eng  # noqa: F401
+from vocal_engine.phoneme import hubertfa as H
+
+# 取り消し・やり直しは解析し直すので、音素の位置合わせ（HubertFA）の重みが要る
+needs_hfa = pytest.mark.skipif(not H.model_found(), reason="HubertFA の重みが無い")
 
 
 def _doc(m, a, tmp_path):
@@ -52,6 +58,7 @@ def test_analysis_alone_does_not_change_the_saved_state(eng, tmp_path):
     assert _state(a) != before and _erev(a) != erev
 
 
+@needs_hfa
 def test_user_changes_change_the_saved_state(eng, tmp_path):
     from vocal_engine import mcp_tracks as mt
     m, a, md, R = eng

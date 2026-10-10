@@ -19,6 +19,10 @@ import pytest
 import soundfile as sf
 
 from test_ara_tools import Cache, _add, _ok, _open, _voice, _wav
+from vocal_engine.phoneme import hubertfa as H
+
+# 結合の取り消し・やり直しは解析し直すので、音素の位置合わせ（HubertFA）の重みが要る
+needs_hfa = pytest.mark.skipif(not H.model_found(), reason="HubertFA の重みが無い")
 
 
 @pytest.fixture
@@ -836,6 +840,7 @@ def test_estimator_undo_save_failure_restores_project_and_session(tr, tmp_path, 
     assert _ok(m.undo())["undone"]["kind"] == "estimator"
 
 
+@needs_hfa
 def test_merge_keeps_both_draws_timing_and_lyrics(tr, tmp_path):
     m, a, md, R = tr
     from vocal_engine import mcp_tracks as mt
