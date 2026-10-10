@@ -398,6 +398,7 @@ function noPitchHit(n, segs, conn) {
   }
   if (!Number.isFinite(lo)) return '';
   if (S.tool === 'cut' || S.tool === 'mute') return `<rect data-note="${n.id}" x="${f1(xa)}" y="${f1(lo)}" width="${f1(Math.max(2, xb - xa))}" height="${f1(hi - lo)}" fill="transparent"/>`;
+  if (S.tool === 'draw') return `<rect data-nop-menu="${n.id}" x="${f1(bx0)}" y="${f1(lo)}" width="${f1(Math.max(2, bx1 - bx0))}" height="${f1(hi - lo)}" fill="transparent"/>`;   // ペン: 右クリックのメニューの当たりだけ（つかめない）
   let out = `<rect data-nop="${n.id}" x="${f1(bx0)}" y="${f1(lo)}" width="${f1(Math.max(2, bx1 - bx0))}" height="${f1(hi - lo)}" fill="transparent" style="cursor:move"/>`;
   const inner = Math.min(EDGE_IN, Math.max(0, xb - xa) / 3);
   for (const [which, x, pts] of [['start', xa, segs[0]], ['end', xb, segs[segs.length - 1]]]) {
@@ -874,7 +875,7 @@ export function render() {
     const opacity = bc === TAKE ? '.14' : '.45';
     if (d.main) s += `<path data-nopitch="${n.id}" d="${d.main}" fill="${bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
     if (d.cons) s += `<path data-nopitch="${n.id}" data-cons="${n.id}" d="${d.cons}" fill="${bc === TAKE ? desat(bc) : bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
-    if (main || S.tool === 'cut' || S.tool === 'mute') s += noPitchHit(n, segs, noPitchConn(n));
+    if (main || S.tool === 'cut' || S.tool === 'mute' || S.tool === 'draw') s += noPitchHit(n, segs, noPitchConn(n));
     const [s0, s1] = spanOf(n);
     const first = segs[0][0]; const last = segs[segs.length - 1][segs[segs.length - 1].length - 1];
     if (isSel(n.id) && (Math.abs(n.start_sec - s0) > 0.0005 || Math.abs(n.end_sec - s1) > 0.0005)) {

@@ -311,6 +311,11 @@ export function editorMenu(e, svg) {
       return;
     }
   }
+  if (d.nop !== undefined || d.nopMenu !== undefined) {
+    // 子音・息の体と、隣と接していない端: 音程ノートと同じノートのメニュー（音程の要る項目は無効）
+    const n = S.byId.get(d.nop ?? d.nopMenu);
+    if (n) { openMenu(e, noteMenu(e, n, T(x))); return; }
+  }
   if (d.edge !== undefined) {
     // 隣と接している端（接続でも切り離しでも）= 境目のメニュー。隙間のある端はそのノートのメニュー
     const i = idx(d.note);

@@ -145,6 +145,65 @@ test('(M2) 無効の項目はホバーで理由が出る（ノート・空白・
   await escape();
 });
 
+for (const [name, get, tool] of [['子音', () => U, 'main'], ['息', () => B, 'main'], ['子音', () => U, 'draw']]) {
+  test(`(M3) ${name}の体の右クリック（${tool === 'main' ? 'メインのツール' : 'ペン'}）= ノートと同じメニュー。音程の要る項目は無効`, async () => {
+    const r = get();
+    await view(r);
+    await select([]);
+    await win.evaluate((t) => window.__app.setTool(t), tool);
+    await win.locator(`#roll rect[${tool === 'draw' ? "data-nop-menu" : "data-nop"}="${r.id}"]:not([data-nop-edge])`).first().click({ button: 'right' });
+    const it = await items();
+    expect(it.map((x) => x.cmd).filter(Boolean)).toEqual(
+      expect.arrayContaining(['guide-match', 'semitone', 'split', 'transition', 'reset-original', 'mute', 'ask-ai']));
+    const by = (c) => it.find((x) => x.cmd === c);
+    expect(by('semitone')).toMatchObject({ disabled: true, title: '子音・息には音程がありません' });
+    expect(by('transition')).toMatchObject({ disabled: true, title: '子音・息には音程がありません' });
+    expect(by('split')).toMatchObject({ disabled: false, title: '' });
+    expect(await win.evaluate(() => window.__app.S.sel)).toEqual([r.id]);   // 右クリックで選ぶ
+    await escape();
+    await win.evaluate(() => window.__app.setTool('main'));
+  });
+}
+
+test('(M3) 隣と接していない端の右クリックも、そのノートのメニュー', async () => {
+  // 子音・息のうち、端の片方が隣と接していないもの（無ければ、端を隙間にする編集はしないので飛ばす）
+  const free = await win.evaluate(() => {
+    const P = window.__app.S.blocks;
+    for (let i = 0; i < P.length; i++) {
+      const n = P[i];
+      if (n.kind === 'note' || n.end_sec - n.start_sec < 0.08) continue;
+      const nx = P[i + 1]; const pv = P[i - 1];
+      if (!nx || Math.abs(nx.start_sec - n.end_sec) > 0.006 && !n.connected_next) return { id: n.id, which: 'end', s: n.start_sec, e: n.end_sec };
+      if (!pv || Math.abs(n.start_sec - pv.end_sec) > 0.006 && !n.connected_prev) return { id: n.id, which: 'start', s: n.start_sec, e: n.end_sec };
+    }
+    return null;
+  });
+  test.skip(!free, '素材に、隣と接していない端の子音・息が無い');
+  await view({ start: free.s, end: free.e });
+  await select([]);
+  await win.locator(`#roll rect[data-nop="${free.id}"][data-nop-edge="${free.which}"]`).first().click({ button: 'right' });
+  const it = await items();
+  expect(it.some((x) => x.cmd === 'split')).toBe(true);
+  expect(it.some((x) => x.cmd === 'semitone')).toBe(true);
+  expect(await win.evaluate(() => window.__app.S.sel)).toEqual([free.id]);
+  await escape();
+});
+
+test('(M3) 接している端は、これまでどおり境目のメニュー', async () => {
+  const r = U;
+  await view(r);
+  const touch = await win.evaluate((id) => {
+    const P = window.__app.S.blocks; const i = P.findIndex((n) => n.id === id);
+    const n = P[i]; const nx = P[i + 1];
+    return !!nx && Math.abs(nx.start_sec - n.end_sec) <= 0.006;
+  }, r.id);
+  test.skip(!touch, '素材の子音が、後ろの区間と接していない');
+  await win.locator(`#roll rect[data-nop="${r.id}"][data-nop-edge="end"]`).first().click({ button: 'right' });
+  const it = await items();
+  expect(it.some((x) => x.id === 'reset-boundary' || x.cmd === 'merge')).toBe(true);
+  await escape();
+});
+
 test('エラーが出ていない', async () => {
   expect(errors).toEqual([]);
 });
