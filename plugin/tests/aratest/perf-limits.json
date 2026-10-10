@@ -1,0 +1,60 @@
+{
+  "seconds": 18,
+  "runs": 3,
+  "measured_median_ms": {
+    "same": {
+      "t_edit": 63.0,
+      "t_view": 129.7,
+      "t_sound": 178.8
+    },
+    "walk": {
+      "t_edit": 47.4,
+      "t_view": 149.1,
+      "t_sound": 174.3
+    },
+    "burst": {
+      "t_edit": 63.2,
+      "t_view": 473.8,
+      "t_sound": 573.2
+    },
+    "during": {
+      "t_edit": 62.4,
+      "t_view": 129.7,
+      "t_sound": 140.5
+    }
+  },
+  "limit_ms": {
+    "same": {
+      "t_edit": 100,
+      "t_view": 200,
+      "t_sound": 270
+    },
+    "walk": {
+      "t_edit": 80,
+      "t_view": 230,
+      "t_sound": 270
+    },
+    "burst": {
+      "t_edit": 100,
+      "t_view": 720,
+      "t_sound": 860
+    },
+    "during": {
+      "t_edit": 100,
+      "t_view": 200,
+      "t_sound": 220
+    }
+  },
+  "measured_median_view_bytes": {
+    "same": 2769,
+    "walk": 2988,
+    "burst": 3086,
+    "during": 3137
+  },
+  "limit_view_bytes": {
+    "same": 4200,
+    "walk": 4500,
+    "burst": 4700,
+    "during": 4800
+  }
+}

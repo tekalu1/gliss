@@ -66,7 +66,7 @@ struct SyncModel
     → ara_archive で保存用の写し。
     メッセージスレッドは setModel() で「あるべき形」を渡すだけで、エンジンを待たない（編集サイクルの後にまとめて渡す）。
 
-    スレッド: setModel・setPending*・requestSync・requestEngine・restartEngine・get*・isSettled はどのスレッドからでもよい
+    スレッド: setModel・setPending*・requestSync・requestEditSync・requestEngine・restartEngine・get*・isSettled はどのスレッドからでもよい
     （isSettled はオーディオスレッドからも呼べる。原子変数を読むだけ）。callTool・waitForEngine・refreshArchives は待つので、
     オーディオスレッドからは呼ばない。Callbacks は同期のスレッドから呼ばれる。 */
 class DocumentSync final : private juce::Thread
@@ -134,6 +134,9 @@ public:
     void setHostGuides (const std::map<juce::String, juce::String>& guides, const juce::String& guide, bool known);
 
     void requestSync();
+    /** 画面・AI の編集の後（tools::shouldSyncAfter）。再合成の続き（more）の途中なら打ち切り、次の同期で最新の版から作り直す
+        （ほかの修飾の続きより先に、編集した修飾を作る）。 */
+    void requestEditSync();
     void requestEngine();
     void restartEngine();
 
@@ -253,11 +256,12 @@ private:
     juce::String openedKey;
     int restoreSerial = 0;
 
-    std::atomic<bool> settled { true }, dirty { false }, engineWanted { false }, restartRequested { false },
+    std::atomic<bool> settled { true }, dirty { false }, editRequested { false }, engineWanted { false }, restartRequested { false },
                       engineDied { false }, shuttingDown { false }, openedOnce { false };
 
     // ---- 同期のスレッドだけ ----
     bool opened = false, engineFailed = false, testEditDone = false, sessionChanged = false;
+    bool renderInterrupted = false;                         // この周の再合成の続きを、新しい編集で打ち切った
     std::map<juce::String, Captured> captured;              // ソースの persistentID
     std::map<juce::String, Applied> applied;                // ara_id
     std::map<juce::String, juce::String> localRev;          // ara_id → 手元のキャッシュの版

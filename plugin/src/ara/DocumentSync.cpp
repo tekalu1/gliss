@@ -3,6 +3,8 @@
 #include "ArchiveIO.h"
 #include "FloatWavWriter.h"
 
+#include <algorithm>
+
 namespace gliss
 {
 
@@ -142,6 +144,12 @@ void DocumentSync::requestSync()
     notify();
 }
 
+void DocumentSync::requestEditSync()
+{
+    editRequested = true;
+    requestSync();
+}
+
 void DocumentSync::requestEngine()
 {
     engineWanted = true;
@@ -188,7 +196,10 @@ juce::var DocumentSync::callTool (const juce::String& tool, const juce::var& arg
     if (options.engineDisabled)
         return failure (getEngineStatus().error);
 
-    requestEngine();
+    // エンジンが動いていれば同期を起こさない（呼んだツールで中身が変わったら、呼んだ側が requestEditSync する。
+    // tools::shouldSyncAfter）。起こすと、編集 → 描画データのたびに空の同期が回り、編集の同期の後ろにも 1 周つく
+    if (! engineWanted.exchange (true) || getEngineStatus().state != "ready")
+        requestSync();
 
     if (! waitForEngine (60000))
     {
@@ -852,7 +863,9 @@ bool DocumentSync::renderModification (const SyncModification& mod, bool stateCh
         args->setProperty ("since", since.isNotEmpty() ? juce::var (since) : juce::var());
         args->setProperty ("max_sec", options.maxRenderSec);
 
+        const auto tCall = juce::Time::getMillisecondCounterHiRes();
         const auto r = call ("ara_render_dirty", juce::var (args), 600000);
+        const auto tApply = juce::Time::getMillisecondCounterHiRes();
         DirtyUpdate u;
         juce::String error;
 
@@ -902,7 +915,9 @@ bool DocumentSync::renderModification (const SyncModification& mod, bool stateCh
 
         log ("sync: ara_render_dirty " + mod.araId + " rev " + u.rev + (u.reset ? " reset" : "") + ", "
              + juce::String ((int) u.restore.size()) + " restore, " + juce::String ((int) u.windows.size()) + " window(s)"
-             + (u.analysisPending ? ", analysis pending" : "") + (u.more ? ", more" : "") + (quiet ? ", catching up" : ""));
+             + (u.analysisPending ? ", analysis pending" : "") + (u.more ? ", more" : "") + (quiet ? ", catching up" : "")
+             + " (call " + juce::String ((int) (tApply - tCall)) + " ms, apply "
+             + juce::String ((int) (juce::Time::getMillisecondCounterHiRes() - tApply)) + " ms)");
         localRev[mod.araId] = u.rev;
         setModTrack (mod.araId, {}, u.rev);
         since = u.rev;
@@ -912,7 +927,15 @@ bool DocumentSync::renderModification (const SyncModification& mod, bool stateCh
             break;
 
         if (between)
-            between();   // 続きの再合成の前に、保存の状態の変化を知らせる
+            between();   // 続きの再合成の前に、保存の状態の変化を知らせる（打ち切るときも、音の知らせより先に）
+
+        // 新しい編集が来た: 続きを打ち切る（残りの窓はエンジンが覚えていて、次の同期で最新の版の変化と合わせて作る）
+        if (editRequested)
+        {
+            log ("sync: ara_render_dirty " + mod.araId + " interrupted by an edit");
+            renderInterrupted = true;
+            return false;
+        }
     }
 
     mod.pcm->releaseUnusedSnapshots();
@@ -1105,7 +1128,13 @@ void DocumentSync::noticeSavedState (const SyncModel& m, const juce::var& revs, 
 void DocumentSync::cycle()
 {
     dirty = false;
+    editRequested = false;
     sessionChanged = false;
+    renderInterrupted = false;
+    const auto now = [] { return juce::Time::getMillisecondCounterHiRes(); };
+    const auto tCycle = now();
+    double msRevs = 0.0, msRender = 0.0, msNotify = 0.0, msNotes = 0.0, msArchives = 0.0;
+    int rendered = 0;
 
     if (restartRequested.exchange (false))
     {
@@ -1368,7 +1397,9 @@ void DocumentSync::cycle()
     // 6. 版が変わった修飾の差分の再合成と、DAW に返すノート
     juce::StringArray contentChanged, caughtUp;          // 音が変わった修飾・戻した状態に追いついただけの修飾
     std::map<juce::String, juce::String> notesTargets;   // ノートを取り直す修飾 → ara_revs の版
+    auto tStage = now();
     const auto revs = call ("ara_revs", object ({}), 60000);
+    msRevs = now() - tStage;
     ExternalChanges::Result externalChange;
 
     if (isFailure (revs))
@@ -1430,6 +1461,14 @@ void DocumentSync::cycle()
             toRender.push_back (&mod);
         }
 
+        // 続き（more。版が「<版>~<n>」）の残っている修飾は後に回す（新しく編集した修飾の音を先に作る）
+        std::stable_partition (toRender.begin(), toRender.end(),
+                               [this] (const SyncModification* mod)
+                               {
+                                   const auto r = localRev.find (mod->araId);
+                                   return r == localRev.end() || ! r->second.contains ("~");
+                               });
+
         // 保存するものが変わった修飾・ガイドの指定は、再合成より先に知らせる（再合成は長いことがあり、その間に保存・閉じると
         // 「変更あり」が間に合わない）。再合成の合間にも ara_revs を見直して知らせる（再合成の最中に入った変更）
         noticeSavedState (m, revs, changed);
@@ -1446,6 +1485,8 @@ void DocumentSync::cycle()
                 noticeSavedState (m, again, changed);
         };
 
+        tStage = now();
+
         for (const auto* mod : toRender)
         {
             if (threadShouldExit() || engineDied)
@@ -1456,10 +1497,19 @@ void DocumentSync::cycle()
             if (! renderModification (*mod, moved, contentChanged, caughtUp, between))
                 workLeft = true;
 
+            ++rendered;
             changed.addIfNotAlreadyThere (mod->araId);
+
+            if (renderInterrupted)
+                break;   // 新しい編集: 残りの修飾も次の同期で（そこで編集した修飾から作る）
+
             between();
         }
+
+        msRender = now() - tStage;
     }
+
+    tStage = now();
 
     if (callbacks.contentChanged)
     {
@@ -1472,6 +1522,8 @@ void DocumentSync::cycle()
         if (! caughtUp.isEmpty())
             callbacks.contentChanged (caughtUp, false);
     }
+
+    msNotify = now() - tStage;
 
     if (externalChange.projectChanged || externalChange.sessionChanged)
     {
@@ -1487,8 +1539,13 @@ void DocumentSync::cycle()
             sessionChanged = true;
     }
 
-    if (! notesTargets.empty() && ! threadShouldExit() && ! engineDied)
+    // 打ち切った周はノートを取らない（次の同期で最新の版のノートを取る。notesRev は変わらない）
+    tStage = now();
+
+    if (! notesTargets.empty() && ! renderInterrupted && ! threadShouldExit() && ! engineDied)
         refreshNotes (m, notesTargets);
+
+    msNotes = now() - tStage;
 
     // 7. 保存用の写し
     juce::Array<juce::var> ids;
@@ -1496,10 +1553,14 @@ void DocumentSync::cycle()
     for (const auto& id : changed)
         ids.add (id);
 
+    tStage = now();
+
     if (externalChange.sessionChanged)
         refreshArchivesLocked (object ({}), 60000);   // 外部がガイドを変えたかもしれない（保存に書くガイド）
     else if (! ids.isEmpty())
         refreshArchivesLocked (object ({ { "ara_ids", ids } }), 60000);
+
+    msArchives = now() - tStage;
 
     for (const auto& mod : m.modifications)
         if (mod.pcm != nullptr)
@@ -1521,6 +1582,13 @@ void DocumentSync::cycle()
         if ((a == applied.end() || ! a->second.registered) && getModStatus (mod.araId).state != "failed")
             workLeft = true;
     }
+
+    // 段ごとの時間（何かを作った・取った周だけ。何も無い周は 1 秒ごとに回るので書かない）
+    if (rendered > 0 || ! notesTargets.empty())
+        log ("sync: cycle " + juce::String ((int) (now() - tCycle)) + " ms (revs " + juce::String ((int) msRevs)
+             + ", render " + juce::String ((int) msRender) + " for " + juce::String (rendered) + ", notify " + juce::String ((int) msNotify)
+             + ", notes " + juce::String ((int) msNotes) + ", archives " + juce::String ((int) msArchives) + ")"
+             + (renderInterrupted ? " interrupted" : ""));
 
     finish (workLeft);
 }

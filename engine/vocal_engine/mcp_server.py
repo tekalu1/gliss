@@ -50,6 +50,16 @@ _plans = {}                     # plan_id -> timing.Plan（このプロセスの
 MAX_PLANS = 64
 _lock = threading.RLock()
 _jobs_lock = threading.RLock()
+_lock_stat = threading.local()  # このスレッドで走っているツールが _lock を待った秒（ログの lock_wait）
+
+
+@contextlib.contextmanager
+def _locked():
+    """_lock を取る。待った秒を、このスレッドで走っているツールの lock_wait に足す（ログ用）。"""
+    t = time.perf_counter()
+    with _lock:
+        _lock_stat.wait = getattr(_lock_stat, "wait", 0.0) + time.perf_counter() - t
+        yield
 
 
 # ---------------------------------------------------------------- 共通
@@ -184,10 +194,15 @@ def _tool(fn=None, *, lock=True):
                     if has_author:
                         ba.arguments["author"] = "ai"
                         a, kw = ba.args, ba.kwargs
+            outer_wait = getattr(_lock_stat, "wait", 0.0)
+            _lock_stat.wait = 0.0
             try:
+                t_apply = t_summary = None
                 if lock:
-                    with _lock:
+                    with _locked():
+                        t_apply = time.perf_counter()
                         r = f(*a, **kw)
+                        t_summary = time.perf_counter()
                         if (f.__name__ in HISTORY_TOOLS and isinstance(r, dict)
                                 and r.get("ok") and "history" not in r):
                             r["history"] = _history_summary()
@@ -196,8 +211,13 @@ def _tool(fn=None, *, lock=True):
                             r["document"] = _document_info()      # 未保存か（画面のタイトルの「*」。issue #33）
                 else:
                     r = f(*a, **kw)
-                log.get("tool").info("%s ok (%.2f s)", f.__name__,
-                                     time.perf_counter() - t0)
+                t1 = time.perf_counter()
+                wait = _lock_stat.wait
+                log.get("tool").info("%s ok (%.2f s, lock_wait %.2f s)", f.__name__, t1 - t0, wait)
+                if f.__name__ in EDIT_TOOLS and t_apply is not None:
+                    # 段階の時間（docs/ara-plugin.md「エンジンとの同期」）。ロックの待ち・編集を当てる・履歴の要約
+                    log.get("perf").info("edit op=%s lock_wait=%.3f apply=%.3f summary=%.3f total=%.3f", f.__name__,
+                                         wait, t_summary - t_apply, t1 - t_summary, t1 - t0)
                 return r
             except Exception as e:      # noqa: BLE001
                 log.get("tool").error("%s failed: %s\n%s", f.__name__, e,
@@ -206,6 +226,8 @@ def _tool(fn=None, *, lock=True):
                 return {"ok": False, "error": str(e), "tool": f.__name__,
                         "conflict": isinstance(e, ProjectConflict),
                         "preparing": isinstance(e, PreparationPending), "log": log.current_log_file()}
+            finally:
+                _lock_stat.wait = outer_wait + _lock_stat.wait
         wrapper.engine_lock = lock              # 外部の AI の中継（ara_relay.execute）がロックの要否を見る
         return wrapper
     return deco(fn) if fn is not None else deco
@@ -223,6 +245,9 @@ HISTORY_TOOLS = {
     "mute_track_range", "open_project",
     "new_project", "load_project", "save_project", "apply_edits",
 }
+# 曲の中身を変えるツール（ログの `edit op=…` の行を出す）
+EDIT_TOOLS = HISTORY_TOOLS - {"export_view_data", "list_changes", "list_tracks", "select_track", "open_project",
+                              "new_project", "load_project", "save_project"}
 
 
 def _history_summary():
@@ -2198,7 +2223,7 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
     if p.reload_if_changed():
         _invalidate_renderer()
     from .render.region import RegionRenderer, audition as _aud
-    from .mcp_ara import _rev_parts, audition_pcm, audition_region, audition_renderer, audition_segs
+    from .mcp_ara import _rev_parts, audition_pcm, audition_region, audition_renderer, audition_segs, renderer_lock
     name = resolve_backend_name(backend)
     with _prep_yield():
         p.ensure_analyzed()
@@ -2250,7 +2275,8 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
                 n = p.note(note_id)
                 region = audition_region(ara_id, p, n.start_sec if start_sec is None else float(start_sec),
                                          n.end_sec if end_sec is None else float(end_sec))
-            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs, region=region)
+            with renderer_lock(rr):           # ARA の再生用のレンダラーは、ロックの外の再合成（ara_render_dirty）と分け合う
+                y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs, region=region)
         if p.view_key() != view_rev or _rev_parts(p) != (asig, erev):
             raise ProjectConflict("試聴中に解析または編集の版が変わった。結果を破棄した")
     if y.ndim == 2 and y.shape[1] > 1:
@@ -2340,7 +2366,7 @@ def render_view(start_sec: float = None, end_sec: float = None, show_guide: bool
 
 @_tool
 def export_view_data(start_sec: float = None, end_sec: float = None,
-                     peak_ms: float = None, path: str = None) -> dict:
+                     peak_ms: float = None, path: str = None, since: str = None) -> dict:
     """**画面（UI）向け**の描画データを JSON ファイルに書いてパスを返す。
 
     LLM 向けではない。エージェントがこれを読む必要はない（要約が欲しいときは
@@ -2352,11 +2378,15 @@ def export_view_data(start_sec: float = None, end_sec: float = None,
     ガイド F0（ガイドの時刻 + 全体のずれでテイク時間に置いたもの）、ノート一覧（id・開始/終了・音名・
     編集前後の中心ピッチ・ピッチ編集対象外フラグ）、境界一覧（編集前後の秒）、
     編集前→編集後の時間写像、編集リストと取り消し履歴。
+
+    since に前に受け取った view_rev を渡すと、その版との差分だけを書いて返す（diff: true。
+    当て方は engine/docs/MCP.md「描画データの差分」）。その版を覚えていなければ全体（diff: false）。
     """
     p = _project()
     p.reload_if_changed()
-    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path)
-    return _ok(**out, view_rev=p.view_key())
+    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path, since=since)
+    out.setdefault("view_rev", p.view_key())
+    return _ok(**out)
 
 
 @_tool

@@ -685,6 +685,182 @@ def test_archive_and_revs_do_not_wait_for_the_engine_lock(ara, tmp_path):
         th.join(5)
 
 
+# ================================================================ ロックの外の再合成
+def _hold_render(monkeypatch, a, during):
+    """ロックの外の再合成（`_render_plan`）に入るたびに during(回目) を呼ぶ。返り値は呼ばれた回数の入れ物。"""
+    orig = a._render_plan
+    calls = []
+
+    def hook(plan, stat):
+        calls.append(plan["todo"])
+        during(len(calls))
+        return orig(plan, stat)
+
+    monkeypatch.setattr(a, "_render_plan", hook)
+    return calls
+
+
+def test_edit_during_render_does_not_wait_and_the_stale_windows_are_rebuilt(ara, tmp_path, monkeypatch):
+    """窓を作っている間（エンジンのロックの外）に入った編集は待たない。作った窓は捨てて今の版から作り直し、
+    結果は render_region の全体と同じ。取り消しも効く。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice(stereo=True))
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    _ok(m.shift_pitch(150, note_id=notes[0]))
+    entered, go = threading.Event(), threading.Event()
+
+    def during(k):
+        if k == 1:
+            entered.set()
+            assert go.wait(10)
+
+    calls = _hold_render(monkeypatch, a, during)
+    out = {}
+    th = threading.Thread(target=lambda: out.setdefault("r", c.sync(a, "mod-A")), daemon=True)
+    th.start()
+    assert entered.wait(10)
+    try:
+        t0 = time.perf_counter()
+        _ok(m.shift_pitch(-120, note_id=notes[4]))           # 再合成の途中の編集（ロックを待たない）
+        assert time.perf_counter() - t0 < 2.0
+    finally:
+        go.set()
+    th.join(30)
+    assert not th.is_alive()
+    r = out["r"]
+    assert r["timing_sec"]["retries"] == 1 and len(calls) == 2
+    assert len(c.calls) == 2 and r["reset"] is False
+    _same(c, a, "mod-A")
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == c.rev
+    # 取り消し・やり直しも、差分を当てた結果が全体と同じ
+    for step in (m.undo, m.undo, m.redo):
+        _ok(step())
+        c.sync(a, "mod-A")
+        _same(c, a, "mod-A")
+
+
+def test_render_under_the_lock_after_repeated_edits(ara, tmp_path, monkeypatch):
+    """作っている間に毎回編集が入る: RENDER_RETRIES 回作り直した後は、ロックを握ったまま作って必ず返す。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    _ok(m.shift_pitch(100, note_id=notes[0]))
+    locked = []
+
+    def free():
+        """別のスレッドからエンジンのロックが取れるか。"""
+        out = []
+
+        def f():
+            got = m._lock.acquire(blocking=False)
+            if got:
+                m._lock.release()
+            out.append(got)
+
+        th = threading.Thread(target=f, daemon=True)
+        th.start()
+        th.join(5)
+        return out[0]
+
+    def during(k):
+        locked.append(free())
+        if k <= a.RENDER_RETRIES:
+            _ok(m.shift_pitch(20 * k, note_id=notes[2 * (k % 2)]))
+
+    _hold_render(monkeypatch, a, during)
+    r = c.sync(a, "mod-A")
+    assert r["timing_sec"]["retries"] == a.RENDER_RETRIES
+    # 作り直しの間はロックの外、最後の 1 回はロックの中
+    assert locked == [True] * a.RENDER_RETRIES + [False]
+    _same(c, a, "mod-A")
+
+
+def test_two_callers_and_audition_at_the_same_time(ara, tmp_path):
+    """同じ修飾を 2 本が同時に作っても、試聴が同時でも、それぞれの結果が全体と同じ。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    for k in (0, 2, 4):
+        _ok(m.shift_pitch(60 + 20 * k, note_id=notes[k]))
+    caches = [Cache(src), Cache(src)]
+    errors = []
+
+    def run(c):
+        try:
+            for _ in range(3):
+                c.sync(a, "mod-A")
+        except BaseException as e:               # noqa: BLE001
+            errors.append(e)
+
+    ths = [threading.Thread(target=run, args=(c,), daemon=True) for c in caches]
+    for th in ths:
+        th.start()
+    for _ in range(3):
+        _ok(m.render_audition(notes[2], cents=40))
+    for th in ths:
+        th.join(60)
+    assert not errors and not any(th.is_alive() for th in ths)
+    for c in caches:
+        _same(c, a, "mod-A")
+
+
+def test_lock_wait_is_logged(ara, tmp_path):
+    """ロックを待った秒が、編集のログ（edit op=…）と ara_render_dirty の timing_sec に出る。"""
+    import logging
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    lines = []
+
+    class H(logging.Handler):
+        def emit(self, rec):
+            lines.append(rec.getMessage())
+
+    h = H()
+    perf = logging.getLogger("vocal_engine.perf")
+    perf.addHandler(h)
+    held = threading.Event()
+
+    def hold():
+        with m._lock:
+            held.set()
+            time.sleep(0.4)
+
+    try:
+        th = threading.Thread(target=hold, daemon=True)
+        th.start()
+        assert held.wait(5)
+        _ok(m.shift_pitch(100, note_id=notes[0]))
+        th.join(5)
+        th = threading.Thread(target=hold, daemon=True)
+        held.clear()
+        th.start()
+        assert held.wait(5)
+        r = _ok(a.ara_render_dirty("mod-A"))
+        th.join(5)
+    finally:
+        perf.removeHandler(h)
+    edit = [x for x in lines if x.startswith("edit op=shift_pitch ")]
+    assert edit, lines
+    wait = float(edit[0].split("lock_wait=")[1].split()[0])
+    assert 0.2 < wait < 5
+    assert 0.2 < r["timing_sec"]["lock_wait"] < 5
+    assert set(r["timing_sec"]) >= {"prepare", "render", "plan", "commit", "lock_wait", "retries", "total"}
+    assert any(x.startswith("render op=ara_render_dirty ") for x in lines)
+
+
 # ================================================================ 細かいところ
 def test_bridge_ara_client_and_tool_permissions(monkeypatch):
     from vocal_engine import bridge
