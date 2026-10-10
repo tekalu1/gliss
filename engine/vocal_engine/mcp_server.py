@@ -1075,7 +1075,7 @@ def shift_pitch(cents: float, note_id: str = None, start_sec: float = None,
 
 
 @_tool
-def set_pitch_curve(points: list, note_id: str = None, start_sec: float = None,
+def set_pitch_curve(points: list = None, note_id: str = None, start_sec: float = None,
                     end_sec: float = None, mode: str = "offset", ramp_ms: float = 40.0,
                     author: str = "ai", note: str = None) -> dict:
     """ピッチ曲線を与える。mode で意味が変わる:
@@ -1087,7 +1087,31 @@ def set_pitch_curve(points: list, note_id: str = None, start_sec: float = None,
       両端は ramp_ms（既定 40 ms）かけて元の曲線へなだらかにつなぐ。範囲は有声のフレームに
       切り詰める（無声は音程が無いので描いても効かない）。上から何度でも描き直せる
       （すっぽり覆われた前の線は外す）。戻すのは reset_to_original
+    - "restore"（元に戻す線）: 範囲（start_sec〜end_sec、素材の秒）の**有声のフレームのピッチを録音のピッチに戻す**。
+      points は使わない（[] でよい）。ノートの移動・曲線・つなぎ・前の鉛筆もその範囲では消える。
+      両端は ramp_ms（既定 40 ms）かけて前の曲線へつなぐ。1 回の取り消しで戻る。
+      無声のところは元から録音のまま（有声が無い範囲はエラー）
     """
+    if mode == "restore":
+        from .project import pitch as PI
+        p = _project()
+        p.reload_if_changed()
+        if note_id and (start_sec is None or end_sec is None):
+            n = p.note(note_id)
+            start_sec, end_sec = n.start_sec, n.end_sec
+        if start_sec is None or end_sec is None:
+            raise ProjectError("restore には start_sec と end_sec（か note_id）が要る")
+        try:
+            rm, specs, info = PI.restore_specs(p, start_sec, end_sec, ramp_sec=float(ramp_ms) / 1000.0)
+        except PI.PitchError as e:
+            raise ProjectError(str(e))
+        cs = p.apply_changes(rm, specs, author=author,
+                             label="%.3f–%.3f s のピッチを元に戻した" % (info["start_sec"], info["end_sec"]))
+        _rec(p, cs, "ピッチを元に戻す")
+        return _ok(changeset=cs.id, total_edits=len(p.edits), **info,
+                   next="render_view で確かめる。戻すなら undo")
+    if mode in ("offset", "draw") and not points:
+        raise ProjectError("%s には points が要る" % mode)
     if mode == "draw":
         from .project import pitch as PI
         p = _project()
@@ -1103,7 +1127,7 @@ def set_pitch_curve(points: list, note_id: str = None, start_sec: float = None,
         return _ok(changeset=cs.id, total_edits=len(p.edits), **info,
                    next="render_preview / render_view で確かめる。戻すなら undo か reset_to_original")
     if mode != "offset":
-        raise ProjectError("mode は offset か draw")
+        raise ProjectError("mode は offset・draw・restore のどれか")
     t = _resolve_target(note_id, start_sec, end_sec)
     return _add("pitch_curve", t, {"points": points}, author,
                 "%s にピッチ曲線 %d 点" % (t.describe(), len(points)), note, hist="ピッチ")

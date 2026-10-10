@@ -453,6 +453,37 @@ def draw_specs(project, points, ramp_sec=DRAW_RAMP_SEC):
                         "clipped": [round(pts[0][0], 4), round(pts[-1][0], 4)] != [round(t0, 4), round(t1, 4)]}
 
 
+def restore_specs(project, start_sec, end_sec, ramp_sec=DRAW_RAMP_SEC):
+    """「元に戻す線」: [start_sec, end_sec]（素材の秒）の有声のフレームのピッチを録音のピッチに戻す鉛筆。
+    (外す id, 入れる spec, info)
+
+    鉛筆（`pitch_draw`）の変種: 描く線が原音そのもの（D(t) = 原音(t)）なので、範囲の中はずらし量が 0 になる
+    （ノートのドラッグ・曲線・つなぎ・前の鉛筆も、この範囲では消える）。両端は `ramp_sec` かけて前の曲線へつなぐ。
+    範囲は有声のフレームに切り詰める。この範囲にすっぽり入る以前の鉛筆は外す（上から描き直しと同じ）。
+    後から入ったピッチ編集は、鉛筆と同じく戻した線にも足される。"""
+    a, b = sorted((float(start_sec), float(end_sec)))
+    if b - a < 1e-3:
+        raise PitchError("戻す範囲が短すぎる（1 ms 以上）")
+    vs = voiced_span(project, a, b)
+    if vs is None:
+        raise PitchError("戻す範囲に音程のある（有声の）ところが無い。無声は元から録音のまま")
+    t0, t1 = vs
+    ot, om = _orig_track(project.take_f0)
+    sel = (ot >= t0 - 1e-6) & (ot <= t1 + 1e-6)
+    pts = [[round(float(t), 6), round(float(m), 4)] for t, m in zip(ot[sel], om[sel])]
+    if len(pts) < 2:                                   # 有声のフレームが 1 つだけ
+        t1 = t0 + 1e-3
+        pts = [[round(t0, 6), round(float(np.interp(t0, ot, om)), 4)],
+               [round(t1, 6), round(float(np.interp(t0, ot, om)), 4)]]
+    rm = [e.id for e in project.edits if e.kind == "pitch_draw"
+          and float(e.target.start_sec) >= t0 - 1e-9 and float(e.target.end_sec) <= t1 + 1e-9]
+    spec = {"kind": "pitch_draw", "target": Target.range(t0, t1),
+            "params": {"points": pts, "ramp_sec": float(ramp_sec), "restore": True}}
+    return rm, [spec], {"start_sec": round(t0, 4), "end_sec": round(t1, 4),
+                        "points": len(pts), "replaced": len(rm),
+                        "clipped": [round(a, 4), round(b, 4)] != [round(t0, 4), round(t1, 4)]}
+
+
 def trim_draws(project, spans):
     """「オリジナルに戻す」: spans（編集前の秒の区間）にかかる鉛筆を、外側の部分だけ残して切る。
     (外す id, 入れる spec)"""
@@ -506,6 +537,8 @@ def trim_draws(project, spans):
             inner = [[t, m] for t, m in pts if x < t < y]
             npts = [[x, float(np.interp(x, tt, mm))]] + inner + [[y, float(np.interp(y, tt, mm))]]
             params = {"points": npts, "ramp_sec": ramp}
+            if e.params.get("restore"):
+                params["restore"] = True
             if abs(rl - ramp) > 1e-9:
                 params["ramp_l_sec"] = rl
             if abs(rr - ramp) > 1e-9:

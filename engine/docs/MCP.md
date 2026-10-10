@@ -28,7 +28,7 @@ open_project(take_path, guide_path?, lyrics?, guide_lyrics?)   ← テイクの 
      ├ list_notes() / get_pitch(range)    ← 測る
      ├ get_phonemes(range?)               ← 音素と境界（歌詞があるときだけ）
      ├ list_deviations()                  ← ガイドとのずれ（ガイドがあるときだけ）
-     ├ shift_pitch / set_pitch_curve(mode=offset|draw)      ← 直す（ピッチ。draw = 鉛筆）
+     ├ shift_pitch / set_pitch_curve(mode=offset|draw|restore) ← 直す（ピッチ。draw = 鉛筆、restore = 元に戻す線）
      ├ set_transition                                       ← ノートの変わり目のなだらかさ
      ├ split_note / merge_notes                             ← ノートを分ける / つなぐ
      ├ mute_notes / unmute_notes                            ← ノートを無音にする（長さは変えない）/ 無音だけを戻す
@@ -475,7 +475,7 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 | ツール | 引数 | 意味 |
 |---|---|---|
 | `shift_pitch` | `cents`（+100 = 1 半音上）、`note_id` / 範囲 | 音程をずらす |
-| `set_pitch_curve` | `points = [[区間頭からの秒, セント], ...]` | ピッチ曲線を与える（2 点以上）。`mode="draw"` は鉛筆（§2-1） |
+| `set_pitch_curve` | `points = [[区間頭からの秒, セント], ...]` | ピッチ曲線を与える（2 点以上）。`mode="draw"` は鉛筆（§2-1）、`mode="restore"` は points 無しで範囲を録音のピッチに戻す |
 | `move_note` | `ms`（+ が遅く）、`note_id` / **`note_ids`** / 範囲 | 横に動かす。接続側の隣が伸び縮み、切り離し側は隙間が吸収。子音・息・無音の区間も可（範囲で選ぶときは音程のあるノートだけ） |
 | `stretch` | `ratio`（0.25〜4.0）、`note_id` / 範囲 / **`phoneme_id`** | `note_id`: ノートの**尻**を動かす（画面の右端ドラッグと同じ）。`phoneme_id`: その音素の後ろの境界を動かす（`move_boundary` と同じ）。範囲: 1 つのノートの中だけ（同じノートの残りが吸収） |
 | **`move_boundary`** | `boundary_id`、`ms`（+ が遅く） | **音素の境目を動かす**（段階2）。2 音素の和を保つ局所編集 |
@@ -538,6 +538,21 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 // set_pitch_curve(points=[[149.30, 64.0], [149.45, 65.2]], mode="draw")
 {"ok": true, "changeset": "c005", "start_sec": 149.3, "end_sec": 149.45, "points": 2,
  "replaced": 0, "clipped": false, "total_edits": 4}
+```
+
+#### `set_pitch_curve(mode="restore", start_sec, end_sec | note_id)` — 元に戻す線
+
+画面のペンを右ボタンでなぞる操作（2026-10-10 承認）。points は要らない。`start_sec`〜`end_sec`（素材の秒・編集前）の
+**有声のフレームのピッチを、録音のピッチに戻す**（`note_id` ならそのノートの範囲）。ノートを動かして付けた量も、
+その範囲では消える。仕組みは鉛筆の変種で、録音のピッチを焼き込んだ線（`pitch_draw` の `params.restore = true`）を
+入れる。両端は鉛筆と同じく `ramp_ms`（40 ms）でなだらかにつなぐ。範囲は有声に切り詰め、有声が無ければ `ok: false`
+（無声は元から録音のまま）。1 回の呼び出しが 1 つの changeset で、履歴の名前は「…のピッチを元に戻した」。
+戻した後に動かしたノートのピッチは、戻した線にも足される。`apply_edits` からは使えない（このツールだけ）。
+
+```json
+// set_pitch_curve(mode="restore", start_sec=149.3, end_sec=149.6)
+{"ok": true, "changeset": "c006", "start_sec": 149.3, "end_sec": 149.6, "points": 31,
+ "replaced": 1, "clipped": false, "total_edits": 4}
 ```
 
 #### `split_note(sec, note_id?, snap_ms?)` / `merge_notes(note_a, note_b, group?)`

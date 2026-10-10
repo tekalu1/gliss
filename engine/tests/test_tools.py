@@ -283,6 +283,74 @@ def test_redraw_replaces_and_reset_trims(plain):
     assert np.allclose(off[inn6], 0.0, atol=1e-6)
 
 
+def test_restore_returns_the_recorded_pitch(plain):
+    """元に戻す線（mode="restore"）: 範囲の有声のフレームのずらし量が 0 になる（ノートの移動も鉛筆も消える）。"""
+    m = _mcp(plain)
+    n5, n6 = plain.note("n005"), plain.note("n006")
+    _shift(plain, "n005", 80)
+    _draw(plain, n6.start_sec + 0.05, n6.end_sec - 0.05, lambda t: 70.0)
+    t, _, off0, _, _ = _offsets(plain)
+    v = _voiced(plain)
+    assert np.abs(off0[v & (t >= n5.start_sec) & (t <= n6.end_sec)]).max() > 50
+    r = m.set_pitch_curve(mode="restore", start_sec=n5.start_sec - 0.05, end_sec=n6.end_sec + 0.05,
+                          author="human")
+    assert r["ok"], r
+    assert r["replaced"] == 1                                  # すっぽり覆われた鉛筆は外す
+    t, _, off, _, _ = _offsets(plain)
+    a, b = r["start_sec"], r["end_sec"]
+    inr = v & (t >= a - 1e-9) & (t <= b + 1e-9)
+    assert inr.sum() >= 10
+    assert np.abs(off[inr]).max() < 0.02                      # 録音のピッチ（0.02 セント = 点の丸め）
+    ramp = 0.04
+    out = (t < a - ramp - 1e-9) | (t > b + ramp + 1e-9)
+    assert np.allclose(off[out], off0[out])                    # 範囲（＋つなぎ）の外は変わらない
+    # 両端のつなぎは前の曲線と戻した値の間
+    lo = v & (t > a - ramp) & (t < a)
+    if lo.any():
+        assert np.all(np.abs(off[lo]) <= np.abs(off0[lo]) + 1e-6)
+
+
+def test_restore_is_one_changeset_with_its_own_name(plain):
+    m = _mcp(plain)
+    n5 = plain.note("n005")
+    _shift(plain, "n005", 50)
+    before = len(plain.changesets)
+    r = m.set_pitch_curve(mode="restore", note_id="n005", author="human")
+    assert r["ok"], r
+    assert len(plain.changesets) == before + 1
+    cs = plain.changesets[-1]
+    assert "元に戻した" in cs.label
+    e = [e for e in plain.edits if e.kind == "pitch_draw"][-1]
+    assert e.params.get("restore") is True and "元に戻した" in e.describe()
+    u = m.undo()
+    assert u["ok"], u
+    t, _, off, _, _ = _offsets(plain)
+    inr = _voiced(plain) & (t >= n5.start_sec + 0.05) & (t <= n5.end_sec - 0.05)
+    assert np.allclose(off[inr], 50.0, atol=1e-6)               # 取り消すと前の（+50 セントの）まま
+
+
+def test_restore_follows_a_later_note_drag(plain):
+    """戻したあとにノートを動かすと、戻した線ごと動く（鉛筆と同じ）。"""
+    m = _mcp(plain)
+    n = plain.note("n005")
+    _shift(plain, "n005", 80)
+    r = m.set_pitch_curve(mode="restore", note_id="n005", author="human")
+    _shift(plain, "n005", 30)
+    t, _, off, _, _ = _offsets(plain)
+    inr = _voiced(plain) & (t >= r["start_sec"]) & (t < n.end_sec - 1e-6)    # ノートの外の最後のフレームは足されない
+    assert inr.sum() >= 5
+    assert np.allclose(off[inr], 30.0, atol=0.02)
+
+
+def test_restore_on_unvoiced_only_is_refused(plain):
+    m = _mcp(plain)
+    a = next(n for n in plain.take_notes if n.kind != "note" and n.end_sec - n.start_sec > 0.1)
+    r = m.set_pitch_curve(mode="restore", start_sec=a.start_sec + 0.02, end_sec=a.end_sec - 0.02,
+                          author="human")
+    assert not r["ok"] and "無声" in r["error"]
+    assert not m.set_pitch_curve(mode="restore", author="human")["ok"]       # 範囲が無い
+
+
 # ================================================================ カット
 def test_split_and_merge(plain, tmp_path):
     m = _mcp(plain)
