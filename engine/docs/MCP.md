@@ -81,6 +81,10 @@ undo()                        # 修正を戻す
   `get_job(job_id)` で取りに行く。**`get_job` と `engine_info`・`prep_status` はエンジンのロックを取らない**
   （取るとジョブが終わるまで進捗を見に行った側が止まり、ジョブにした意味が無くなる）。
 - **ログは `<project>/engine.log`。** stdio の stderr はクライアントに捨てられるので、エンジンが自分で書く。
+- **起動したら裏で下ごしらえする。** 受け付けを始めた後、ロックを取らない裏のスレッドで librosa・scipy・numba の JIT・
+  使う F0 の方式のモデル・HubertFA を先に読む（初めての解析が待たされないように。2026-10-10 承認）。済んだら engine.log に
+  `engine start=… warm=… librosa=… numba=… onnx=… hubertfa=…`（秒）を 1 行書く。解析は段ごとの秒（`analyze method=… take_f0=… alignment=…`）、
+  F0 は方式ごとの読み込みと推定の秒（`f0 method=… load=… infer=…`）も書く。`GLISS_WARMUP=0` で止める（テスト用）
 - **`notifications/initialized` が来なくても動く。** mcp 2.x のサーバーは `initialize` を
   受け取った時点で受付を開く（`mcp/server/connection.py` の `initialize_accepted`）。
 - **エラーは例外ではなく JSON。** `{"ok": false, "error": "...", "tool": "...", "log": "..."}` を返す。
