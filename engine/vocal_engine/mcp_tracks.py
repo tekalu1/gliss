@@ -18,6 +18,7 @@ import json
 import os
 import shutil
 import tempfile
+import threading
 from contextlib import ExitStack, contextmanager
 
 import numpy as np
@@ -1300,6 +1301,9 @@ def history_summary():
 
 
 # ---------------------------------------------------------------- 画面の描画・再生
+_overview_lock = threading.Lock()             # track_overview の波形を書く間
+
+
 def _sha_of(t):
     return t.get("sha256") or hashlib.sha256(t["path"].encode("utf-8")).hexdigest()
 
@@ -1312,26 +1316,30 @@ def _clip_frames(t):
     return int(round(float(c["offset_sec"]) * sr)), int(round(float(c["length_sec"]) * sr))
 
 
-@_tool
+@_tool(lock=False)
 def track_overview(track_ids: list = None) -> dict:
     """**画面（トラックビュー）向け**: 元音声の各チャンネルの符号付き min/max を
     32/128/512/2048/8192 サンプル刻みの Int8 バイナリに書き、JSON メタのパスを返す。
     LLM が読む必要はない。素材と切り出し範囲ごとにキャッシュする。"""
-    s = _session()
-    ids = track_ids or [t["id"] for t in s.tracks]
-    d = os.path.join(s.dir, "overview")
+    with _srv._locked():                         # エンジンのロックは、トラックの情報を写す間だけ（波形を作る間は握らない）
+        s = _session()
+        ids = track_ids or [t["id"] for t in s.tracks]
+        d = os.path.join(s.dir, "overview")
+        todo = []
+        for tid in ids:
+            t = s.track(tid)
+            off, n = _clip_frames(t)
+            key = "v%d-%s-o%d-n%d" % (OVERVIEW_VERSION, _sha_of(t)[:16], off, n)
+            todo.append((tid, t["path"], off, n, int(t["sr"]), key))
     os.makedirs(d, exist_ok=True)
     out = []
-    for tid in ids:
-        t = s.track(tid)
-        off, n = _clip_frames(t)
-        sr = int(t["sr"])
-        key = "v%d-%s-o%d-n%d" % (OVERVIEW_VERSION, _sha_of(t)[:16], off, n)
+    for tid, src, off, n, sr, key in todo:
         path = os.path.join(d, key + ".json")
         binary = os.path.join(d, key + ".bin")
         try:
-            if not os.path.exists(path) or not os.path.exists(binary):
-                _write_overview(t["path"], off, n, sr, path)
+            with _overview_lock:                 # 同じ鍵の .tmp を 2 本で書かない
+                if not os.path.exists(path) or not os.path.exists(binary):
+                    _write_overview(src, off, n, sr, path)
         except Exception as e:                   # noqa: BLE001  このトラックだけ波形なし
             out.append({"id": tid, "error": str(e)})
             continue
