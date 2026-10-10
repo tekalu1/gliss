@@ -24,7 +24,8 @@
 
 **差分の再合成**（`ara_render_dirty`）は `render/region.py` の `EditCache` と同じ考え方をファイルで渡す:
 エンジンは修飾ごとに「最後に渡した版と、その時の Segment 列・窓」を覚え、`since` が同じなら
-変わった範囲（`dirty_windows`）を原音に戻させ（`restore`）、そこに掛かる窓だけを再合成して渡す（`windows`）。
+変わった Segment の付近（`plan_update`。窓の中も区切れる点で切る）を原音に戻させ（`restore`）、
+その中の窓の部分だけを再合成して渡す（`windows`）。
 プラグインは原音の上に順に当てるだけで、結果は `render_region` の全体（＝書き出し）とサンプル単位で同じ。
 `max_sec` を超える分は次の呼び出しに回す（`more`。返す版は途中の印 `<版>~<n>`。`_lock` を長く握らない）。
 """
@@ -533,16 +534,6 @@ def _guide_ara_id(s):
 
 
 # ---------------------------------------------------------------- 差分の再合成
-def _merge(spans):
-    from .render.region import _merge as merge
-    return merge(spans)
-
-
-def _inside(w, spans):
-    """窓 w が spans のどれかと**中で**重なるか（端が触れるだけは重ならない）。"""
-    return any(w[0] < b - 1e-9 and a < w[1] - 1e-9 for a, b in spans)
-
-
 def _analysis_ready(p):
     """テイクの解析をメモリかキャッシュから読むだけで使えるか（`Project._ensure_analyzed` が計算しないで済むか）。"""
     return p._take_f0 is not None or os.path.exists(os.path.join(p.dir, "cache", "take-analysis.json"))
@@ -638,14 +629,28 @@ def _pcm_parts(pcm):
 
 
 def _kept_parts(previous, restore, sr, ch, n):
-    """前の PCM の一覧から、今回の再合成で書き直す範囲（restore: [[頭のフレーム, 長さ]]。保留の窓も入る）に掛からない窓を残す。
+    """前の PCM の一覧から、今回の再合成で書き直す範囲（restore: [[頭のフレーム, 長さ]]。保留の窓も入る）の外を残す。
+    掛かる窓は範囲の外の頭と尻を残す（プラグインの EditedPcm の removeOverlappingRanges と同じ）。
     形式（周波数・チャンネル数・長さ）が違えば捨てる。"""
     if not previous or previous["sr"] != int(sr) or previous["channels"] != int(ch) or previous["source_frames"] != int(n):
         return []
     kept = []
     for part in _pcm_parts(previous):
-        ws = [w for w in part["windows"]
-              if not any(w["start_frame"] < r0 + rn and r0 < w["start_frame"] + w["frames"] for r0, rn in restore)]
+        ws = [dict(w) for w in part["windows"]]
+        for r0, rn in restore:
+            cut = []
+            for w in ws:
+                w0, w1 = w["start_frame"], w["start_frame"] + w["frames"]
+                if r0 + rn <= w0 or r0 >= w1:
+                    cut.append(w)
+                    continue
+                if r0 > w0:
+                    cut.append(dict(w, frames=r0 - w0))
+                if r0 + rn < w1:
+                    skip = r0 + rn - w0
+                    cut.append({"start_frame": r0 + rn, "frames": w1 - (r0 + rn),
+                                "byte_offset": w["byte_offset"] + skip * int(ch) * 4})
+            ws = cut
         if ws:
             kept.append({"path": part["path"], "windows": ws})
     return kept
@@ -966,8 +971,9 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
 
     返り値: rev（今の版。途中なら `<版>~<n>`）・reset（true なら手元の窓を全部捨てて原音から当て直す。
     初回・since が違う・エンジンを起動し直した・解析や素材が変わった・backend / channels が違う）・
-    restore（[[start_frame, frames]]。原音に戻す範囲）・windows（[{start_frame, frames, byte_offset}]。
-    再合成した窓。PCM は path の .f32 = float32 リトルエンディアンのインターリーブを窓の順に並べたもの）・
+    restore（[[start_frame, frames]]。原音に戻す範囲。変わった Segment の付近だけ）・windows（[{start_frame, frames, byte_offset}]。
+    再合成した窓の部分（restore の中。窓の途中で始まり・終わることがある）。
+    PCM は path の .f32 = float32 リトルエンディアンのインターリーブを窓の順に並べたもの）・
     more（max_sec を超えた残りがある。since=rev で続けて呼ぶ）・sr・channels・source_frames・
     analysis_pending（編集はあるがテイクの解析がまだ。窓は空＝原音のまま。解析が済むと ara_revs の版が変わる）。
     当てる順: reset なら空から → restore の範囲を原音に → windows を置く（重なる古い窓は消す）。
@@ -977,7 +983,7 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     """
     from .project.pitch import layered_segments
     from .render.base import resolve_backend_name
-    from .render.region import dirty_windows, windows_for
+    from .render.region import _win_frames, plan_update, windows_for
     t_all = time.perf_counter()
     if channels not in ("all", "mono"):
         raise ProjectError("channels は all か mono")
@@ -1014,20 +1020,12 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     reset = (st is None or since is None or since != st["rev"] or st["backend"] != name
              or st["channels"] != channels or st["asig"] != asig)
     if reset:
-        spans = [list(w) for w in wins]
-        restore_spans = []
+        todo = [w for w in _win_frames(wins, sr, n)]
+        restore = []
     else:
-        dirty = []
-        if st["segs"] or segs:
-            dirty = dirty_windows(p, st["segs"], segs, st["windows"], wins)
-        spans = _merge(dirty + st["pending"])
-        restore_spans = spans
-    todo = [w for w in wins if _inside(w, spans)]
-    restore = []
-    for a, b in restore_spans:
-        da, db = max(0, int(round(a * sr))), min(n, int(round(b * sr)))
-        if db > da:
-            restore.append([da, db - da])
+        # 変わった Segment の付近だけ（窓の中も区切れる点で切る。`plan_update`）。作り残し（pending）も足す
+        spans, todo, _dirty = plan_update(p, st["segs"], segs, st["windows"], wins, sr, n, extra=st["pending"])
+        restore = [[a, b - a] for a, b in spans]
     done, out_windows, chunks, total = [], [], [], 0.0
     prep_sec = rr.prepare_sec if rr is not None else 0.0
     t_render = time.perf_counter()
@@ -1036,14 +1034,11 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     if todo:
         with _srv._prep_yield():
             byte = 0
-            for w in todo:
-                wa, wb = max(0, int(round(w[0] * sr))), min(n, int(round(w[1] * sr)))
-                if done and total + (w[1] - w[0]) > limit:
+            for wa, wb in todo:
+                if done and total + (wb - wa) / sr > limit:
                     break
-                done.append(w)
-                total += w[1] - w[0]
-                if wb - wa < 2:
-                    continue
+                done.append([wa, wb])
+                total += (wb - wa) / sr
                 yw, _meta = rr.render_frames(wa, wb, segs)
                 buf = np.ascontiguousarray(yw, dtype="<f4")
                 chunks.append(buf)
@@ -1070,7 +1065,7 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     current_pcm = ({"parts": parts[:KEEP_OUT - 1], "channels": int(ch), "sr": int(sr), "source_frames": int(n)}
                    if parts else None)
     _render[ara_id] = {"rev": token, "segs": segs, "windows": [list(w) for w in wins],
-                       "pending": _merge([list(w) for w in remaining]), "backend": name,
+                       "pending": [list(w) for w in remaining], "backend": name,     # フレーム
                        "channels": channels, "asig": asig,
                        "project_dir": _norm(p.dir) if p is not None else None,
                        "audition_pcm": current_pcm}

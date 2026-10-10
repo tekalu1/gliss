@@ -8,7 +8,9 @@
   - **中身は `export_wav` が書くものと同じ。** 編集のかたまりごとの窓（端は静かなところ。
     `render/export.py` の `_windows`）を丸ごと再合成して、頼まれた範囲を切り出す。
     窓の外は元のサンプルそのもの。
-  - 編集を 1 回したら、**変わった窓だけ**を再合成すればよい（`dirty_windows`）。
+  - 編集を 1 回したら、**変わった窓だけ**を再合成すればよい（`dirty_windows`）。窓の中も、区切れる点
+    （`pipeline.clean_cuts`。そこで切って両側を別々に作っても窓をまとめて作った音とサンプル単位で同じ）で切って、
+    変わった Segment の付近だけを作り直す（`plan_update`。2026-10-10 承認）。
     `EditCache` がその差分更新を持つ（プラグインのキャッシュ＝再生はそこを読むだけ、の形）。
 
 `RegionRenderer` はチャンネルごとのレンダラ（バックエンドの下ごしらえ）を持ち回す。
@@ -259,6 +261,160 @@ def dirty_windows(project, segs_before, segs_after, windows_before=None, windows
         dirty = grown
 
 
+def _win_frames(wins, sr, n):
+    """窓（秒）→ 再合成するフレームの [[a, b], ...]（`render_frames` と同じ丸め。2 サンプル未満は作らないので除く）。"""
+    out = []
+    for w in wins:
+        a, b = max(0, int(round(w[0] * sr))), min(n, int(round(w[1] * sr)))
+        if b - a >= 2:
+            out.append([a, b])
+    return out
+
+
+def _clean_frames(segs, wins, sr, n, lo, hi):
+    """[lo, hi] の中で区切れるフレーム（窓の外か、窓の中の `clean_cuts`）の [[a, b], ...]（両端を含む）。"""
+    from .pipeline import clean_cuts
+    out, cur = [], lo
+    for wa, wb in wins:
+        if wb < lo or wa > hi:
+            continue
+        if wa >= cur:
+            out.append([cur, min(wa, hi)])
+        for a, b in clean_cuts(segs, wa / sr, wb / sr, sr, n):
+            a, b = max(a, lo), min(b, hi)
+            if b >= a:
+                out.append([a, b])
+        cur = max(cur, wb)
+    if cur <= hi:
+        out.append([cur, hi])
+    return _merge_frames(out)
+
+
+def _merge_frames(spans):
+    out = []
+    for a, b in sorted(spans):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return out
+
+
+def _intersect(xs, ys):
+    out, i, j = [], 0, 0
+    while i < len(xs) and j < len(ys):
+        a, b = max(xs[i][0], ys[j][0]), min(xs[i][1], ys[j][1])
+        if b >= a:
+            out.append([a, b])
+        if xs[i][1] < ys[j][1]:
+            i += 1
+        else:
+            j += 1
+    return out
+
+
+def _pieces(wins, x, y):
+    """[x, y) に掛かる窓の切れ端。"""
+    return [[max(a, x), min(b, y)] for a, b in wins if a < y and b > x]
+
+
+def _changed_frames(segs_before, segs_after, sr):
+    """編集の前後で中身が変わった Segment の範囲（フレーム）。フェードの印は効く範囲（出力の秒）も入れる。"""
+    kb = {_seg_key(s): s for s in segs_before if not s.is_identity()}
+    ka = {_seg_key(s): s for s in segs_after if not s.is_identity()}
+    out = []
+    for s in [kb[k] for k in kb.keys() - ka.keys()] + [ka[k] for k in ka.keys() - kb.keys()]:
+        out.append([int(np.floor(s.start_sec * sr)), int(np.ceil(s.end_sec * sr))])
+        if s.fade is not None:
+            out.append([int(np.floor(float(s.fade[0]) * sr)), int(np.ceil(float(s.fade[1]) * sr))])
+    return _merge_frames(out)
+
+
+def _snap(spans, clean):
+    """spans の端を、clean（区切れるフレームの [[a, b], ...]）の点まで外へ広げる。"""
+    out = []
+    for a, b in spans:
+        a2 = max((min(q, a) for p_, q in clean if p_ <= a), default=a)
+        b2 = min((max(p_, b) for p_, q in clean if q >= b), default=b)
+        out.append([a2, b2])
+    return _merge_frames(out)
+
+
+def local_spans(segs_before, segs_after, windows_before, windows_after, dirty, sr, n):
+    """1 回の編集（か undo）で**原音に戻して作り直す範囲**（フレームの [[a, b], ...]）。2026-10-10 承認。
+
+    `dirty_windows` の範囲（変わった Segment に掛かる窓を丸ごと）を、変わった Segment の付近だけに絞る。
+    窓の中を点 c で区切っても、c が区切れる点（`pipeline.clean_cuts`: 原音のままで位置がずれていない隙間の中、
+    区間から 60 ms 以上離れたところ）なら、区切った両側を別々に作った音は窓を丸ごと作った音と**サンプル単位で同じ**
+    （c の付近はどちらも原音そのもので、c をまたぐつなぎ目も無い）。そこで、変わった Segment の前後でいちばん近い、
+    編集の前と後の**両方で**区切れる点 x・y を選び、[x, y]（前に渡した音のまま）を残す。残すところは次をみたすこと:
+
+      - x・y が前後の両方で区切れる点で、[x, y] の中に変わった Segment が無い。
+      - [x, y] の中の窓の切れ端が前後で同じ（窓の頭が動くと、頭の隙間の伸び方が変わるので）。
+
+    みたす点が無ければ、そこは `dirty_windows` の範囲のまま作り直す（今までと同じ）。
+    windows_*: 秒の窓（`windows_for`）。dirty: `dirty_windows` の返り値（秒）。
+    """
+    if not dirty:
+        return []
+    wb, wa = _win_frames(windows_before, sr, n), _win_frames(windows_after, sr, n)
+    changes = _changed_frames(segs_before, segs_after, sr)
+    out = []
+    for a, b in dirty:
+        da, db = max(0, int(round(a * sr))), min(n, int(round(b * sr)))
+        if db <= da:
+            continue
+        chs = [[max(da, x), min(db, y)] for x, y in changes if x < db and y > da]
+        if not chs:
+            out.append([da, db])
+            continue
+        clean = _intersect(_clean_frames(segs_before, wb, sr, n, da, db),
+                           _clean_frames(segs_after, wa, sr, n, da, db))
+
+        def after(c):               # c より後ろで区切れる点（近い順）
+            return sorted({max(p_, c) for p_, q in clean if q >= c} | {p_ for p_, q in clean if p_ >= c})[:32]
+
+        def before(c):              # c より手前で区切れる点（近い順）
+            return sorted({min(q, c) for p_, q in clean if p_ <= c} | {q for p_, q in clean if q <= c},
+                          reverse=True)[:32]
+
+        start = da                  # 作り直す範囲の頭（まだ閉じていない）
+        bounds = [None] + chs + [None]
+        for lo_c, hi_c in zip(bounds[:-1], bounds[1:]):
+            xs = [da] if lo_c is None else after(lo_c[1])
+            ys = [db] if hi_c is None else before(hi_c[0])
+            kept = next(((x, y) for x in xs for y in ys
+                         if x < y and _pieces(wb, x, y) == _pieces(wa, x, y)), None)
+            if kept is None:
+                continue
+            if kept[0] > start:
+                out.append([start, kept[0]])
+            start = max(start, kept[1])
+        if start < db:
+            out.append([start, db])
+    return _merge_frames([s for s in out if s[1] > s[0]])
+
+
+def plan_update(project, segs_before, segs_after, windows_before, windows_after, sr, n, extra=()):
+    """前の版の PCM を今の版にする手順: (restore, pieces, dirty)。2026-10-10 承認。
+
+    restore: 原音に戻す範囲（フレームの [[a, b], ...]）。pieces: その上に置く再合成（フレームの [[a, b], ...]。
+    今の窓を restore の範囲で切った切れ端。1 つずつ `render_frames` で作る）。dirty: `dirty_windows`（秒）。
+    restore の外は前の版と今の版で同じ音、restore の端は今の版で区切れる点なので、置いた結果は
+    `render_region` の全体（＝書き出し）とサンプル単位で同じ。
+    extra: 前に作り残した範囲（フレーム。ARA の `max_sec` の残り）。restore に足し、端を今の版で区切れる点まで広げる。"""
+    dirty = []
+    if segs_before or segs_after:
+        dirty = dirty_windows(project, segs_before, segs_after, windows_before, windows_after)
+    restore = local_spans(segs_before, segs_after, windows_before, windows_after, dirty, sr, n)
+    wa = _win_frames(windows_after, sr, n)
+    if extra:
+        restore = _snap(_merge_frames(restore + [list(s) for s in extra]),
+                        _clean_frames(segs_after, wa, sr, n, 0, n))
+    pieces = [p for a, b in restore for p in _pieces(wa, a, b) if p[1] - p[0] >= 2]
+    return restore, sorted(pieces), dirty
+
+
 # ---------------------------------------------------------------- 区間 → PCM
 def _audition_window(wa, wb, ia, ib, sr, segs):
     """長い窓の試聴だけ、要求範囲と前後の編集境界を含む短区間へ絞る。"""
@@ -405,7 +561,8 @@ def audition(project, note_id, cents=0.0, start_sec=None, end_sec=None, renderer
 
 
 class EditCache:
-    """クリップ全体の「編集を当てた PCM」を持ち、**編集ごとに変わった窓だけ**を再合成して差し替える。
+    """クリップ全体の「編集を当てた PCM」を持ち、**編集ごとに変わった Segment の付近だけ**を再合成して差し替える
+    （`plan_update`。作り直す範囲は区切れる点で切るので、結果は全体の再合成とサンプル単位で同じ）。
 
     ARA の PlaybackRenderer がキャッシュを読むだけにする形（VST3 / ARA の調査の段階 3）の試作。
     `update()` を編集（か undo / redo）のたびに呼ぶ。返り値の `timing_sec` が
@@ -433,23 +590,17 @@ class EditCache:
         seg_sec = time.perf_counter() - t
         t = time.perf_counter()
         wins = windows_for(self.project, segs)
-        dirty = dirty_windows(self.project, self.segs, segs, self.windows, wins)
+        sr, n = self.sr, self.rr.n_frames
+        restore, pieces, _dirty = plan_update(self.project, self.segs, segs, self.windows, wins, sr, n)
         dirty_sec = time.perf_counter() - t
         prep0 = self.rr.prepare_sec
         t = time.perf_counter()
         warnings = []
-        sr, n = self.sr, self.rr.n_frames
         spans, rendered = [], []
-        for a, b in dirty:                        # いったん元のサンプルに戻す
-            da, db = max(0, int(round(a * sr))), min(n, int(round(b * sr)))
+        for da, db in restore:                    # いったん元のサンプルに戻す
             self.pcm[da:db] = self.rr.x[da:db]
             spans.append([round(da / sr, 4), round(db / sr, 4)])
-        for w in wins:                            # 掛かる窓を 1 つずつ（export_wav と同じ切り方）
-            if not _overlaps(w, dirty):
-                continue
-            wa, wb = max(0, int(round(w[0] * sr))), min(n, int(round(w[1] * sr)))
-            if wb - wa < 2:
-                continue
+        for wa, wb in pieces:                     # 窓の切れ端を 1 つずつ（`plan_update`）
             yw, meta = self.rr.render_frames(wa, wb, segs)
             self.pcm[wa:wb] = yw
             rendered.append([round(wa / sr, 4), round(wb / sr, 4)])
