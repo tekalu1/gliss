@@ -5,6 +5,7 @@
 //   (3) 「ガイドに合わせる」のタイミングスライダーで**母音だけ**が動き、離した後も同じ形
 //   (4) 歌詞レーンのダブルクリックで 1 行の入力欄が出る
 //   (5) 右クリック（issue #17）: 歌詞レーン（編集…／この区間の歌詞を消す／読み込む…）と音素（子音｜母音の境目を元に戻す）
+//   (6) 「歌詞と音素を自動で解析する」を切ると、歌詞を直しても解析せず「未解析」と出し、「音素を解析」で解析する（2026-10-10 承認）
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,9 +50,9 @@ test.beforeAll(async () => {
   });
   win.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
   await win.waitForFunction(() => window.__app?.ready(), null, { timeout: 240000 });
-  // 歌詞つきで開いたので音素が出ているはず
-  await win.waitForFunction(() => window.__app.phonemes().length > 0, null,
-    { timeout: 240000 });
+  // 歌詞つきで開いたので音素が出ているはず（音素は裏で解析する。2026-10-10 承認）
+  await win.waitForFunction(() => window.__app.phonemeState().pending.length === 0
+    && window.__app.phonemes().some((p) => p.label !== 'silence'), null, { timeout: 240000 });
 });
 
 test.afterAll(async () => {
@@ -207,11 +208,12 @@ test('(4) 歌詞レーンのダブルクリックで入力欄が出る', async (
 test('(5) 右クリック: 歌詞レーンと音素（子音｜母音の境目を元に戻す）', async () => {
   const items = () => win.evaluate(() => window.__app.menuItems());
   const svg = await win.locator('#roll').boundingBox();
-  // 歌詞のある区間の上段: 編集… / 消す / 聞き取る / 読み込む…
+  // 歌詞のある区間の上段: 編集… / 消す / 聞き取る / 音素を解析 / 読み込む…
   // （聞き取るが使えるかは faster-whisper が入っているかによる。asr.spec.js で両方を見る）
   await win.mouse.click(svg.x + svg.width / 2, svg.y + svg.height - 34, { button: 'right' });
   expect((await items()).map((x) => [x.label, x.cmd === 'transcribe' ? null : x.disabled])).toEqual([
-    ['歌詞を編集…', false], ['この区間の歌詞を消す', false], ['聞き取る', null], ['歌詞を読み込む…', false]]);
+    ['歌詞を編集…', false], ['この区間の歌詞を消す', false], ['聞き取る', null], ['音素を解析', false],
+    ['歌詞を読み込む…', false]]);
   await win.keyboard.press('Escape');
   // 境界を動かす → その左の音素（下段）を右クリック →「子音｜母音の境目を元に戻す」
   const pick = await win.evaluate(() => {
@@ -247,6 +249,34 @@ test('(5) 右クリック: 歌詞レーンと音素（子音｜母音の境目�
     await window.__app.refresh();
   });
   expect((await edits()).length).toBe(0);
+});
+
+test('(6) 自動の解析を切ると、歌詞を直しても「音素を解析」まで解析しない', async () => {
+  const state = () => win.evaluate(() => window.__app.phonemeState());
+  const marks = () => win.locator('#roll [data-ph-pending]');
+  await win.evaluate(() => window.__app.setAutoPhonemes(false));
+  expect((await state()).auto).toBe(false);
+  await win.evaluate((t) => window.__app.setLyrics(t), M.text('C.lyrics_marked'));
+  await settle();
+  expect((await state()).pending.length).toBeGreaterThan(0);
+  await expect(marks().first()).toBeAttached();
+  await expect(win.locator('#roll text', { hasText: '未解析' }).first()).toBeAttached();
+  // 裏の解析が始まる待ち（操作が止んでから約 1 秒）より長く待っても、解析しない
+  await win.waitForTimeout(3000);
+  const st = await state();
+  expect(st.pending.length).toBeGreaterThan(0);
+  expect(st.state === 'queued' || st.state === 'preparing').toBe(false);
+
+  await win.evaluate(() => window.__app.analyzePhonemesNow());
+  await win.waitForFunction(() => window.__app.phonemeState().pending.length === 0
+    && window.__app.phonemes().some((p) => p.label !== 'silence'), null, { timeout: 120000 });
+  await expect(marks()).toHaveCount(0);
+
+  await win.evaluate(() => window.__app.setAutoPhonemes(true));
+  expect((await state()).auto).toBe(true);
+  await win.evaluate((t) => window.__app.setLyrics(t), LYRICS);
+  await settle();
+  await win.waitForFunction(() => window.__app.phonemeState().pending.length === 0, null, { timeout: 120000 });
 });
 
 test('実行時のコンソールエラーが無い', async () => {

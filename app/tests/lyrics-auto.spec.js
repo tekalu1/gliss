@@ -24,8 +24,10 @@ test('推定の歌詞を表示し、1音節を直して戻せる', async () => {
   });
   try {
     const win = await app.firstWindow();
+    // 推定した歌詞の音素は裏で解析する（2026-10-10 承認）
     await win.waitForFunction(() => window.__app?.ready()
-      && window.__app.lyricsEntries().some((e) => e.origin === 'estimated'),
+      && window.__app.lyricsEntries().some((e) => e.origin === 'estimated')
+      && window.__app.phonemeState().pending.length === 0,
     null, { timeout: 240000 });
     const before = await win.evaluate(() => window.__app.lyricsEntries()[0]);
     expect(before.estimate.reading).toBe(before.text);
@@ -41,7 +43,8 @@ test('推定の歌詞を表示し、1音節を直して戻せる', async () => {
     await win.locator('#lyrIn').fill('ま');
     await win.keyboard.press('Enter');
     await win.waitForFunction(() => window.__app.idle()
-      && window.__app.lyricsEntries()[0]?.confirmed_syllables?.includes(0),
+      && window.__app.lyricsEntries()[0]?.confirmed_syllables?.includes(0)
+      && window.__app.phonemeState().pending.length === 0,
     null, { timeout: 120000 });
     const after = await win.evaluate(() => window.__app.lyricsEntries()[0]);
     expect(after.text).toContain('ま');
