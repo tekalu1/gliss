@@ -22,7 +22,7 @@ import {
   totalSec, utteranceAt,
 } from './state.js';
 import {
-  M, T, X, Y, edStep, focusRange, hasConnFocus, nearPair, pan, render, renderToolbar, rollBottom, rollTop,
+  M, T, X, Y, blockYSpans, edStep, focusRange, hasConnFocus, nearPair, pan, render, renderToolbar, rollBottom, rollTop,
   rowH, scrollPitch, size, zoom, zoomPitch,
 } from './draw.js';
 import {
@@ -272,6 +272,14 @@ function selectRange(dr, rx0, rx1, ry0, ry1) {
     const b = boxOf(n);
     const x0 = X(b.s); const x1 = X(b.e); const y0 = Y(b.hi); const y1 = Y(b.lo);
     if (x0 < rx1 && x1 > rx0 && y0 < ry1 && y1 > ry0 && sel.indexOf(n.id) < 0) sel.push(n.id);
+  }
+  // 子音・息も、描いている帯に範囲がかかれば入る（選んだ後の音程の操作は音程ノートだけに効く）
+  const ys = blockYSpans();
+  for (const n of S.blocks) {
+    const y = ys.get(n.id);
+    if (!y) continue;
+    const [s, e] = spanOf(n);
+    if (X(s) < rx1 && X(e) > rx0 && y[0] < ry1 && y[1] > ry0 && sel.indexOf(n.id) < 0) sel.push(n.id);
   }
   S.sel = sel;
 }

@@ -504,6 +504,18 @@ function connFocus() {
 /** 記号をいま描いているか（Alt でメニューバーを止めるのはこのときだけ。選択ノートが画面の外なら描かない）。 */
 export function hasConnFocus() { return connGlyphs() !== ''; }
 
+/** 子音・息が画面に描いている帯の上下（px）。範囲選択の当たり判定に使う（画面の外は入らない）。 */
+export function blockYSpans() {
+  const out = new Map();
+  const hmax = blobHMax(); const npc = noPitchCtx();
+  for (const n of S.notes) {
+    if (n.kind !== 'unvoiced' && n.kind !== 'breath') continue;
+    const ps = takeBlobs(n, hmax, npc).flat();
+    if (ps.length) out.set(n.id, [Math.min(...ps.map((p) => p.y - p.h)), Math.max(...ps.map((p) => p.y + p.h))]);
+  }
+  return out;
+}
+
 /** ポインタ（px）に近い境目の 'a|b'（無ければ null）。隙間の真ん中など、どちらの端からも遠いところは出さない。 */
 export function nearPair(x, y) {
   if (S.tool !== 'main' || !S.vd || x <= KEYS_W || y <= rollTop() || y >= rollBottom()) return null;

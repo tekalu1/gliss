@@ -157,7 +157,7 @@ export const COMMANDS = [
 
   ['undo', '元に戻す', GR.edit, ['Ctrl+Z'], () => { closePop(); closeTr(); return undo(); }],
   ['redo', 'やり直す', GR.edit, ['Ctrl+Shift+Z', 'Ctrl+Y'], () => { closePop(); closeTr(); return redo(); }],
-  ['select-all', 'すべて選択', GR.edit, ['Ctrl+A'], () => { S.sel = S.pitched.map((n) => n.id); render(); }, hasNotes],
+  ['select-all', 'すべて選択', GR.edit, ['Ctrl+A'], () => { S.sel = S.blocks.map((n) => n.id); render(); }, hasNotes],
   ['tempo', 'テンポを入力', GR.edit, [], () => openTempoInput('bpm'), () => S.tracks.length > 0],
   ['keys', 'ショートカット（キー・ホイール）…', GR.edit, ['Ctrl+,'], () => host.openKeys()],
   // ピッチ（F0）検出の方式（ユーザー設定。替えたら開いているトラックを解析し直す。f0.js）。

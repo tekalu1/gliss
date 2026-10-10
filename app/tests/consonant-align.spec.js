@@ -2,6 +2,7 @@
 //
 //   (A7) 選んである子音を押しても選択を保つ。複数を選んで動かすと、選んだ区間（音程ノートも子音も）がまとめて横に動く。
 //        音高のドラッグは音程ノートだけ
+//   (A8) 範囲選択（空白からドラッグ）・Ctrl+A に子音・息が入る。入っても、音程の操作は音程ノートだけに効く
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -137,6 +138,49 @@ test('(A7) 子音を縦にドラッグしても動かない。理由を出す', 
   await drag(body(U.id), 0, -30);
   expect(Math.abs((await startOf(U.id)) - u0)).toBeLessThan(1e-6);
   await expect(win.locator('#status')).toContainText('子音・息は音程が無いので');
+});
+
+test('(A8) Ctrl+A は音程ノートも子音・息も選ぶ。半音に合わせる（Q）は音程ノートだけに効く', async () => {
+  await select([]);
+  await win.keyboard.press('Control+a');
+  const r = await win.evaluate(() => ({
+    sel: window.__app.S.sel.length, blocks: window.__app.S.blocks.length,
+    kinds: [...new Set(window.__app.S.sel.map((i) => window.__app.S.byId.get(i).kind))].sort(),
+  }));
+  expect(r.sel).toBe(r.blocks);
+  expect(r.kinds).toContain('unvoiced');
+  expect(r.kinds).toContain('note');
+  expect(await win.evaluate(() => window.__app.noPitch().filter((n) => n.kind !== 'silence').length)).toBeGreaterThan(0);
+  // 半音に合わせるの対象は音程ノートだけ（子音・息の id を shift_pitch に渡さない = エラーが出ない）
+  const u0 = await startOf(U.id);
+  await win.keyboard.press('q');
+  await settle();
+  expect(Math.abs((await startOf(U.id)) - u0)).toBeLessThan(1e-6);
+  expect(await win.evaluate(() => window.__app.status())).not.toMatch(/失敗|エラー/);
+  await win.keyboard.press('Escape');
+  expect(await sel()).toEqual([]);
+});
+
+test('(A8) 空白からの範囲選択で、範囲にかかった子音・息も選ぶ（帯の高さに範囲が届かなければ選ばない）', async () => {
+  await select([]);
+  await view(U);
+  const b = await body(U.id).boundingBox();
+  const roll = await win.locator('#roll').boundingBox();
+  // 子音の帯をまたぐ範囲（帯の上下を含む高さ）。空白から始める
+  const y0 = b.y - 6; const y1 = b.y + b.height + 6;
+  await win.mouse.move(b.x - 2, y0 - 10);
+  await win.mouse.down();
+  await win.mouse.move(b.x + b.width + 2, y1, { steps: 8 });
+  await win.mouse.up();
+  expect(await sel()).toContain(U.id);
+  // 子音の帯より上だけの範囲には入らない
+  await select([]);
+  await win.mouse.move(b.x - 2, roll.y + 20);
+  await win.mouse.down();
+  await win.mouse.move(b.x + b.width + 2, roll.y + 24, { steps: 8 });
+  await win.mouse.up();
+  expect(await sel()).not.toContain(U.id);
+  await select([]);
 });
 
 test('エラーなし', () => {
