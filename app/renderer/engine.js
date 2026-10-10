@@ -139,8 +139,11 @@ export async function callJob(name, args, onProgress, options = {}) {
     busy.cancelWith(cancellable && r.cancellable ? cancel : null);
     const t0 = Date.now();
     let offered = false;
+    // 短い仕事を 200 ms 待たせない: 25 ms から 1.5 倍ずつ 200 ms まで延ばして聞く
+    let wait = 25;
     for (;;) {
-      await Promise.race([new Promise((res) => setTimeout(res, 200)), stopped]);
+      await Promise.race([new Promise((res) => setTimeout(res, wait)), stopped]);
+      wait = Math.min(200, wait * 1.5);
       if (gaveUp) throw giveUpError();
       const j = await Promise.race([window.api.call('get_job', { job_id: r.job_id }), stopped.then(() => null)]);
       if (gaveUp || !j) throw giveUpError();
