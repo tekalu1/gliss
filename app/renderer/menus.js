@@ -165,7 +165,7 @@ function noteMenu(e, n, t) {
     // 無音のノートのときだけ（フェードを消すと同じ）
     { ...cmd('unmute', ctx), hidden: !isEnabled('unmute', ctx) },
     SEP,
-    cmd('ask-ai', ctx),
+    cmd('ask-ai', ctx, { title: why && '子音・息への AI の依頼は、まだ決まっていません' }),
   ];
 }
 
