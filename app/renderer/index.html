@@ -6,7 +6,8 @@
 <link rel="icon" href="data:,">
 <title>Gliss</title>
 <style>
-:root{--bg:#151517;--bg2:#1c1c1f;--fg:#d6d6d6;--fg2:#8f8f94;--fg3:#5c5c62;--line:#2a2a2e;--take:#e6d24a;--guide:#4e4e54;--sel:#f2f2f2;--orig:#cf7a2e;--ai:#8fa8ff}
+:root{--bg:#151517;--bg2:#1c1c1f;--fg:#d6d6d6;--fg2:#8f8f94;--fg3:#5c5c62;--line:#2a2a2e}
+/* 色の変数（--take --guide --guide-hi --sel --orig --ai --manual --was）は palette.js が :root に入れる */
 *{box-sizing:border-box}
 html,body{margin:0;height:100%;overflow:hidden;background:#111113;color:var(--fg);font:14px/1.75 system-ui,"Segoe UI","Yu Gothic UI","Meiryo",sans-serif}
 body{display:flex;flex-direction:column}
@@ -226,6 +227,10 @@ html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
 #roll .blob{fill-opacity:.3}
 #roll .nb:hover .blob,#roll .nb.hov .blob{fill-opacity:.45}
 #roll .nb.sel .blob{fill-opacity:.62}
+/* 手で直した（白）帯: 塗りを濃くして白の縁を付ける（暗い背景で灰に見えて、ガイドと混ざらないように。縁・塗り・線の別でも見分ける） */
+#roll .nb .blob[data-man]{fill-opacity:.45;stroke:var(--manual);stroke-opacity:.55;stroke-width:1}
+#roll .nb:hover .blob[data-man],#roll .nb.hov .blob[data-man]{fill-opacity:.62}
+#roll .nb.sel .blob[data-man]{fill-opacity:.75;stroke-opacity:.95}
 .status{flex:0 0 auto;height:18px;line-height:18px;padding:0 10px;color:var(--fg3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pop,.menu{position:absolute;z-index:2;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55)}
 .pop[hidden],.menu[hidden]{display:none}

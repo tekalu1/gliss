@@ -9,25 +9,15 @@
 // 離したら同じ計画を同じ x で確定する（`engine/vocal_engine/project/timing.py`）。
 // プレビューの規則を画面側に写さないので、ドラッグ中と離した後がずれない。
 
+import { COLORS } from './palette.js';
+// 色の定義は palette.js（補正の度合いの色は corr.js）
+export { COLORS };
+
 export const LAYOUT = {
   KEYS_W: 44, SCALE_H: 20, LANE_H: 46, EDGE: 8, MIN_SEG: 0.02,
   // 音素の最短の長さ（エンジンの move_boundary と同じ 20 ms）
   MIN_PH: 0.02,
 };
-// ガイドは濃いグレー（線・帯・トラックビューの波形とも同じ色。テイクの黄とは明るさで見分ける。issue #37）。
-// 補正の度合いの色（黄 → 赤・手動の白）は corr.js
-export const COLORS = {
-  TAKE: '#e6d24a', GUIDE: '#4e4e54', SEL: '#f2f2f2',
-  // 選択したノートの元の長さ（帯の上の細い線と両端の縦線。ガイドより明るいグレー）
-  WAS: '#a4a4aa',
-  // AI（Claude Code など）の編集が最後に当たっているノートの縁（index.html の --ai と同じ）
-  AI: '#8fa8ff',
-  // 伴奏（トラックビューの波形。背景に近い薄いグレー）・編集中でないボーカル（暗い黄）
-  INST: '#707076', VOCAL: '#7d7437',
-  // 子音（歌詞があるときだけ）: テイクの黄と同じ色相・明るさのまま、彩度だけ落とす（v3 §6）
-  CONS: '#bdb57a',
-};
-
 export const S = {
   vd: null,            // export_view_data の JSON
   notes: [],           // 全ノート（無音・息も含む）
