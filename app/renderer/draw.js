@@ -11,7 +11,7 @@ import { asrCandidate, asrRunning } from './asr.js';
 import { syncAppMenu, undoLabels } from './commands.js';
 import { guideShown } from './session.js';
 import {
-  G, GRID_BARS, GRID_SEC, barsMode, currentDiv, pitchSnapOn, snapStep, ticks,
+  G, GRID_BARS, GRID_SEC, barsMode, currentDiv, penSnapOn, pitchSnapOn, snapStep, ticks,
 } from './grid.js';
 import { renderTempo } from './tempo.js';
 import { bandColor, desat, lineColorer } from './corr.js';
@@ -771,7 +771,11 @@ export function render() {
   W = r.width || 1200;
   H = r.height || 396;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('class', `tool-${S.tool}`);
+  // 鉛筆の半音（音程スナップ XOR Shift）: 先端の目印を出し、OS のカーソルは隠す（鉛筆を目印のほうで描く）
+  const penHere = S.tool === 'draw' && !!S.penHud && !S.stroke?.restore && !!S.vd;
+  const penHud = penHere && penSnapOn();
+  const penLab = penHere ? (penHud ? (G.shift ? 'Shift: 半音に沿う' : '音程スナップ: オン') : (G.snapP && G.shift ? 'Shift: 半音に沿わない' : '')) : '';
+  svg.setAttribute('class', `tool-${S.tool}${penHud ? ' pen-snap' : ''}`);
   if (!S.vd) { svg.innerHTML = ''; renderToolbar(); return; }
 
   const ROLL_T = rollTop(); const ROLL_B = rollBottom(); const ROLL_H = rollHeight();
@@ -1069,6 +1073,50 @@ export function render() {
   if (dr && dr.type === 'box' && dr.moved) {
     s += `<rect x="${f1(Math.min(dr.x0, dr.x1))}" y="${f1(Math.min(dr.y0, dr.y1))}" width="${f1(Math.abs(dr.x1 - dr.x0))}" height="${f1(Math.abs(dr.y1 - dr.y0))}" fill="${SEL}" fill-opacity=".06" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;
   }
+  // ---- 元に戻す線（ペンの右ドラッグ）: 戻す区間の薄い帯（外側の薄い帯 = 両端 40 ms のつなぎ）・戻す前の線（点線）・札
+  const rs = S.stroke?.restore && S.stroke.phase === 'drawing' && S.stroke.span ? S.stroke : null;
+  if (rs) {
+    const f0 = S.vd.f0; const R = 0.04;
+    const ex = (k) => X(warp(toEdited(f0.t0_sec + k * f0.hop_sec)));
+    const x0 = ex(rs.span[0]); const x1 = ex(rs.span[1]);
+    const e0 = X(warp(toEdited(f0.t0_sec + rs.span[0] * f0.hop_sec - R))); const e1 = X(warp(toEdited(f0.t0_sec + rs.span[1] * f0.hop_sec + R)));
+    s += `<g data-restore-band="1" pointer-events="none"><rect x="${f1(e0)}" y="${ROLL_T}" width="${f1(e1 - e0)}" height="${f1(ROLL_B - ROLL_T)}" fill="#fff" fill-opacity=".035"/>`
+      + `<rect x="${f1(x0)}" y="${ROLL_T}" width="${f1(Math.max(0, x1 - x0))}" height="${f1(ROLL_B - ROLL_T)}" fill="#fff" fill-opacity=".08"/>`
+      + `<line x1="${f1(x0)}" x2="${f1(x0)}" y1="${ROLL_T}" y2="${ROLL_B}" stroke="#fff" stroke-opacity=".55"/>`
+      + `<line x1="${f1(x1)}" x2="${f1(x1)}" y1="${ROLL_T}" y2="${ROLL_B}" stroke="#fff" stroke-opacity=".55"/></g>`;
+    const was = f0.take_edited_midi.map((m, i) => (rs.vals.has(i) && m != null && Math.abs(m - f0.take_midi[i]) > 0.03 ? m : null));
+    for (const [, d] of f0PathsColored(f0.take_edited_sec, was, () => '#fff')) {
+      s += `<path data-restore-was="1" d="${d}" fill="none" stroke="#fff" stroke-opacity=".6" stroke-dasharray="0.1 3" stroke-linecap="round" pointer-events="none"/>`;
+    }
+    const lab = `元のピッチに戻す ${(rs.vals.size * f0.hop_sec).toFixed(2)} s`;
+    const lw = [...lab].reduce((w, c) => w + (c.charCodeAt(0) > 255 ? 11.5 : 6.5), 14);
+    const cx = clamp((x0 + x1) / 2, KEYS_W + lw / 2 + 2, W - lw / 2 - 2);
+    s += `<g data-restore-label="1" pointer-events="none"><rect x="${f1(cx - lw / 2)}" y="${ROLL_T + 6}" width="${f1(lw)}" height="20" rx="3" fill="#232326" stroke="#56565c"/>`
+      + `<text x="${f1(cx)}" y="${ROLL_T + 20}" font-size="11.5" text-anchor="middle" fill="#f2f2f2">${lab}</text></g>`;
+  }
+  // ---- 鉛筆が半音に沿うとき（音程スナップ XOR Shift。2026-10-10）: 行の中心の線・鍵盤の行・音名・鉛筆（OS のカーソルは隠す）
+  if (penHud) {
+    const hud = S.penHud;
+    const sem = S.drag?.type === 'stroke' && S.stroke?.sn ? S.stroke.sn.cur : Math.round(hud.m);
+    const ys = Y(sem); const rh = rowH();
+    const ya = Math.max(ROLL_T, ys - rh / 2); const yb = Math.min(ROLL_B, ys + rh / 2);
+    if (yb > ya) {
+      s += `<g data-pen-hud="${sem}" pointer-events="none"><rect x="0" y="${f1(ya)}" width="${KEYS_W}" height="${f1(yb - ya)}" fill="#f2f2f2" fill-opacity=".6"/>`
+        + `<rect x="${KEYS_W}" y="${f1(ya)}" width="${W - KEYS_W}" height="${f1(yb - ya)}" fill="#fff" fill-opacity=".07"/>`;
+      if (ys > ROLL_T && ys < ROLL_B) s += `<line x1="${KEYS_W}" x2="${W}" y1="${f1(ys)}" y2="${f1(ys)}" stroke="#fff" stroke-opacity=".6" stroke-dasharray="5 3"/>`;
+      const hx = clamp(hud.x, KEYS_W, W);
+      const nm = noteName(sem); const lw = nm.length * 6.6 + 12;
+      let lx = hx + 26; if (lx + lw > W - 4) lx = hx - 26 - lw;
+      s += `<g data-pen-name="1"><rect x="${f1(lx)}" y="${f1(ys - 22)}" width="${f1(lw)}" height="16" rx="3" fill="#232326" stroke="#56565c"/>`
+        + `<text x="${f1(lx + lw / 2)}" y="${f1(ys - 10)}" font-size="11" text-anchor="middle" fill="#f2f2f2">${nm}</text></g>`
+        + `<g data-pen-glyph="1" transform="translate(${f1(hx - 3)},${f1(ys - 21)})"><path d="M3 21 L4.5 15.5 L16 4 a2.1 2.1 0 0 1 3 0 l1 1 a2.1 2.1 0 0 1 0 3 L8.5 19.5 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></g></g>`;
+    }
+  }
+  if (penLab) {
+    const lw = [...penLab].reduce((w, c) => w + (c.charCodeAt(0) > 255 ? 11.5 : 6.5), 18);
+    s += `<g data-pen-label="1" pointer-events="none"><rect x="${f1(W - lw - 8)}" y="${ROLL_T + 6}" width="${f1(lw)}" height="20" rx="3" fill="#232326" stroke="#56565c"/>`
+      + `<text x="${f1(W - lw / 2 - 8)}" y="${ROLL_T + 20}" font-size="11.5" text-anchor="middle" fill="#f2f2f2">${penLab}</text></g>`;
+  }
   // 鍵盤の上はどのツールでも矢印（鉛筆・はさみのカーソルにしない。issue #6）。帯・線の後に重ねる
   s += `<rect data-keys="1" x="0" y="${ROLL_T}" width="${KEYS_W}" height="${f1(ROLL_B - ROLL_T)}" fill="transparent" style="cursor:default"/>`;
   // タイムスケールは帯・線の後に描く（縦に拡大・スクロールして上にはみ出した帯を隠す）
@@ -1267,7 +1315,7 @@ export function renderToolbar() {
   tip(q('#bSnapT'), `${withKey('時間スナップ', 'snap-time')}。ドラッグ中 Shift で解除`);
   q('#bFollow').setAttribute('aria-pressed', G.follow ? 'true' : 'false');
   tip(q('#bFollow'), withKey('再生位置に追従', 'follow'));
-  tip(q('#bSnapP'), `${withKey('音程スナップ: 平均の音程を半音に', 'snap-pitch')}。ドラッグ中 Shift で解除`);
+  tip(q('#bSnapP'), `${withKey('音程スナップ: 平均の音程を半音に', 'snap-pitch')}。ドラッグ中 Shift で解除（鉛筆は Shift を押している間だけ反転）`);
   const sel = q('#gridDiv');
   const mode = barsMode() ? 'bars' : 'sec';
   if (sel && sel.dataset.mode !== mode) {

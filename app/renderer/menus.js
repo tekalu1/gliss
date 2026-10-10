@@ -277,6 +277,8 @@ function gapAt(x, y) {
 export function editorMenu(e, svg) {
   e.preventDefault();
   if (!S.vd) return;
+  // ペンの右ドラッグ（元に戻す線）を離した直後の 1 回は、メニューを出さない（interact.js endRight）
+  if (S.noMenuUntil) { const quiet = performance.now() < S.noMenuUntil; S.noMenuUntil = 0; if (quiet) return; }
   const r = svg.getBoundingClientRect();
   const x = e.clientX - r.left; const y = e.clientY - r.top;
   const d = e.target.dataset || {};

@@ -26,7 +26,7 @@ kind は pitch_shift / pitch_curve / move / stretch（段階1）＋ **move_bound
 | kind | target | params | 意味 |
 |---|---|---|---|
 | `transition` | 範囲（前のノートの尻〜次のノートの頭） | `a`, `b`, `value` | 接続された境目の**なだらかさ**（0 = 段差、0.5 = 自動、1 = ゆっくり）。後勝ち。`project/pitch.py` |
-| `pitch_draw` | 範囲（描いた区間） | `points`（[[素材の秒, MIDI], ...]）, `ramp_sec`（任意で `ramp_l_sec` / `ramp_r_sec`） | 鉛筆で描いたピッチ。範囲の中は描いた値に置き換え、両端は `ramp_sec` かけて元の曲線へつなぐ |
+| `pitch_draw` | 範囲（描いた区間） | `points`（[[素材の秒, MIDI], ...]）, `ramp_sec`（任意で `ramp_l_sec` / `ramp_r_sec`） | 鉛筆で描いたピッチ。範囲の中は描いた値に置き換え、両端は `ramp_sec` かけて元の曲線へつなぐ。`restore: true` は「元に戻す線」（描く線が原音そのもの。`set_pitch_curve` の mode="restore"） |
 | `split` | 範囲（start = end = 分割の時刻） | `note_id`, `right_id` | ノートをその時刻で 2 つに分ける（`project/notes_edit.py`）。時刻で持つので解析し直しても残る |
 | `merge` | 範囲（start = end = 境目の時刻） | `a`, `b` | 接して並ぶ 2 つのノートを 1 つにする |
 
@@ -159,6 +159,8 @@ class Edit:
         if self.kind == "transition":
             return "%s｜%s のつなぎ %.2f" % (p["a"], p["b"], p["value"])
         if self.kind == "pitch_draw":
+            if p.get("restore"):
+                return "%s のピッチを元に戻した" % self.target.describe()
             return "%s にピッチを描いた（%d 点）" % (self.target.describe(), len(p["points"]))
         if self.kind == "split":
             return "%.3f s でノートを分割" % (self.target.start_sec or 0.0)
