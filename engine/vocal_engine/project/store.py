@@ -403,6 +403,15 @@ def _code_sig():
     return _code_sig_value
 
 
+def _analysis_content(f0r, notes):
+    """解析の中身（F0・ノート。保存する値と同じ丸め）の署名。計算に掛かった秒は入れない。
+    同じ中身を後から書き直しても（裏の準備が表と同じ解析を書く）、再合成の版を変えないため。"""
+    d = f0r.to_json()
+    d.pop("elapsed_sec", None)
+    return hashlib.sha1(json.dumps([d, [n.to_json() for n in notes]], sort_keys=True, default=str)
+                        .encode("utf-8")).hexdigest()[:16]
+
+
 def _stable(analysis, drop=("analyzed_at",)):
     """解析の要約から、解析した時刻を除いたもの（中身が同じか比べる）。"""
     return {k: ({kk: vv for kk, vv in v.items() if kk not in drop} if isinstance(v, dict) else v)
@@ -486,6 +495,7 @@ class Project:
         self._guide_f0 = None
         self._take_notes = None
         self._guide_notes = None
+        self._take_content = None   # (F0, ノート, 中身の署名)。同じ解析の署名を作り直さない
         self._notes_cache = None    # (解析のノート列, split/merge の id 列, 当てた結果)
         self._alignment = None
         self._onsets = {}           # role -> (鍵, 発音の頭の秒)
@@ -1382,7 +1392,7 @@ class Project:
             "hop_s": self._take_f0.hop_s, "n_frames": int(self._take_f0.n_frames),
             "n_notes": len(self._take_notes),
             "voiced_ratio": round(float(np.mean(self._take_f0.voiced)), 4),
-            "cache": take_cache,
+            "cache": take_cache, "content": self._take_content_sig(),
         }
         if self._take_f0.meta.get("version") is not None:
             self.analysis["take"]["estimator_version"] = self._take_f0.meta["version"]
@@ -1736,6 +1746,14 @@ class Project:
             return Alignment.from_json(read_json(path))
         except _BROKEN_ERRORS as e:
             raise self._cache_broken(path, e) from e
+
+    def _take_content_sig(self):
+        """テイクの解析の中身の署名（`_analysis_content`）。同じ F0・ノートの物なら覚えた値を返す。"""
+        memo = self._take_content
+        if memo is None or memo[0] is not self._take_f0 or memo[1] is not self._take_notes:
+            memo = (self._take_f0, self._take_notes, _analysis_content(self._take_f0, self._take_notes))
+            self._take_content = memo
+        return memo[2]
 
     def _load_take_analysis(self, path):
         sig = _src_sig(path)                    # 読む前に（読んでいる間に置き換わったら、次に読み直す）

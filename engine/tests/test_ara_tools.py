@@ -8,6 +8,7 @@
 - 同じソースの 2 つの修飾が別の編集を持つ
 - `ara_render_dirty` を編集ごとに当てた結果が `render_region` の全体と一致する（取り消し・やり直しも）
 - `since` 違い・エンジンの作り直しで `reset`。`max_sec` で分けても同じ結果（途中で編集が入っても）
+- 解析を同じ中身で書き直しても `reset` しない。中身が変わる（解析し直し・方式の切り替え・ガイドの差し替え）と作り直す
 - `ara_archive` → 別の作業場所で `ara_restore` → 同じ PCM。中身の違う素材は `mismatch`
 - `ara_sync` で位置を変えると `reopened`・履歴に入らない。`ara_*` の後の `undo` が DAW の操作を戻さない
 - `ara_archive` / `ara_revs` がジョブ中（エンジンのロックを握られている間）も待たない
@@ -23,7 +24,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from conftest import VENV_PY
+from conftest import VENV_PY, needs_model
 
 SR = 44100
 # (頭の秒, 長さ, MIDI)。かたまり（窓）が分かれるように 0.6 秒あける
@@ -318,14 +319,137 @@ def test_since_mismatch_and_engine_restart_reset(ara, tmp_path):
     # backend が違えば reset
     r2 = _ok(a.ara_render_dirty("mod-A", since=r["rev"], backend="psola"))
     assert r2["reset"]
-    # 解析が変わった（解析し直した）: reset
+    # 解析が変わった（解析し直して F0 が違う）: reset
+    from vocal_engine.project import store
+    est = store.estimate_f0
     c3 = Cache(src)
     c3.sync(a, "mod-A")
-    _ok(m.analyze_take(force=True, background=False))
+    with pytest.MonkeyPatch.context() as mp:
+        def higher(**kw):
+            f = est(**kw)
+            f.f0 = np.where(f.voiced, f.f0 * 1.01, 0.0)
+            return f
+        mp.setattr(store, "estimate_f0", higher)
+        _ok(m.analyze_take(force=True, background=False))
     r3 = _ok(a.ara_render_dirty("mod-A", since=c3.rev))
     assert r3["reset"]
     c3.apply(r3)
     _same(c3, a, "mod-A")
+
+
+def _analysis_of(m):
+    from vocal_engine import mcp_tracks as mt
+    s = m._state["session"]
+    p, _ = mt._track_project(s, s.track(mt.current_track_id()))
+    return p.analysis["take"]
+
+
+def test_rewriting_the_same_analysis_keeps_the_windows(ara, tmp_path, monkeypatch):
+    """裏の準備が表と同じ解析を後から書き直しても（時刻・キャッシュのファイルだけが新しい）、版を変えず窓を作り直さない
+    （2026-10-11 承認。プラグインの通し試験の段 13）。署名は解析を書くときに 1 回だけ作る。"""
+    m, a = ara
+    from vocal_engine.project import store
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    # 裏の準備が先に拾った（解析の前の状態を読んだ）。表が先に解析し、裏は後から同じ解析を書き足す
+    pdir = m._state["session"].project_dir_of(m._state["session"].track(tid))
+    q = store.Project(pdir).load()
+    q.background = True
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(100, note_id=notes[1]))
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    before = dict(_analysis_of(m))
+    rev = _ok(a.ara_revs())["revs"]["mod-A"]
+    calls = []
+    real = store._analysis_content
+    monkeypatch.setattr(store, "_analysis_content", lambda f, n: calls.append(1) or real(f, n))
+    cache = before["cache"]
+    old_stat = os.stat(cache)
+    time.sleep(0.02)
+    q.analyze(force=True, commit=lambda _a: store.Project(q.dir).load().merge_background(q))   # prep.py の commit と同じ
+    new_stat = os.stat(cache)
+    assert new_stat.st_mtime_ns != old_stat.st_mtime_ns                  # キャッシュのファイルは書き直された
+    assert store.Project(pdir).load().analysis["take"]["content"] == before["content"]
+    assert len(calls) == 1
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == rev
+    r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+    assert r["reset"] is False and r["windows"] == [] and r["restore"] == [] and r["rev"] == c.rev
+    # project.json の解析の時刻だけが新しい（ほかの所が変わって書かれた）
+    pp = store.Project(pdir).load()
+    pp.analysis["take"]["analyzed_at"] = "2099-01-01T00:00:00"
+    pp.save()
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == rev
+    r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+    assert r["reset"] is False and r["windows"] == [] and r["rev"] == c.rev
+    _ok(m.analyze_take(force=True, background=False))        # 表でも計算し直す（中身は同じ）
+    assert len(calls) == 2
+    for _ in range(3):                                        # キャッシュを読むだけの解析・1 秒ごとの問い合わせ: 作り直さない
+        _ok(m.analyze_take(background=False))
+        r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+        assert r["reset"] is False and r["windows"] == []
+    assert len(calls) == 2
+    # 中身の署名の無い古い project.json: 前のとおり解析の時刻で見る
+    from vocal_engine import mcp_tracks as mt
+    s = m._state["session"]
+    p, _ = mt._track_project(s, s.track(tid))
+    p.analysis["take"].pop("content")
+    old = a._rev_parts(p)
+    p.analysis["take"]["analyzed_at"] = "2099-01-01T00:00:01"
+    assert a._rev_parts(p)[0] != old[0]
+
+
+@needs_model
+def test_switching_the_estimator_rebuilds_the_windows(ara, tmp_path):
+    """方式を替えると解析の中身が変わるので作り直す。戻したときも（方式ごとの保存から戻す）同じ音になる。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(100, note_id=notes[1]))
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    praat = _analysis_of(m)["content"]
+    for est in ("rmvpe", "praat"):
+        _ok(m.analyze_take(estimator=est, background=False))
+        k = len(c.calls)
+        c.sync(a, "mod-A")
+        assert c.calls[k]["reset"] and c.calls[k]["windows"], est
+        _same(c, a, "mod-A")
+    assert _analysis_of(m)["content"] == praat
+
+
+def test_changing_the_guide_rebuilds_what_changed(ara, tmp_path):
+    """ガイドを替える・動かすと、ガイドに合わせた編集の音が変わる。差分の再合成を当てた結果は全体の再合成と同じ。"""
+    m, a = ara
+    from vocal_engine import mcp_tracks as mt
+    take = _wav(tmp_path / "src" / "take.wav", _voice())
+    guide = _wav(tmp_path / "src" / "guide.wav", _voice(transpose=0.5, seed=2))
+    guide2 = _wav(tmp_path / "src" / "guide2.wav", _voice(transpose=-0.7, seed=3))
+    _open(a)
+    t1 = _add(a, "take", take)["track"]["id"]
+    _add(a, "guide", guide)
+    _add(a, "guide2", guide2)
+    _select_and_analyze(m, t1)
+    _ok(a.ara_sync(guide="guide"))
+    _ok(mt.select_track(t1))
+    _ok(m.analyze_take(background=False))
+    _ok(m.correct_to_guide(pitch_strength=1.0))
+    c = Cache(take)
+    c.sync(a, "take")
+    _same(c, a, "take")
+    first = c.buf.copy()
+    _ok(a.ara_sync(guide="guide2"))                            # ガイドを差し替える
+    _ok(mt.select_track(t1))
+    _ok(m.analyze_take(background=False))
+    _ok(m.correct_to_guide(pitch_strength=1.0))
+    k = len(c.calls)
+    c.sync(a, "take")
+    assert any(x["windows"] for x in c.calls[k:])
+    _same(c, a, "take")
+    assert not np.array_equal(c.buf, first)
 
 
 def test_max_sec_splits_into_several_calls_with_the_same_result(ara, tmp_path):

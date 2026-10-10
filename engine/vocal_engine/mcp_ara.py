@@ -457,21 +457,25 @@ def _state_sig(t, p):
 
 
 def _rev_parts(p):
-    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式・時刻・キャッシュのファイル）・描画の版と、
+    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式と、F0・ノートの中身）・描画の版と、
     編集リスト・利用者の歌詞（自動推定のままの区間は除く）から決まる。
 
-    `analyzed_at` は秒の単位なので、同じ秒の解析し直しはキャッシュのファイルの署名（大きさ・更新時刻）で見分ける。"""
+    解析の中身は、解析を書くときに作った署名（`analysis.take.content`）で見る。裏の準備が表と同じ解析を後から
+    書き直しても（解析の時刻・キャッシュのファイルが新しくなるだけ）版を変えず、窓を作り直さない（2026-10-11 承認）。
+    署名の無い古い project.json は、前のとおり解析の時刻とキャッシュのファイルの署名（大きさ・更新時刻）で見る。"""
     tk = p.take or {}
     a = (p.analysis or {}).get("take") or {}
-    cache = None
-    if a.get("cache"):
-        try:
-            st = os.stat(a["cache"])
-            cache = [st.st_size, st.st_mtime_ns]
-        except OSError:
-            pass
+    content = a.get("content")
+    if content is None:
+        content = [a.get("analyzed_at"), None]
+        if a.get("cache"):
+            try:
+                st = os.stat(a["cache"])
+                content[1] = [st.st_size, st.st_mtime_ns]
+            except OSError:
+                pass
     asig = hashlib.sha1(json.dumps([tk.get("sha256"), tk.get("offset_frames"), tk.get("frames"),
-                                    a.get("analyzed_at"), a.get("estimator"), cache, getattr(p, "render_version", RENDER_VERSION)],
+                                    content, a.get("estimator"), getattr(p, "render_version", RENDER_VERSION)],
                                    sort_keys=True, default=str).encode("utf-8")).hexdigest()[:10]
     erev = hashlib.sha1(json.dumps([[e.to_json() for e in p.edits], _without_estimates(p.lyrics)],
                                    sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:10]
