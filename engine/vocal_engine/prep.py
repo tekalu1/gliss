@@ -802,6 +802,38 @@ class Preparer:
             return run                           # 取り消された準備が段の終わりに向かっている（すぐ離れる）
         return None
 
+    def settle(self, pdir, timeout=FRONT_WAIT_SEC):
+        """表示のツールがエンジンのロックを取る**前に**、このディレクトリの裏の準備（順番待ち・準備中）を最優先に
+        して終わりを待つ（`mcp_server._tool`。2026-10-10 承認）。ロックの中の `front` で待つと、その間ほかの
+        トラックの音作り（ara_render_dirty）まで止まる。占有はしない（その後の `front` がいつもどおり占有する）。
+        timeout を過ぎたらそのまま戻る（その後はいつもどおり）。待ったら True。"""
+        key = _norm(pdir)
+        if threading.current_thread() is self._thread:
+            return False
+        deadline = time.monotonic() + timeout
+        joined = None
+        waited = False
+        with self._cv:
+            try:
+                while True:
+                    it = self._must_wait(key)
+                    if it is None or time.monotonic() >= deadline:
+                        break
+                    waited = True
+                    if joined != it.tid:
+                        if joined is not None:
+                            self._unjoin(joined)
+                        joined = it.tid
+                        self._joining[joined] = self._joining.get(joined, 0) + 1
+                        it.defer_until = 0.0
+                        self._cv.notify_all()
+                        self._ensure_thread()
+                    self._cv.wait(0.2)
+            finally:
+                if joined is not None:
+                    self._unjoin(joined)
+        return waited
+
     @contextlib.contextmanager
     def front(self, pdir, wait=True):
         """表がこのディレクトリを自分で解析する（`store.PREP_FRONT`。ensure_analyzed・音素）。
@@ -1159,6 +1191,7 @@ is_ready = PREPARER.is_ready
 mark_ready = PREPARER.mark_ready
 join = PREPARER.join
 front = PREPARER.front
+settle = PREPARER.settle
 exclusive = PREPARER.exclusive
 foreground = PREPARER.foreground
 set_paused = PREPARER.set_paused

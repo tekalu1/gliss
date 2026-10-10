@@ -257,6 +257,33 @@ def test_select_joins_running_prep_and_computes_once(env):
     assert fake.calls["dtw"].count((440, 330)) == 1
 
 
+def test_view_waits_for_prep_outside_engine_lock(env):
+    """表示のツール（export_view_data）は、準備中のトラックの終わりをエンジンのロックの外で待つ
+    （その間ほかのツールと DAW の音作りが止まらない。2026-10-10 承認）。計算は裏の 1 回。"""
+    m, mt, prep, fake, paths, sdir = env
+    _open(m, paths, sdir)
+    _ok(m.analyze_take())
+    gate = fake.gate[("f0", FREQ["b"])] = threading.Event()
+    tb = _ok(mt.add_track(paths["b"]))["track"]
+    _until(lambda: fake.entered.get(("f0", FREQ["b"])))
+    _ok(mt.select_track(tb))
+    out = {}
+    th = threading.Thread(target=lambda: out.update(v=m.export_view_data()))
+    th.start()
+    time.sleep(0.3)
+    assert th.is_alive()                                     # 準備の終わりを待っている
+    t0 = time.perf_counter()
+    _ok(m.list_changes())                                    # ロックを取るツールもすぐ返る
+    _ok(mt.list_tracks())
+    assert time.perf_counter() - t0 < 1.0
+    gate.set()
+    th.join(15)
+    v = _ok(out["v"])
+    with open(v["path"], encoding="utf-8") as f:
+        assert json.load(f)["notes"]
+    assert fake.f0_count("b") == 1
+
+
 def test_cancel_join_keeps_prep_running(env):
     m, mt, prep, fake, paths, sdir = env
     _open(m, paths, sdir)

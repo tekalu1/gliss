@@ -137,6 +137,26 @@ def _resolve_target(note_id=None, start_sec=None, end_sec=None, phoneme_id=None)
     return Target.range(t0, t1)
 
 
+# 表示のツール: エンジンのロックを取る前に、今のトラックの裏の準備（順番待ち・準備中）の終わりを待つ
+# （2026-10-10 承認）。ロックの中で待つと、その間ほかのトラックの音作り（ara_render_dirty）が止まる
+SETTLE_TOOLS = frozenset({"export_view_data", "list_notes", "get_pitch"})
+
+
+def _settle_before_lock():
+    p = _state.get("project")                 # ロックの外なので目安（違っていても、中の front がいつもどおり待つ）
+    if p is None or p._take_f0 is not None:
+        return
+    from . import prep
+    if not prep.enabled():
+        return
+    try:
+        t = time.perf_counter()
+        if prep.settle(p.dir):
+            log.get("tool").info("settle wait=%.2f（ロックの外で裏の準備を待った）", time.perf_counter() - t)
+    except Exception as e:                    # noqa: BLE001  待てなくても、ロックの中でいつもどおり待つ
+        log.get("tool").warning("裏の準備を待てない: %s", e)
+
+
 def _tool(fn=None, *, lock=True):
     """例外を JSON に畳んで返す（MCP のエラーにすると原因が分かりにくいため）。
 
@@ -186,6 +206,8 @@ def _tool(fn=None, *, lock=True):
                         a, kw = ba.args, ba.kwargs
             try:
                 if lock:
+                    if f.__name__ in SETTLE_TOOLS:
+                        _settle_before_lock()
                     with _lock:
                         r = f(*a, **kw)
                         if (f.__name__ in HISTORY_TOOLS and isinstance(r, dict)
