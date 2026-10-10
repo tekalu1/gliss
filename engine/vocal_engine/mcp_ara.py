@@ -1026,6 +1026,12 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
         # 変わった Segment の付近だけ（窓の中も区切れる点で切る。`plan_update`）。作り残し（pending）も足す
         spans, todo, _dirty = plan_update(p, st["segs"], segs, st["windows"], wins, sr, n, extra=st["pending"])
         restore = [[a, b - a] for a, b in spans]
+    ph = prep.playhead(s.dir)
+    if ph is not None and len(todo) > 1:
+        # 画面が再生位置を知らせた（prep_status）: 再生位置にかかる窓 → 後ろへ近い順 → 前へ近い順（2026-10-10 承認）。
+        # 窓は重ならないので、並べ替えても当てた結果は同じ。todo はフレーム
+        at = (ph - float(t["offset_sec"])) * sr
+        todo.sort(key=lambda w: (0, 0.0) if w[0] <= at <= w[1] else ((1, w[0] - at) if w[0] > at else (2, at - w[1])))
     done, out_windows, chunks, total = [], [], [], 0.0
     prep_sec = rr.prepare_sec if rr is not None else 0.0
     t_render = time.perf_counter()

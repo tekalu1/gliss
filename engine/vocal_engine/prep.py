@@ -516,6 +516,9 @@ class Preparer:
         self._guides = frozenset()      # ガイドとして使われているトラック id（先に準備する）
         self._current = None
         self._recent = []               # 最近選んだトラック（前ほど新しい）
+        self._focus = []                # 画面が見ているトラック（前ほど先。`set_focus`）
+        self._playhead = None           # 画面の再生位置（ソングの秒。`set_focus`）
+        self._spans = {}                # トラック id → (タイムラインの頭, 終わり)（秒）
         self._running = None
         self._claimed = {}              # 表が占有しているプロジェクトのディレクトリ → 数
         self._joining = {}              # 表が合流して待っているトラック id → 数
@@ -540,12 +543,13 @@ class Preparer:
             for it in self._items.values():
                 it.cancelled = True
             self._items, self._recent, self._current = {}, [], None
+            self._focus, self._playhead = [], None
             self._sdir = s.dir
         if current is not Ellipsis:
             self._current = current
             if current:
                 self._recent = [current] + [x for x in self._recent if x != current][:31]
-        want, order = {}, []
+        want, order, spans = {}, [], {}
         for t in s.tracks:
             if t["kind"] != "vocal" or not t.get("project_dir"):
                 continue
@@ -558,6 +562,8 @@ class Preparer:
                 continue
             tid = t["id"]
             order.append(tid)
+            off = float(t.get("offset_sec") or 0.0)
+            spans[tid] = (off, off + float(t.get("duration_sec") or 0.0))
             it = self._items.get(tid)
             if it is not None and it.sig == sig and _norm(it.pdir) == _norm(pdir):
                 if it.state == READY and not stamp_ok(pdir, sig):
@@ -575,7 +581,35 @@ class Preparer:
             if tid not in want:
                 it.cancelled = True
         self._items, self._order, self._guides = want, order, frozenset(s.guide_users())
+        self._spans = spans
         self._cv.notify_all()
+
+    def set_focus(self, sdir, visible=None, playhead_sec=None):
+        """画面が今見ているトラック（visible。前ほど先）と再生位置（ソングの秒）を準備の順番に使う
+        （DAW で開いたとき。2026-10-10 承認）: 編集対象 → 見ているトラック → 残りは再生位置から順に
+        （再生位置にかかるもの → 後ろへ近い順 → 前へ近い順）。違うセッションなら何もしない（False）。"""
+        with self._cv:
+            if sdir is None or self._sdir != sdir:
+                return False
+            if visible is not None:
+                self._focus = [str(x) for x in visible][:64]
+            if playhead_sec is not None:
+                self._playhead = float(playhead_sec)
+            self._cv.notify_all()
+            return True
+
+    def playhead(self, sdir):
+        """`set_focus` で知らされた再生位置（ソングの秒。知らされていなければ None）。"""
+        with self._cv:
+            return self._playhead if sdir is not None and self._sdir == sdir else None
+
+    def _from_playhead(self, tid):
+        """再生位置から順に並べる鍵: (0 = かかる / 1 = 後ろ / 2 = 前, 離れた秒)。"""
+        a, b = self._spans.get(tid, (0.0, 0.0))
+        ph = self._playhead
+        if ph is None or a <= ph <= b:
+            return (0, 0.0)
+        return (1, a - ph) if a > ph else (2, ph - b)
 
     @staticmethod
     def _from_stamp(it, state, entry):
@@ -946,16 +980,27 @@ class Preparer:
         if not cands:
             return None
 
+        hinted = bool(self._focus) or self._playhead is not None
+
+        def order(tid):
+            return self._order.index(tid) if tid in self._order else 999
+
         def rank(it):
             if it.tid in self._joining:
                 return (0, 0)
             if it.tid == self._current:
                 return (1, 0)
+            if hinted:
+                # 画面が見ている所を知らせた（DAW で開いた）: 見ているトラック → 再生位置から順に。
+                # ガイドの F0 はトラックの間で分け合う（`Project._shared_guide_f0`）ので、ガイドを先にしない
+                if it.tid in self._focus:
+                    return (2, self._focus.index(it.tid))
+                return (3, *self._from_playhead(it.tid), order(it.tid))
             if it.tid in self._guides:
                 return (2, 0)
             if it.tid in self._recent:
                 return (3, self._recent.index(it.tid))
-            return (4, self._order.index(it.tid) if it.tid in self._order else 999)
+            return (4, order(it.tid))
         return min(cands, key=rank)
 
     def _check(self, it):
@@ -1192,6 +1237,8 @@ mark_ready = PREPARER.mark_ready
 join = PREPARER.join
 front = PREPARER.front
 settle = PREPARER.settle
+set_focus = PREPARER.set_focus
+playhead = PREPARER.playhead
 exclusive = PREPARER.exclusive
 foreground = PREPARER.foreground
 set_paused = PREPARER.set_paused

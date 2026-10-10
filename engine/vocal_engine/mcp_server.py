@@ -2436,7 +2436,7 @@ def cancel_job(job_id: str) -> dict:
 
 
 @_tool(lock=False)
-def prep_status() -> dict:
+def prep_status(visible: list | None = None, playhead_sec: float | None = None) -> dict:
     """**画面向け**: トラックごとの裏の準備（issue #63）の状態。エンジンのロックを握らないので、
     ほかの処理の最中でもすぐ返る。
 
@@ -2445,8 +2445,14 @@ def prep_status() -> dict:
              "queued"（待ち）/ "failed"（失敗。error。選んだときに表でもう一度解析する）
       paused: 表の重い処理・一時停止の間、次の段へ進まずに待っている
     running: 今準備しているトラックの id（無ければ null）。
+    visible・playhead_sec（省略可）: 画面が今見ているトラックの id（前ほど先）と再生位置（ソングの秒）。
+      渡すと、裏の準備は編集対象 → 見ているトラック → 残りは再生位置から順に進み、DAW の差分の再合成
+      （ara_render_dirty）も再生位置に近い窓から返す（DAW で開いたとき。2026-10-10 承認）。曲は変えない。
     """
     from . import prep
+    s = _state.get("session")
+    if s is not None and (visible is not None or playhead_sec is not None):
+        prep.set_focus(s.dir, visible, playhead_sec)
     return _ok(**prep.overview())
 
 

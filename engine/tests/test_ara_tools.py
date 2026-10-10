@@ -360,6 +360,34 @@ def test_max_sec_splits_into_several_calls_with_the_same_result(ara, tmp_path):
     assert np.array_equal(part.buf, whole.buf)
 
 
+def test_dirty_windows_come_from_the_playhead(ara, tmp_path, monkeypatch):
+    """画面が再生位置を知らせると（prep_status）、差分の再合成は再生位置にかかる窓 → 後ろ → 前の順に返す。
+    当てた結果は順番を変えない場合と同じ（2026-10-10 承認）。"""
+    m, a = ara
+    from vocal_engine import prep
+    src = _wav(tmp_path / "src" / "a.wav", _voice(stereo=True))
+    _open(a)
+    tid = _add(a, "mod-A", src, offset_sec=1.0)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    for k in (0, 2, 4):
+        _ok(m.shift_pitch(50 + 30 * k, note_id=notes[k]))
+    whole = Cache(src)
+    whole.sync(a, "mod-A")
+
+    a._reset_render()
+    if _prep_off():                               # 裏の準備を止めたテストでも、このセッションの再生位置を覚えさせる
+        monkeypatch.setattr(prep.PREPARER, "_sdir", m._state["session"].dir)
+    _ok(m.prep_status(playhead_sec=1.0 + 2.8 + 0.3))         # ソングの秒（トラックは 1 秒から）。3 つ目のノートの中
+    assert prep.playhead(m._state["session"].dir) is not None
+    part = Cache(src)
+    part.sync(a, "mod-A", max_sec=0.01)
+    starts = [x["windows"][0]["start_frame"] / SR for x in part.calls if x["windows"]]
+    assert len(starts) == 3
+    assert starts[0] < 2.8 < starts[0] + 1.0 and starts[1] > 3.5 and starts[2] < 1.0   # かかる → 後ろ → 前
+    assert np.array_equal(part.buf, whole.buf)
+    _same(part, a, "mod-A")
+
+
 # ================================================================ アーカイブ
 def test_archive_restores_the_same_sound_in_another_work_place(ara, tmp_path, monkeypatch):
     m, a = ara

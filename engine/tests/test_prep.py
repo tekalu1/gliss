@@ -334,6 +334,37 @@ def test_current_track_goes_first(env):
     assert fake.f0_count("b") == 1 and fake.f0_count("c") == 1   # 譲った後も F0 はやり直さない
 
 
+def _prep_order(prep, first):
+    """first（止めておいたトラック）より後に準備を終えた順（履歴はテストの間で残る）。"""
+    hist = [h["track"] for h in prep.PREPARER.history if h["outcome"] == "ready"]
+    return hist[len(hist) - 1 - hist[::-1].index(first):]
+
+
+@pytest.mark.parametrize("hint, want", [
+    ({}, ["c", "g2", "g1"]),                                       # 知らせなし: 足した順
+    ({"playhead_sec": 4.0}, ["g1", "g2", "c"]),                    # 再生位置の後ろへ近い順 → 前
+    ({"visible": ["g2"], "playhead_sec": 4.0}, ["g2", "g1", "c"]),  # 見ているトラックが先
+])
+def test_focus_and_playhead_order(env, hint, want):
+    """画面が見ているトラックと再生位置を prep_status で知らせると、準備はその順に進む
+    （DAW で開いたとき。2026-10-10 承認）。走っている準備は止めない。"""
+    m, mt, prep, fake, paths, sdir = env
+    _open(m, paths, sdir)
+    _ok(m.analyze_take())
+    gb = fake.gate[("f0", FREQ["b"])] = threading.Event()
+    tb = _ok(mt.add_track(paths["b"]))["track"]
+    _until(lambda: fake.entered.get(("f0", FREQ["b"])))
+    ids = {"c": _ok(mt.add_track(paths["c"]))["track"],                       # 0〜2 秒
+           "g2": _ok(mt.add_track(paths["g2"], offset_sec=10.0))["track"],    # 10〜12 秒
+           "g1": _ok(mt.add_track(paths["g1"], offset_sec=5.0))["track"]}     # 5〜7 秒
+    if "visible" in hint:
+        hint = dict(hint, visible=[ids[k] for k in hint["visible"]])
+    _ok(m.prep_status(**hint))
+    gb.set()
+    _until(_ready(prep, tb, *ids.values()))
+    assert _prep_order(prep, tb) == [tb] + [ids[k] for k in want]
+
+
 # ---------------------------------------------------------------- 取り消し
 def test_guide_change_cancels_old_combination(env):
     m, mt, prep, fake, paths, sdir = env

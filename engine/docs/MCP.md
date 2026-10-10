@@ -880,7 +880,7 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `remeasure(start_sec?, end_sec?, backend?, keep_wav?)` | 編集後の音を測り直した結果。ガイドがあれば `deviation_summary.before/after`（タイミングはノートの頭で測る）と **`onset_timing`**（「ガイドに合わせる」が合わせる**発音の頭の組**ごとのガイドの頭とのずれ。`pairs`・`before`/`after` = `{n, abs_ms_median, abs_ms_p90, ms_median}`、+ はテイクが遅い。after は編集後の音から拾い直した頭。タイミングの補正が効いたかはこちらで見る） |
 | `list_changes(include_undone?)` | changeset と編集リストの一覧 |
 | `get_job(job_id)` | 長い処理の結果。`status`・`progress`・`cancellable`。裏の準備に合流した `analyze_take` は `joined`・`stage`・`stage_label` も（§1 `analyze_take`） |
-| `prep_status()` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない |
+| `prep_status(visible?, playhead_sec?)` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない。`visible`（画面が見ているトラックの id。前ほど先）・`playhead_sec`（再生位置。ソングの秒）を渡すと、準備と DAW の差分の再合成をそこから進める（曲は変えない） |
 | `pause_prep(paused?)` | 裏の準備を一時停止／再開（走っている段は最後まで進み、次の段の前で止まる。合流して待っているトラックは止めない） |
 | `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝これから解析する曲の方式（選んだ方式か既定）、`f0_estimator_chosen`＝選んだ方式（選んでいなければ null）、`f0_estimator_effective`＝開いている曲で実際に使う方式、`f0_estimator_default`、`f0_estimators`、`gliss_f0_model_found`） |
 | `set_render_version(version?, apply?)` | 選んでいる曲（トラック。ARA では選んでいる修飾）の**描画の版**（保存した編集から音を作る仕組みの版）を見る・替える。曲は作ったときの版のまま鳴る: 0.1.0-beta.6 までに作った曲（project.json・アーカイブに `render_version` が無い）は版 1 で beta.6 と同じ音、新しく作る曲・音の編集の無い曲（歌詞だけを入れた曲も）に最初の編集を足したときは最新（版 2。ピッチ曲線を重ねたときのつなぎ目で隣のノートのずらし量が漏れない）。編集のある曲に編集を足しても版は変わらない（同じトラックの中で古い描画と新しい描画を混ぜない）。`version`（1〜最新。省くと最新）、`apply`（既定 false = 替えずに、替えたら音が変わる区間だけを返す。true で替える。許可は編集。取り消しの履歴には入れず、戻すには `version` を明示して呼ぶ）。返り値 `{render_version, latest, target, changes: [{start_sec, end_sec, max_cents}]（ずらし量が 1 セント以上変わる区間。素材の秒。最大 50 件）, changed_sec, applied}`。版は project.json・ARA のアーカイブ（`render_version`）・`ara_revs` の署名に入る |
@@ -1119,6 +1119,9 @@ DAW（ARA）の文書で、修飾ごとにガイドを決める手順（外部�
   変わっていたのを読み直した。画面ではなくエンジンが決めるので、Claude Code から操作しても同じ。
 - 1 本ずつ。順番は 今のトラック → ガイドのトラック → 最近選んだ順 → 並び順。今のトラックが待っていれば、ほかの
   トラックの準備は段の境目で譲る（済んだ段は鍵付きで保存してあるので、戻ったら続きから）。
+- 画面が `prep_status(visible=…, playhead_sec=…)` で見ている所を知らせたら（DAW で開いたとき）、順番は
+  今のトラック → 見ているトラック（`visible` の順）→ 残りは再生位置から（再生位置にかかる → 後ろへ近い順 → 前へ近い順）。
+  ガイドのトラックを先にしない。走っている準備は止めない（2026-10-10 承認）。
 - 同じガイドを使うトラックの間で、ガイドの F0 を分け合う。先に準備したトラックの鍵付きのガイドの解析
   （素材の切り出し・方式・掃引・版が同じもの）を、ほかのトラックのガイドの F0 と、ガイドのトラック自身のテイクの F0 に使う。
   `force` では使わない（2026-10-10 承認）。
@@ -1288,6 +1291,8 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
   （`analysis_pending: true`。原音のまま）。裏の準備・`analyze_take` で解析が済むと `rev` が変わる。
 - 編集対象でないトラックも、編集対象を変えずにディスクのプロジェクトから作る（下ごしらえは修飾ごとに 4 本まで持つ）。
   再合成の間は裏の準備は次の段へ進まない。
+- 画面が `prep_status(playhead_sec=…)` で再生位置を知らせていれば、窓は再生位置にかかるもの → 後ろへ近い順 → 前へ近い順に
+  返す（`max_sec` で分けたときに、聞いている所から先に鳴る）。窓は重ならないので、当てた結果は順番によらず同じ（2026-10-10 承認）。
 
 呼ぶ順（プラグイン）: 起動 → `engine_info` →（あれば）`set_f0_estimator` → `ara_open(work_key)` →
 ソースの WAV を書いたら各修飾に `ara_set_modification`（アーカイブから戻すなら続けて `ara_restore`）→ `ara_render_dirty(since=null)`。
