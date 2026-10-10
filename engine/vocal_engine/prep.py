@@ -48,6 +48,19 @@
 外し、印と使い回しを取り消して準備し直す（`broken`。表は合流して待つ）。
 対応付けに失敗して位置のままの対応になった組み合わせ（#32）は「失敗」の印を書き、裏ではやり直さない。
 
+## テイクの音素（2026-10-10 承認）
+
+テイクの音素（HubertFA の強制アラインメント）はトラックの準備に含めない。トラックの準備（`analyze`）と表の
+`analyze_phonemes` は、足りない区間を `schedule_phonemes` で頼んで待たない（`store.PHONEME_SCHEDULE`）。
+曲を開いても・歌詞を直しても待たせない。頼まれたものはプロジェクトごとの音素の仕事（`_PhJob`）にして、
+ワーカーが区間ごとに計算して `cache/phonemes/parts-take.json` に足す（表は次に読んだときに組み直す）。
+
+- 順番: 合流・今のトラックの準備 → 急ぎ（「音素を解析」のコマンド）と表から頼まれた音素 → ほかのトラックの準備 →
+  裏の準備から頼まれた音素。仕事の中は、編集した区間（`Project.phoneme_priority`）から先に
+- 利用者が操作している間は進めない: 表の重い処理（`foreground`）・一時停止の間と、表の保存（`saved`）から
+  `PHONEME_IDLE_SEC` 秒は区間の間で待つ（急ぎは待たない）。歌詞がまた変わったら、区間の間で止めて頼み直す
+- 「歌詞と音素を自動で解析する」の設定が切（`store.auto_phonemes()`）なら頼まれない（急ぎだけ）
+
 ## 別のプロセスのエンジン・作業場所の破棄
 
 - 準備の間は `<プロジェクト>/prep.lock` の OS のロックを握る（`store.FileLock`）。取れなければほかのエンジンが
@@ -58,6 +71,7 @@
   ディレクトリを作り直さない。
 """
 import contextlib
+import copy
 import hashlib
 import json
 import os
@@ -82,7 +96,7 @@ PREP_LOCK_FILE = "prep.lock"
 RUNNING_FILE = "preparing.json"
 HEARTBEAT_SEC = 5.0
 DEFER_SEC = 5.0
-LYRICS_DEFER_SEC = 1.0              # 歌詞を変えた後、音素を準備し直すまでの間（表が自分で取り直すなら譲る）
+PHONEME_IDLE_SEC = 1.0              # 表の保存（操作）から、裏で音素の区間を計算し始めるまでの間
 RELEASE_WAIT_SEC = 2.0               # 作業場所を消す前に、ワーカーが離れるのを待つ秒（過ぎたら離れてから消す）
 FRONT_WAIT_SEC = 15.0                 # 同期ツールが応答を返すまでの上限（MCP の 20 秒ジョブ閾値より短い）
 
@@ -219,40 +233,14 @@ def lyrics_sig(entries):
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
 
-_lyrics_memo = {}                    # プロジェクト → ((project.json の更新時刻, サイズ, ID), 歌詞の鍵)
-
-
-def disk_lyrics_sig(pdir):
-    """ディスクの project.json のテイクの歌詞の鍵（無ければ None）。メモリに置いた同じ内容の Project があれば
-    それを、無ければ project.json が変わったときだけ読む。"""
-    p = _store.cached_project(pdir)
-    if p is not None:
-        return lyrics_sig(p.lyrics_entries("take"))
-    path = os.path.join(pdir, "project.json")
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    key, sig = _norm(pdir), (st.st_mtime_ns, st.st_size, st.st_ino)
-    hit = _lyrics_memo.get(key)
-    if hit is not None and hit[0] == sig:
-        return hit[1]
-    try:
-        d = read_json(path)
-    except (OSError, ValueError):
-        return None
-    value = lyrics_sig((d.get("lyrics") or {}).get("take"))
-    _lyrics_memo[key] = (sig, value)
-    return value
-
-
 def stamp_state(pdir, sig):
     """このトラックのこの組み合わせの印: (READY, 印) / (FAILED, 印)（対応付けに失敗して位置のままの対応。#32）/
     (None, None)（まだ・印のキャッシュが欠けた・歌詞が変わった）。
 
     組み合わせ（ガイドの指定・位置）ごとに最近の `STAMP_KEEP` 件を覚えている（issue #63 の 3）。準備済みと
-    言えるのは、印に書いた必要なファイル（テイクの解析・ガイドの解析・対応付け・発音の頭・音素）が全部、
-    同じ大きさ・内容ハッシュで残っていて、テイクの歌詞が印を書いたときのままのとき。"""
+    言えるのは、印に書いた必要なファイル（テイクの解析・ガイドの解析・対応付け・発音の頭・ガイドの音素）が全部、
+    同じ大きさ・内容ハッシュで残っているとき。テイクの歌詞・音素は見ない（音素は区間ごとに裏で解析する。
+    `schedule_phonemes`。2026-10-10 承認）。"""
     for e in _stamp_entries(pdir):
         if e["sig"] != sig:
             continue
@@ -267,8 +255,6 @@ def stamp_state(pdir, sig):
                     return None, None
             except OSError:
                 return None, None
-        if e.get("lyrics") != disk_lyrics_sig(pdir):
-            return None, None
         return READY, e
     return None, None
 
@@ -431,12 +417,10 @@ def _required_files(p):
         need += [os.path.join(g, "guide-analysis.json"), os.path.join(g, "onsets.json"),
                  os.path.join(p._alignment_cache_dir(), "alignment.json"),
                  os.path.join(p.dir, "cache", "onsets-take.json")]
-    for role in ("take", "guide"):
-        if role == "guide" and p.guide is None:
-            continue
-        entries = p.lyrics_entries(role)
-        if entries and p.phoneme_error(role) is None:    # 音素が切れなかった歌詞は、切れなかったことを覚えている
-            need.append(p._keyed_phoneme_cache(role, entries))
+    # テイクの音素は要らない（区間ごとに裏で解析する。`schedule_phonemes`）。ガイドの音素は準備の中で計算する
+    entries = p.lyrics_entries("guide") if p.guide is not None else None
+    if entries and p.phoneme_error("guide") is None:     # 音素が切れなかった歌詞は、切れなかったことを覚えている
+        need.append(p._keyed_phoneme_cache("guide", entries))
     return need
 
 
@@ -507,6 +491,33 @@ class _Item:
                 "elapsed_sec": self.elapsed_sec}
 
 
+class _PhJob:
+    """プロジェクトのテイクの音素の仕事（`Preparer.schedule_phonemes`）。歌詞が変わったら version を上げて
+    同じ仕事のまま頼み直す（走っていれば区間の間で止まる）。"""
+
+    def __init__(self, pdir):
+        self.pdir = pdir
+        self.state = QUEUED
+        self.entries, self.lkey, self.audio, self.f0 = None, None, None, None
+        self.order = []
+        self.version = 0
+        self.urgent = False         # 「音素を解析」のコマンド（設定・操作の間を待たない）
+        self.fg = False             # 表から頼まれた（裏の準備から頼まれたものより先）
+        self.error = None
+        self.runs = 0               # 同じ歌詞で済んだ回数（済んだのにまた頼まれ続けない）
+        self.gen = 0                # 区間を足して止まった回数（画面が描き直すかの目安）
+        self.steps = 0
+        self.waiting = False
+        self.defer_until = 0.0
+        self.queued_at = 0.0
+        self.elapsed_sec = None
+
+    def to_json(self):
+        return {"state": self.state, "urgent": self.urgent, "error": self.error, "gen": self.gen,
+                "paused": bool(self.waiting) if self.state == PREPARING else False,
+                "elapsed_sec": self.elapsed_sec}
+
+
 class Preparer:
     def __init__(self):
         self._cv = threading.Condition()
@@ -516,6 +527,9 @@ class Preparer:
         self._guides = frozenset()      # ガイドとして使われているトラック id（先に準備する）
         self._current = None
         self._recent = []               # 最近選んだトラック（前ほど新しい）
+        self._focus = []                # 画面が見ているトラック（前ほど先。`set_focus`）
+        self._playhead = None           # 画面の再生位置（ソングの秒。`set_focus`）
+        self._spans = {}                # トラック id → (タイムラインの頭, 終わり)（秒）
         self._running = None
         self._claimed = {}              # 表が占有しているプロジェクトのディレクトリ → 数
         self._joining = {}              # 表が合流して待っているトラック id → 数
@@ -524,6 +538,10 @@ class Preparer:
         self._thread = None
         self._after = []                # (ディレクトリ, 関数): ワーカーがそこから離れたら呼ぶ（作業場所を消す）
         self.history = []               # 済んだ準備（計測・テスト用。最近の 50 件）
+        self._ph = {}                   # プロジェクトのディレクトリ → 音素の仕事（_PhJob）
+        self._ph_running = None
+        self._last_activity = 0.0       # 表が最後に操作した（保存・重い処理の終わり）時刻（monotonic）
+        self.ph_history = []            # 済んだ音素の仕事（計測・テスト用。最近の 50 件）
 
     # ------------------------------------------------------------ 入れる
     def schedule(self, s, current=Ellipsis):
@@ -540,12 +558,14 @@ class Preparer:
             for it in self._items.values():
                 it.cancelled = True
             self._items, self._recent, self._current = {}, [], None
+            self._focus, self._playhead = [], None
             self._sdir = s.dir
+            self._ph = {}                       # 前の曲の音素の仕事はやめる（走っていれば区間の間で止まる）
         if current is not Ellipsis:
             self._current = current
             if current:
                 self._recent = [current] + [x for x in self._recent if x != current][:31]
-        want, order = {}, []
+        want, order, spans = {}, [], {}
         for t in s.tracks:
             if t["kind"] != "vocal" or not t.get("project_dir"):
                 continue
@@ -558,10 +578,12 @@ class Preparer:
                 continue
             tid = t["id"]
             order.append(tid)
+            off = float(t.get("offset_sec") or 0.0)
+            spans[tid] = (off, off + float(t.get("duration_sec") or 0.0))
             it = self._items.get(tid)
             if it is not None and it.sig == sig and _norm(it.pdir) == _norm(pdir):
                 if it.state == READY and not stamp_ok(pdir, sig):
-                    it.state = QUEUED               # 歌詞・キャッシュが変わった: 準備し直す
+                    it.state = QUEUED               # キャッシュが変わった: 準備し直す
                 want[tid] = it
                 continue
             if it is not None:
@@ -575,7 +597,35 @@ class Preparer:
             if tid not in want:
                 it.cancelled = True
         self._items, self._order, self._guides = want, order, frozenset(s.guide_users())
+        self._spans = spans
         self._cv.notify_all()
+
+    def set_focus(self, sdir, visible=None, playhead_sec=None):
+        """画面が今見ているトラック（visible。前ほど先）と再生位置（ソングの秒）を準備の順番に使う
+        （DAW で開いたとき。2026-10-10 承認）: 編集対象 → 見ているトラック → 残りは再生位置から順に
+        （再生位置にかかるもの → 後ろへ近い順 → 前へ近い順）。違うセッションなら何もしない（False）。"""
+        with self._cv:
+            if sdir is None or self._sdir != sdir:
+                return False
+            if visible is not None:
+                self._focus = [str(x) for x in visible][:64]
+            if playhead_sec is not None:
+                self._playhead = float(playhead_sec)
+            self._cv.notify_all()
+            return True
+
+    def playhead(self, sdir):
+        """`set_focus` で知らされた再生位置（ソングの秒。知らされていなければ None）。"""
+        with self._cv:
+            return self._playhead if sdir is not None and self._sdir == sdir else None
+
+    def _from_playhead(self, tid):
+        """再生位置から順に並べる鍵: (0 = かかる / 1 = 後ろ / 2 = 前, 離れた秒)。"""
+        a, b = self._spans.get(tid, (0.0, 0.0))
+        ph = self._playhead
+        if ph is None or a <= ph <= b:
+            return (0, 0.0)
+        return (1, a - ph) if a > ph else (2, ph - b)
 
     @staticmethod
     def _from_stamp(it, state, entry):
@@ -593,6 +643,7 @@ class Preparer:
             self._items, self._order, self._recent = {}, [], []
             self._sdir = self._current = None
             self._guides = frozenset()
+            self._ph = {}
             self._cv.notify_all()
 
     def release_tree(self, root, timeout=None):
@@ -618,18 +669,22 @@ class Preparer:
                     if under(it.pdir):
                         it.cancelled = True
                         del self._items[tid]
+            self._ph = {k: j for k, j in self._ph.items() if not under(j.pdir)}
             self._cv.notify_all()
+
+            def inside():
+                return any(r is not None and under(r.pdir) for r in (self._running, self._ph_running))
             t0 = time.time()
-            while self._running is not None and under(self._running.pdir) and time.time() - t0 < timeout:
+            while inside() and time.time() - t0 < timeout:
                 self._cv.wait(min(0.2, max(0.001, timeout - (time.time() - t0))))
-            return not (self._running is not None and under(self._running.pdir))
+            return not inside()
 
     def after_leave(self, root, fn):
         """ワーカーが root の下から離れたら fn を呼ぶ（今いなければすぐ呼ぶ）。`release_tree` が時間切れのときに、
         作業場所を消すのを後に回す。"""
         key = _norm(root)
         with self._cv:
-            later = self._running is not None and _under(key, self._running.pdir)
+            later = any(r is not None and _under(key, r.pdir) for r in (self._running, self._ph_running))
             if later:
                 self._after.append((key, fn))
         if not later:
@@ -650,7 +705,8 @@ class Preparer:
             return {"enabled": enabled(), "session_dir": self._sdir, "current": self._current,
                     "paused": self._paused, "running": run.tid if run is not None else None,
                     "tracks": [dict(self._items[t].to_json(), id=t) for t in self._order
-                               if t in self._items]}
+                               if t in self._items],
+                    "phonemes": [j.to_json() for j in self._ph.values()]}
 
     def is_ready(self, s, t):
         """このトラックの今の組み合わせが準備済みか（準備を止めていても、済みの印で分かる）。"""
@@ -665,37 +721,28 @@ class Preparer:
                 it = None
             elif it.state != READY:
                 return False
-            else:
-                lyr = it.lyrics
-        if it is None:
-            return stamp_ok(pdir, sig)
-        if lyr == disk_lyrics_sig(pdir) and stamp_ok(pdir, sig):
-            return True
-        # 準備した後で歌詞が変わった（外部の書き換えも）: 音素を準備し直す（ほかの段はキャッシュを読むだけ）
-        with self._cv:
-            if it.state == READY and it.lyrics == lyr:
+        if it is None or stamp_ok(pdir, sig):
+            return stamp_ok(pdir, sig) if it is None else True
+        with self._cv:                           # キャッシュが変わった: 準備し直す（済んだ段は読むだけ）
+            if it.state == READY:
                 it.state = QUEUED
                 self._cv.notify_all()
         self._ensure_thread()
         return False
 
     def saved(self, p):
-        """表の Project を保存した（`store.PREP_SAVED`。トラックのロックの中）。準備済みのトラックの歌詞が
-        変わっていたら（set_lyrics・歌詞の取り込み・音節の変更・取り消し…）、音素を裏で準備し直す。"""
-        key = _norm(p.dir)
-        again = False
-        with self._cv:
-            for it in self._items.values():
-                if it.state == READY and _norm(it.pdir) == key and \
-                        it.lyrics != lyrics_sig(p.lyrics_entries("take")):
-                    it.state = QUEUED
-                    # 表が今すぐ音素を取り直すこと（set_lyrics の reanalyze）が多いので、少し待ってから
-                    it.defer_until = time.time() + LYRICS_DEFER_SEC
-                    again = True
-            if again:
+        """表の Project を保存した（`store.PREP_SAVED`。トラックのロックの中）。利用者が操作した印にする
+        （裏の音素は `PHONEME_IDLE_SEC` 秒待つ）。テイクの歌詞が変わって音素が足りなければ（set_lyrics・歌詞の
+        取り込み・音節の変更・取り消し…）、変わった区間を裏で解析するよう頼む（自動で解析する設定のとき）。"""
+        if threading.current_thread() is not self._thread:    # 裏の準備の書き込み（merge_background）は操作ではない
+            with self._cv:
+                self._last_activity = time.monotonic()
                 self._cv.notify_all()
-        if again:
-            self._ensure_thread()
+        entries = p.lyrics_entries("take")
+        if not entries or not _store.auto_phonemes() or \
+                os.path.exists(p._keyed_phoneme_cache("take", entries)):
+            return
+        self.schedule_phonemes(p, "take")
 
     def mark_ready(self, s, t, p):
         """表の analyze_take が済んだ（既定の設定で）: 済みの印を書き、待ちから外す。
@@ -802,6 +849,38 @@ class Preparer:
             return run                           # 取り消された準備が段の終わりに向かっている（すぐ離れる）
         return None
 
+    def settle(self, pdir, timeout=FRONT_WAIT_SEC):
+        """表示のツールがエンジンのロックを取る**前に**、このディレクトリの裏の準備（順番待ち・準備中）を最優先に
+        して終わりを待つ（`mcp_server._tool`。2026-10-10 承認）。ロックの中の `front` で待つと、その間ほかの
+        トラックの音作り（ara_render_dirty）まで止まる。占有はしない（その後の `front` がいつもどおり占有する）。
+        timeout を過ぎたらそのまま戻る（その後はいつもどおり）。待ったら True。"""
+        key = _norm(pdir)
+        if threading.current_thread() is self._thread:
+            return False
+        deadline = time.monotonic() + timeout
+        joined = None
+        waited = False
+        with self._cv:
+            try:
+                while True:
+                    it = self._must_wait(key)
+                    if it is None or time.monotonic() >= deadline:
+                        break
+                    waited = True
+                    if joined != it.tid:
+                        if joined is not None:
+                            self._unjoin(joined)
+                        joined = it.tid
+                        self._joining[joined] = self._joining.get(joined, 0) + 1
+                        it.defer_until = 0.0
+                        self._cv.notify_all()
+                        self._ensure_thread()
+                    self._cv.wait(0.2)
+            finally:
+                if joined is not None:
+                    self._unjoin(joined)
+        return waited
+
     @contextlib.contextmanager
     def front(self, pdir, wait=True):
         """表がこのディレクトリを自分で解析する（`store.PREP_FRONT`。ensure_analyzed・音素）。
@@ -885,6 +964,7 @@ class Preparer:
         finally:
             with self._cv:
                 self._busy -= 1
+                self._last_activity = time.monotonic()
                 self._cv.notify_all()
 
     def set_paused(self, paused):
@@ -914,16 +994,27 @@ class Preparer:
         if not cands:
             return None
 
+        hinted = bool(self._focus) or self._playhead is not None
+
+        def order(tid):
+            return self._order.index(tid) if tid in self._order else 999
+
         def rank(it):
             if it.tid in self._joining:
                 return (0, 0)
             if it.tid == self._current:
                 return (1, 0)
+            if hinted:
+                # 画面が見ている所を知らせた（DAW で開いた）: 見ているトラック → 再生位置から順に。
+                # ガイドの F0 はトラックの間で分け合う（`Project._shared_guide_f0`）ので、ガイドを先にしない
+                if it.tid in self._focus:
+                    return (2, self._focus.index(it.tid))
+                return (3, *self._from_playhead(it.tid), order(it.tid))
             if it.tid in self._guides:
                 return (2, 0)
             if it.tid in self._recent:
                 return (3, self._recent.index(it.tid))
-            return (4, self._order.index(it.tid) if it.tid in self._order else 999)
+            return (4, order(it.tid))
         return min(cands, key=rank)
 
     def _check(self, it):
@@ -940,6 +1031,8 @@ class Preparer:
                         if o is not None and o is not it and o.state == QUEUED \
                                 and _norm(o.pdir) not in self._claimed:
                             raise _Preempt()
+                    if it.tid != self._current and self._ph_pick(front_only=True) is not None:
+                        raise _Preempt()             # 表から頼まれた音素を先に（ほかのトラックの準備は後で続ける）
                 if self._hold(it):
                     it.waiting = True
                     t0 = time.perf_counter()
@@ -988,13 +1081,32 @@ class Preparer:
                 log.get("prep").exception("裏の準備のワーカーで例外")
                 time.sleep(1.0)
 
+    def _next(self):
+        """次の仕事: トラックの準備（_Item）か音素の仕事（_PhJob）。順番は冒頭の「テイクの音素」。"""
+        it = self._pick()
+        if it is not None and (it.tid in self._joining or it.tid == self._current):
+            return it
+        job = self._ph_pick(front_only=True)
+        if job is not None:
+            return job
+        if it is not None:
+            return it
+        return self._ph_pick()
+
     def _step(self):
         """1 件を選んで準備する（無ければ待つ）。"""
         with self._cv:
-            it = self._pick()
-            while it is None:
-                self._cv.wait(0.5)
-                it = self._pick()
+            it = self._next()
+            while it is None:               # 操作の後に待たせている音素があれば、早めに見直す
+                self._cv.wait(0.2 if any(j.state == QUEUED for j in self._ph.values()) else 0.5)
+                it = self._next()
+            if isinstance(it, _PhJob):
+                it.state, it.error = PREPARING, None
+                self._ph_running = it
+                self._cv.notify_all()
+        if isinstance(it, _PhJob):
+            return self._ph_step(it)
+        with self._cv:
             it.state, it.stage, it.progress = PREPARING, None, 0.0
             it.preempt, it.waiting, it.error, it.retry = False, False, None, True
             it.stage_sec, it._stage_t0, it.wait_sec = {}, None, 0.0
@@ -1143,6 +1255,177 @@ class Preparer:
         except Exception as e:                   # noqa: BLE001
             log.get("prep").warning("描画データを作れない（選んだときに作る）: %s（%s）", it.tid, e)
 
+    # ------------------------------------------------------------ テイクの音素（2026-10-10 承認）
+    def schedule_phonemes(self, p, source="take", urgent=False):
+        """テイクの音素の足りない区間を裏で解析するよう頼む（`store.PHONEME_SCHEDULE`）。頼めたら True（呼んだ
+        側は計算しない）。頼めない（裏の準備を止めている・ガイド・重みが無い・同じ歌詞で失敗した）なら False
+        （呼んだ側が計算する。失敗は呼んだ側で覚えて出す）。
+
+        urgent: 「音素を解析」のコマンド（MCP の analyze_phonemes）。手動の設定でも・操作の途中でも待たずに解析する。"""
+        if source != "take" or not enabled() or p.take is None:
+            return False
+        from .phoneme import hubertfa
+        if not hubertfa.model_found():
+            return False
+        entries = p.lyrics_entries("take")
+        if not entries:
+            return False
+        lkey, audio = lyrics_sig(entries), p._phoneme_parts_audio("take")
+        try:
+            order = p.phoneme_priority("take")
+        except Exception:                                # noqa: BLE001  順は効かせないだけ
+            order = []
+        key = _norm(p.dir)
+        with self._cv:
+            job = self._ph.get(key)
+            same = job is not None and job.lkey == lkey and job.audio == audio
+            if same and job.state == FAILED and not urgent:
+                return False
+            if same and job.state == READY and job.runs >= 2:
+                return False                     # 済んだのにまた足りない（保存が消された）: 表で計算する
+            if job is None:
+                job = self._ph[key] = _PhJob(p.dir)
+            if not same:
+                job.version += 1
+                job.entries, job.lkey, job.audio = copy.deepcopy(entries), lkey, audio
+                job.runs, job.error, job.f0 = 0, None, None
+                job.queued_at = time.time()
+            if p._take_f0 is not None:
+                job.f0 = p._take_f0
+            if job.state != PREPARING:
+                job.state, job.defer_until = QUEUED, 0.0
+            job.order = order
+            job.urgent = job.urgent or bool(urgent)
+            job.fg = job.fg or not p.background
+            self._cv.notify_all()
+        self._ensure_thread()
+        return True
+
+    def phoneme_status(self, pdir):
+        """裏の音素の仕事の状態（無ければ state None）。auto は「歌詞と音素を自動で解析する」の設定。"""
+        with self._cv:
+            job = self._ph.get(_norm(pdir))
+            d = job.to_json() if job is not None else {"state": None, "gen": 0}
+        d["auto"] = _store.auto_phonemes()
+        return d
+
+    def _ph_held(self, job):
+        """利用者の操作の間は進めない（急ぎは待たない）。"""
+        if job.urgent:
+            return False
+        return self._paused or (self._busy > 0 and _yield_enabled()) or \
+            time.monotonic() - self._last_activity < PHONEME_IDLE_SEC
+
+    def _ph_pick(self, front_only=False):
+        """次の音素の仕事（急ぎ → 表から頼まれた → 裏の準備から頼まれた。同じなら先に頼まれた順）。"""
+        now = time.time()
+        auto = _store.auto_phonemes()
+        cands = [j for j in self._ph.values()
+                 if j.state == QUEUED and j.defer_until <= now and _norm(j.pdir) not in self._claimed
+                 and (j.urgent or auto) and (j.urgent or j.fg or not front_only) and not self._ph_held(j)]
+        if not cands:
+            return None
+        return min(cands, key=lambda j: (0 if j.urgent else 1 if j.fg else 2, j.queued_at))
+
+    def _ph_should_stop(self, job, version):
+        """区間の間: やめるか（歌詞がまた変わった・表が占有した・先にやるものがある）。操作の間はここで待つ。"""
+        key = _norm(job.pdir)
+        with self._cv:
+            job.steps += 1
+            while True:
+                if self._ph.get(key) is not job or job.version != version or key in self._claimed:
+                    return True
+                if not job.urgent:
+                    if not _store.auto_phonemes():
+                        return True              # 設定を手動にした: 残りは「音素を解析」で
+                    for tid in list(self._joining) + [self._current]:
+                        o = self._items.get(tid)
+                        if o is not None and o.state == QUEUED and _norm(o.pdir) not in self._claimed:
+                            return True          # 合流・今のトラックの準備を先に
+                    other = self._ph_pick(front_only=True)
+                    if other is not None and (not job.fg or other.urgent):
+                        return True
+                    if not job.fg and self._pick() is not None:
+                        return True              # 裏の準備から頼まれた音素は、ほかのトラックの準備の後
+                    if self._ph_held(job):
+                        job.waiting = True
+                        self._cv.wait(0.2)
+                        continue
+                job.waiting = False
+                return False
+
+    def _ph_step(self, job):
+        """音素の仕事を 1 回進める（区間の間で止めたら順番待ちに戻す。解析した区間は残っている）。"""
+        with self._cv:
+            version, entries, order, f0, audio = job.version, job.entries, list(job.order), job.f0, job.audio
+            job.steps, job.waiting = 0, False
+        t0 = time.perf_counter()
+        outcome, err, pending = READY, None, None
+        try:
+            pending = self._ph_run(job, version, entries, order, f0, audio)
+            if pending:
+                outcome = QUEUED
+        except _Cancel:
+            outcome = "cancel"
+        except _Defer:
+            outcome = "defer"
+        except Exception as e:                   # noqa: BLE001
+            outcome, err = FAILED, str(e) or type(e).__name__
+            log.get("prep").exception("裏の音素の解析に失敗: %s", job.pdir)
+        dt = time.perf_counter() - t0
+        key = _norm(job.pdir)
+        with self._cv:
+            self._ph_running = None
+            job.waiting = False
+            if self._ph.get(key) is not job:
+                pass                             # 外された（作業場所の破棄・セッションを閉じた）
+            elif job.version != version:
+                job.state = QUEUED               # 歌詞がまた変わった: 新しい歌詞で続ける
+            elif outcome == READY:
+                job.state, job.urgent, job.fg = READY, False, False
+                job.runs += 1
+                job.elapsed_sec = round(dt, 3)
+            elif outcome == FAILED:
+                job.state, job.error, job.urgent = FAILED, err, False
+            elif outcome == "cancel":
+                del self._ph[key]
+            else:
+                job.state = QUEUED               # 区間の間で止めた（操作・先にやるもの）: 続きは後で
+                if outcome == "defer":
+                    job.defer_until = time.time() + DEFER_SEC
+            job.gen += 1
+            self.ph_history = (self.ph_history + [{"pdir": job.pdir, "outcome": outcome, "sec": round(dt, 3),
+                                                   "pending": pending, "steps": job.steps}])[-50:]
+            later = [fn for k, fn in self._after if _under(k, job.pdir)]
+            self._after = [(k, fn) for k, fn in self._after if not _under(k, job.pdir)]
+            self._cv.notify_all()
+        log.get("prep").info("裏の音素: %s → %s（%.2f s。未解析 %s）", job.pdir, outcome, dt, pending)
+        for fn in later:
+            try:
+                fn()
+            except Exception:                    # noqa: BLE001
+                log.get("prep").exception("音素の解析が離れた後の後始末に失敗")
+
+    def _ph_run(self, job, version, entries, order, f0, audio):
+        """表とは別の Project で開き、足りない区間を計算して part の置き場に足す。未解析で残った区間を返す。"""
+        pdir = job.pdir
+        if not os.path.isdir(pdir):
+            raise _Cancel()
+        q = Project(pdir).load()
+        q.background = True                      # project.json・今の写しは書かない（鍵付きの保存と part だけ）
+        if q.take is None or q._phoneme_parts_audio("take") != audio:
+            raise _Cancel()                      # テイクが変わった（頼み直される）
+        q._store_lyrics(copy.deepcopy(entries), "take", save=False)
+        if f0 is not None:
+            q._take_f0 = f0
+        elif q.analysis_cached():
+            q.ensure_analyzed()                  # キャッシュを読むだけ
+        else:
+            raise _Defer()                       # テイクの解析がまだ（準備・表の解析が済んだら頼み直される）
+        r = q.analyze_phonemes("take", compute=True, order=order,
+                               should_stop=lambda: self._ph_should_stop(job, version))
+        return list((r.aligner.get("pending_entries") if r is not None else None) or [])
+
 
 PREPARER = Preparer()
 _store.PREP_FRONT = PREPARER.front
@@ -1150,6 +1433,7 @@ _store.PREP_RELEASE = PREPARER.release_tree
 _store.PREP_AFTER_LEAVE = PREPARER.after_leave
 _store.PREP_SAVED = PREPARER.saved
 _store.PREP_BROKEN = PREPARER.broken
+_store.PHONEME_SCHEDULE = PREPARER.schedule_phonemes
 
 schedule = PREPARER.schedule
 reset = PREPARER.reset
@@ -1159,6 +1443,11 @@ is_ready = PREPARER.is_ready
 mark_ready = PREPARER.mark_ready
 join = PREPARER.join
 front = PREPARER.front
+settle = PREPARER.settle
+set_focus = PREPARER.set_focus
+playhead = PREPARER.playhead
 exclusive = PREPARER.exclusive
 foreground = PREPARER.foreground
 set_paused = PREPARER.set_paused
+schedule_phonemes = PREPARER.schedule_phonemes
+phoneme_status = PREPARER.phoneme_status

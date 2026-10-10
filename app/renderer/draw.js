@@ -8,6 +8,7 @@ import {
 } from './state.js';
 import { withKey } from './keys.js';
 import { asrCandidate, asrRunning } from './asr.js';
+import { analyzing, pendingEntries } from './phonemes.js';
 import { syncAppMenu, undoLabels } from './commands.js';
 import { guideShown } from './session.js';
 import {
@@ -825,8 +826,21 @@ function clipMuteBands(ROLL_T, ROLL_B) {
   return s;
 }
 
+/** 反映待ちの印（斜線の縞。2026-10-10 承認の A 案）: 離した形の帯に重ねる。結果を画面に採ったら消える。 */
+const SYNC_HATCH = '<defs><pattern id="syncHatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">'
+  + '<rect width="7" height="7" fill="#1d2a1f"/><rect width="3" height="7" fill="#7fc08a"/></pattern></defs>';
+function syncMark(id, ...ds) {
+  let s = '';
+  for (const d of ds) if (d) s += `<path data-sync="${id}" d="${d}" fill="url(#syncHatch)" opacity=".95" pointer-events="none"/>`;
+  return s;
+}
+
 // ---------------------------------------------------------------- 本体
+let renders = 0;
+/** 描いた回数（反映待ちの印が変わった後に、もう描いたかを見る。edits.js の syncMarks）。 */
+export const renderCount = () => renders;
 export function render() {
+  renders += 1;
   if (!svg) return;
   const r = svg.getBoundingClientRect();
   W = r.width || 1200;
@@ -843,7 +857,7 @@ export function render() {
   const dr = S.drag;
   const main = S.tool === 'main';
   const hovTool = main || S.tool === 'mute';       // ノートに乗ったら濃くする（鉛筆・はさみは出さない）
-  let s = '';
+  let s = S.syncing.size ? SYNC_HATCH : '';
 
   // ---- 鍵盤
   const selm = S.sel.length === 1 && S.byId.get(S.sel[0])?.pitch_midi != null
@@ -944,6 +958,7 @@ export function render() {
     const opacity = bc === TAKE ? '.14' : '.45';
     if (d.main) s += `<path data-nopitch="${n.id}" d="${d.main}" fill="${bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
     if (d.cons) s += `<path data-nopitch="${n.id}" data-cons="${n.id}" d="${d.cons}" fill="${bc === TAKE ? desat(bc) : bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
+    if (S.syncing.has(n.id)) s += syncMark(n.id, d.main, d.cons);
     if (main || S.tool === 'cut' || S.tool === 'mute' || S.tool === 'draw') s += noPitchHit(n, segs, noPitchConn(n));
     const [s0, s1] = spanOf(n);
     const first = segs[0][0]; const last = segs[segs.length - 1][segs[segs.length - 1].length - 1];
@@ -1001,6 +1016,7 @@ export function render() {
     // AI（Claude Code など）の編集が最後に当たっているノートは、帯の縁を AI の色に（state.js の aiNotesOf）
     if (bd0.main && S.aiNotes.has(n.id)) s += `<path data-ai="${n.id}" d="${bd0.main}" fill="none" stroke="${AI_EDGE}" stroke-width="1.2" stroke-opacity=".9" pointer-events="none"/>`;
     if (bd0.cons) s += `<path class="blob" data-cons="${n.id}" d="${bd0.cons}" fill="${desat(bc)}" pointer-events="none"/>`;
+    if (S.syncing.has(n.id)) s += syncMark(n.id, bd0.main, bd0.cons);
     s += `<rect data-note="${n.id}" x="${f1(x0)}" y="${f1(y0)}" width="${f1(Math.max(2, x1 - x0))}" height="${f1(Math.max(4, y1 - y0))}"`
       + ' fill="transparent" style="cursor:move"/>';
     // 元の長さ（issue #37）: **選択したノートだけ**、動かしていれば元の頭〜尻を帯のいちばん太い所の上 2 px に
@@ -1233,6 +1249,7 @@ export function render() {
       s += `<text x="${f1(mx)}" y="${ROLL_B + 19}" text-anchor="middle" font-size="13" fill="${isSel(n.id) ? SEL : '#d6d6d6'}" pointer-events="none">${esc(n.text)}</text>`;
     }
   }
+  s += pendingLane(ROLL_B);
   s += asrLane(ROLL_B, cand);
   if (dr && dr.type === 'lane' && dr.moved) {
     const lx = Math.min(dr.x0, dr.x1); const lw = Math.abs(dr.x1 - dr.x0);
@@ -1248,6 +1265,23 @@ export function render() {
   svg.innerHTML = s;
   renderToolbar();
   for (const fn of hooks.render) fn();
+}
+
+/** 音素をまだ解析していない歌詞の区間（2026-10-10 承認）: 点線の枠と「解析中…」（裏で解析している）・「未解析」。 */
+function pendingLane(ROLL_B) {
+  let s = '';
+  const label = analyzing() ? '解析中…' : '未解析';
+  for (const i of pendingEntries()) {
+    const e = S.lyricsEntries[i];
+    if (!e) continue;
+    const whole = e.start_sec == null;
+    const x0 = Math.max(KEYS_W, X(toEdited(whole ? 0 : e.start_sec)));
+    const x1 = Math.min(W, X(toEdited(whole ? S.vd.duration_sec : e.end_sec)));
+    if (x1 - x0 < 2) continue;
+    s += `<rect data-ph-pending="${i}" x="${f1(x0)}" y="${ROLL_B + 26}" width="${f1(x1 - x0)}" height="16" rx="2" fill="#18181b" stroke="#5c5c62" stroke-dasharray="3 3" pointer-events="none"/>`;
+    if (x1 - x0 > 46) s += `<text x="${f1(x0 + 5)}" y="${ROLL_B + 38}" font-size="10" fill="#7a7a80" pointer-events="none">${label}</text>`;
+  }
+  return s;
 }
 
 /** 聞き取り（issue #54）: 聞き取っている区間の枠と、候補の文字（歌詞レーンの上段に薄く。語は聞こえた時刻に置く）。 */

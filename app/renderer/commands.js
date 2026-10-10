@@ -24,6 +24,7 @@ import { guideShown, guideWhy } from './session.js';
 import { L as LEGEND, setLegend } from './legend.js';
 import { asrRangeAt, asrReady, asrWhy, defaultAsrTime, transcribeAt } from './asr.js';
 import { chooseF0, f0State } from './f0.js';
+import { analyzePhonemesNow, autoPhonemes, toggleAutoPhonemes } from './phonemes.js';
 import {
   accelerator, comboOf, commandFor, keysOf, onKeysChanged, registerDefaults, wheelCombo,
 } from './keys.js';
@@ -193,6 +194,9 @@ export const COMMANDS = [
   // 結果は候補で、確定の歌詞は変えない（Enter で採用・ダブルクリックで直す・Esc で取り消し。asr.js）
   ['transcribe', '聞き取る', GR.lyrics, [], (ctx) => transcribeAt(ctx?.t ?? defaultAsrTime()),
     (ctx) => hasNotes() && asrReady() && !!asrRangeAt(ctx?.t ?? defaultAsrTime())],
+  // 音素の解析（2026-10-10 承認。phonemes.js）: 自動なら歌詞を直した区間を裏で解析する。切なら「音素を解析」を押したときだけ
+  ['analyze-phonemes', '音素を解析', GR.lyrics, [], analyzePhonemesNow, () => !!S.take],
+  ['auto-phonemes', '歌詞と音素を自動で解析する', GR.lyrics, [], toggleAutoPhonemes, null, autoPhonemes],
 
   ['snap-time', '時間スナップ', GR.view, ['N'], () => toggleSnap('time'), null, () => G.snapT],
   ['snap-pitch', '音程スナップ（半音）', GR.view, ['Shift+N'], () => toggleSnap('pitch'), null, () => G.snapP],
@@ -293,6 +297,7 @@ const NEEDS = {
   split: '分ける区間が無い（再生位置を選んだ区間の上に置く）', 'select-all': 'ノートが無い',
   'show-all': 'ノートが無い', 'reset-original': 'ノートが無い', 'ask-ai': 'ノートを選ぶか、ループの範囲を決めてから',
   'audition-selected': 'ノートを選んでから',
+  'analyze-phonemes': 'トラックが無い',
   transcribe: () => (asrReady() ? '発声のある所で（ノートを選ぶか、再生位置を発声の上に置く）' : asrWhy()),
 };
 /** コマンドが使えない理由（ガイドは重ならない理由をその場で。issue #32）。 */
@@ -336,7 +341,8 @@ const MENUBAR = [
   ['ファイル', ['new-project', 'open-take', { recent: true, label: '最近使ったプロジェクト' }, SEP, 'save', 'save-as', SEP,
     'add-track', 'open-guide', 'load-lyrics', 'import-lyrics', SEP, 'export', 'export-as', SEP, { role: 'quit', label: '終了' }]],
   ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'audition-selected',
-    { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
+    { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, SEP, 'analyze-phonemes', 'auto-phonemes', SEP,
+    'keys']],
   ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute', 'unmute',
     SEP, 'ask-ai']],
   ['表示', ['guide-view', 'phoneme-bounds', 'legend-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset', SEP, 'track-list']],
@@ -348,7 +354,7 @@ const MENUBAR = [
 const MENUBAR_ARA = [
   ['ファイル', ['open-guide', 'load-lyrics', 'import-lyrics']],
   ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'audition-selected',
-    { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }]],
+    { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, SEP, 'analyze-phonemes', 'auto-phonemes']],
   MENUBAR[2],
   ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', 'legend-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset', SEP, 'track-list']],
   ['ヘルプ', ['keys']],

@@ -237,6 +237,7 @@ function laneMenu(e, tSrc, phRow) {
       run: () => setLyrics('', ent.whole ? null : { start_sec: ent.start_sec, end_sec: ent.end_sec }) },
     // 聞き取る（issue #54）: 使えないとき（faster-whisper が無い）は理由をツールチップに
     cmd('transcribe', { t: tSrc }, { title: asrReady() ? '' : asrWhy() }),     // 使えるのに無効なときは表の NEEDS の文
+    cmd('analyze-phonemes', {}),         // 未解析の区間を今すぐ解析する（2026-10-10 承認）
     SEP,
     load,
   ];

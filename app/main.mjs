@@ -243,8 +243,11 @@ async function connectEngine() {
   }
   // ピッチ検出の方式（編集 > ピッチ検出の方式。ユーザー設定）はエンジンの既定として起動時に渡す
   // （画面が set_f0_estimator を呼ぶ前に、前回のトラックの解析・裏の準備が始まるため）
-  const f0 = loadSettings().f0Estimator;
-  const env = f0 ? { ...cfg.env, GLISS_F0_ESTIMATOR: f0 } : cfg.env;
+  // 「歌詞と音素を自動で解析する」（編集のメニュー。既定はオン。2026-10-10 承認）も同じく、曲を開く前に渡す
+  const { f0Estimator: f0, autoPhonemes } = loadSettings();
+  const env = { ...cfg.env };
+  if (f0) env.GLISS_F0_ESTIMATOR = f0;
+  if (typeof autoPhonemes === 'boolean') env.GLISS_AUTO_PHONEMES = autoPhonemes ? '1' : '0';
   state.transport = new StdioClientTransport({
     command: cfg.command, args: cfg.args, cwd: cfg.cwd, env, stderr: 'pipe',
   });
@@ -846,6 +849,24 @@ ipcMain.handle('app.readFile', (_e, p) => {
   if (!allowed(p)) throw new Error(`読み取りを許していない場所: ${p}`);
   const buf = fs.readFileSync(p);
   return new Uint8Array(buf).buffer;
+});
+
+// 画面の段階の時間（edits.js の screenLog。「screen op=pitch queued= 0.00 … total= 0.26」）。engine.log の隣の
+// screen.log に足す（曲を開く前は既定のログの場所）。決まった形の 1 行だけを受け、1 MB を超えたら 1 世代だけ残す
+const SCREEN_LOG_MAX = 1024 * 1024;
+let screenLogWrite = Promise.resolve();
+ipcMain.on('app.screenLog', (_e, line) => {
+  if (typeof line !== 'string' || line.length > 300 || !/^screen [ -~]*$/.test(line)) return;
+  const file = path.join(state.projectDir || path.dirname(defaultLogPath()), 'screen.log');
+  const text = `${new Date().toISOString()} ${line}\n`;
+  screenLogWrite = screenLogWrite.then(async () => {
+    try {
+      const st = await fs.promises.stat(file).catch(() => null);
+      if (st && st.size > SCREEN_LOG_MAX) await fs.promises.rename(file, `${file}.1`).catch(() => {});
+      await fs.promises.mkdir(path.dirname(file), { recursive: true });
+      await fs.promises.appendFile(file, text, 'utf8');
+    } catch { /* 書けなくても画面は続ける */ }
+  });
 });
 
 ipcMain.handle('app.saveState', (_e, patch) => saveSettings(patch || {}));

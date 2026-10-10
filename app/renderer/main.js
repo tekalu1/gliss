@@ -20,8 +20,8 @@ import { loadLegend } from './legend.js';
 import { closeTempoPop, installTempo, openTempoPop, tempoEditing } from './tempo.js';
 import { install, jumpToUtterance, openLyrics, openTr, setTool } from './interact.js';
 import {
-  awaiting, enqueue, exportWav, handleEngineError, idle, lastPending, loadLyricsText, loadLyricsScore, redo, refresh, resetOriginal,
-  setLyrics, undo, waitFor, wake,
+  awaiting, editsPending, enqueue, exportWav, handleEngineError, idle, lastPending, loadLyricsText, loadLyricsScore, redo, refresh,
+  resetOriginal, setLyrics, undo, waitFor, wake,
 } from './edits.js';
 import {
   audioMuted, clearPreviewLog, invalidate, playState, previewEnabled, previewLogOf, previewState, setPreviewEnabled,
@@ -40,6 +40,7 @@ import { askText } from './askai.js';
 import { commandFor, keysOf, loadOverrides, overrides } from './keys.js';
 import { installFirstRun, setModelSizes, showFirstRun } from './first-run.js';
 import { adoptAnalysis, f0State, onF0Change, refreshF0 } from './f0.js';
+import { analyzePhonemesNow, installPhonemes, onAutoPhonemesChange, phonemeState, setAutoPhonemes } from './phonemes.js';
 import { addonsOpen, addonsState, closeAddons, installAddons, openAddons } from './addons.js';
 import { adoptDoc, adoptSession, guideSuffix, loadSession, onDoc, phonemeSuffix, setTrack } from './session.js';
 import {
@@ -641,7 +642,7 @@ function reopenCurrent() {
 function araHost() {
   return {
     status, render, renderTracks, renderToolbar, follow, movePlayhead, waitFor, idle, isDragging,
-    selectTrack, loadSession, busyState, prepOf, syncMenu: syncAppMenu, reopen: reopenCurrent,
+    selectTrack, loadSession, busyState, prepOf, syncMenu: syncAppMenu, reopen: reopenCurrent, editsPending,
     clearEmpty: () => { clearProject(); render(); renderTracks(); renderToolbar(); },
   };
 }
@@ -711,6 +712,8 @@ async function boot() {
     syncAppMenu();                  // 表示メニューのチェックも合わせる
   }
   onAnalyzed(adoptAnalysis);      // ARA でも修飾ごとの実効方式を選択表示へ反映する
+  onAutoPhonemesChange(syncAppMenu);
+  if (!b.engineError) await installPhonemes();   // 歌詞と音素を自動で解析するか（メニューのチェック）・未解析の区間の見張り
   if (ARA) {
     // プラグイン: 開く操作は DAW が持つ。DAW の選択のトラックを選んで解析し、描く（ara.js の araBoot）
     onF0Change(syncAppMenu);
@@ -786,6 +789,8 @@ window.__app = {
   keyOverrides: () => overrides(),
   // ピッチ検出の方式（編集 > ピッチ検出の方式）
   f0: f0State,
+  // 音素の解析（2026-10-10 承認）: 設定・裏の解析の状態・「音素を解析」
+  phonemeState, setAutoPhonemes, analyzePhonemesNow,
   // ホイールの割り当て・つかんだノートのプレビュー音（issue #27）。音は出さずに「鳴らそうとしたもの」を見る
   wheels: () => WHEEL.map((w) => ({ id: w.id, label: w.label, keys: keysOf(w.id) })),
   previewState, previewLog: previewLogOf, clearPreviewLog, previewEnabled, setPreviewEnabled,

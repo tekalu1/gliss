@@ -228,14 +228,14 @@ test('(C4) 空白・ルーラー・歌詞レーン・音素', async () => {
   await win.mouse.click(tr.x + tr.width / 2, tr.y + tr.height / 2, { button: 'right' });
   expect((await items()).map((x) => x.label)).toEqual(['ループを解除', 'テンポと拍子…', '表示: 小節・拍', '表示: 分:秒']);
   await escape();
-  // 歌詞レーン（歌詞なし）: 入力… / 消す（グレー） / 聞き取る（issue #54。使えるかは faster-whisper による） / 読み込む…
+  // 歌詞レーン（歌詞なし）: 入力… / 消す（グレー） / 聞き取る（issue #54。使えるかは faster-whisper による） / 音素を解析 / 読み込む…
   const n = (await win.evaluate(() => window.__app.shapes())).find((x) => x.id === 'n014');
   const x = await win.evaluate((t) => { const s = window.__app.S; const W = document.querySelector('#roll').getBoundingClientRect().width; return 44 + (t - s.view.t0) / s.view.span * (W - 44); }, (n.s + n.e) / 2);
   await win.mouse.click(r.x + x, r.y + r.height - 30, { button: 'right' });
   it = await items();
   expect(it.map((x) => [x.label, x.key, x.cmd === 'transcribe' ? null : x.disabled])).toEqual([
     ['歌詞を入力…', 'ダブルクリック', false], ['この区間の歌詞を消す', '', true], ['聞き取る', '', null],
-    ['歌詞を読み込む…', '', false],
+    ['音素を解析', '', false], ['歌詞を読み込む…', '', false],
   ]);
   await escape();
 });

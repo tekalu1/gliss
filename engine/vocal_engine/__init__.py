@@ -16,5 +16,9 @@
 
 __version__ = "0.2.0"
 
+import time as _time
+
+STARTED = _time.perf_counter()   # エンジンを読み始めた時刻（起動の秒のログ。warmup.py）
+
 HOP_S = 0.010          # 解析の共通ホップ（10 ms）
 XFADE_MS = 20.0        # 編集区間と原音のつなぎ目のクロスフェード長

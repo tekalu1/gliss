@@ -81,6 +81,10 @@ undo()                        # 修正を戻す
   `get_job(job_id)` で取りに行く。**`get_job` と `engine_info`・`prep_status` はエンジンのロックを取らない**
   （取るとジョブが終わるまで進捗を見に行った側が止まり、ジョブにした意味が無くなる）。
 - **ログは `<project>/engine.log`。** stdio の stderr はクライアントに捨てられるので、エンジンが自分で書く。
+- **起動したら裏で下ごしらえする。** 受け付けを始めた後、ロックを取らない裏のスレッドで librosa・scipy・numba の JIT・
+  使う F0 の方式のモデル・HubertFA を先に読む（初めての解析が待たされないように。2026-10-10 承認）。済んだら engine.log に
+  `engine start=… warm=… librosa=… numba=… onnx=… hubertfa=…`（秒）を 1 行書く。解析は段ごとの秒（`analyze method=… take_f0=… alignment=…`）、
+  F0 は方式ごとの読み込みと推定の秒（`f0 method=… load=… infer=…`）も書く。`GLISS_WARMUP=0` で止める（テスト用）
 - **`notifications/initialized` が来なくても動く。** mcp 2.x のサーバーは `initialize` を
   受け取った時点で受付を開く（`mcp/server/connection.py` の `initialize_accepted`）。
 - **エラーは例外ではなく JSON。** `{"ok": false, "error": "...", "tool": "...", "log": "..."}` を返す。
@@ -139,7 +143,7 @@ undo()                        # 修正を戻す
 | `from_text` | string | null | 歌詞ファイルの中身。1 行 = `開始 終了 歌詞`（`2:24.30` 形式も可）。`#` と空行は飛ばす |
 | `source` | string | `"take"` | `"take"` か `"guide"`。**ガイドにも入れるとタイミング補正が直接アラインになる** |
 | `mode` | string | `"replace"` | `"replace"`（重なる区間を消してから入れる）/ `"add"`（重なりを許さず足す） |
-| `reanalyze` | bool | true | すぐアラインし直す。false なら次の `analyze_take` に任せる |
+| `reanalyze` | bool | true | 変わった区間の音素を合わせ直す。テイクは裏で解析して待たない（下）。false なら次の `analyze_take` に任せる |
 
 歌詞の書き方（どれでも通る）:
 
@@ -174,6 +178,34 @@ warnings[], aligner, rtf, elapsed_sec, aligned_sec, per_entry[], next}`
 
 > **アラインするのは歌詞を付けた区間だけ。** 158 秒のテイクでも、4 区間 9.6 秒ぶんを
 > 1.2 秒で処理する（区間の外の 148 秒は触らない）。
+
+**変わった区間だけを、テイクは裏で合わせ直す**（2026-10-10 承認）: 音素は歌詞の区間（フレーズ）ごとに計算して
+`cache/phonemes/` に区間の歌詞・範囲・音声の鍵で残す。歌詞を直すと、変わった区間だけが未解析になり、ほかの区間は残した
+結果をそのまま使う（テイク全体をアラインし直さない。区間の境目の音素は、全体をアラインし直したときと同じ位置・ラベル）。
+
+- テイクの未解析の区間は裏の準備（§3-2）が解析する。`set_lyrics` は解析を待たずに返り、返り値に
+  `phonemes_state`（`"ready"` = 全区間そろった / `"analyzing"` = 裏で解析中・解析待ち / `"pending"` = 自動では解析しない）と
+  `pending_entries`（まだ音素の無い区間の番号）が入る。済んだかは `phoneme_status`。それまでの音素は、未解析の区間を
+  除いたもの（`get_phonemes` の `aligner.pending_entries` にも同じ番号）。
+- ガイドの音素は `set_lyrics` の中で計算する（待つ）。
+- 「歌詞と音素を自動で解析する」（`set_auto_phonemes`）が切なら解析しない（`"pending"`）。`analyze_phonemes` を呼んだときに解析する。
+- 音節を組にする操作（`set_note_syllable`）は全区間がそろった音素で数えるので、その場で足りない区間を計算する
+  （手動の設定で未解析の区間があれば、`analyze_phonemes` を先に呼ぶようエラーで返す）。
+
+### `analyze_phonemes(wait?)` / `phoneme_status()` / `set_auto_phonemes(enabled?)`（2026-10-10 承認）
+
+画面の「編集 > 音素を解析」と「歌詞と音素を自動で解析する」の設定。
+
+| ツール | 動き |
+|---|---|
+| `analyze_phonemes(wait=false)` | テイクの歌詞と音素のうち、まだ解析していないものを解析する。歌詞の無い発声区間があれば、まだ推定していないとき歌詞を推定する。設定が切でも解析する。済んだ区間は計算し直さない。`wait=false` は裏の準備に急ぎで頼んで返る（操作の途中でも止まらない）。`wait=true` はここで計算して全区間がそろった結果を返す。返り値 `{phonemes_state, pending_entries, inferred_entries, n_entries}`。歌詞が無ければ `phonemes_state: "no_lyrics"` |
+| `phoneme_status()` | 裏の音素の解析の状態。**エンジンのロックを取らない**（ほかの処理の最中でもすぐ返る）。`state`: `"queued"`（解析待ち。操作の間は止めている）/ `"preparing"`（解析中）/ `"ready"` / `"failed"`（`error`）/ null（頼んでいない）。`gen`（区間を足すたびに増える。変わったら `get_phonemes`・`export_view_data` を取り直す）・`paused`（操作の間で待っている）・`auto`（設定）・`pending_entries`（最後に組んだ音素で未解析の区間の番号。計算はしない） |
+| `set_auto_phonemes(enabled?)` | 「歌詞と音素を自動で解析する」（既定 オン）。オンなら、曲を開いた・歌詞を直したときに足りない区間を裏で解析する。切なら自動では何も解析しない（歌詞の推定も音素も）。切からオンにすると、開いている曲の足りない区間を裏で解析し始める。省くと今の値を返す。返り値 `{auto}` |
+
+- 画面は設定を `state.json` の `autoPhonemes` に残し、起動時に環境変数 `GLISS_AUTO_PHONEMES`（`1` / `0`）でエンジンに渡す。
+  既定値はエンジンの `project/store.py` の 1 か所だけ（切に変えると、完全に手動 = 「音素を解析」を押したときだけ解析する）。
+- 画面は未解析の区間を歌詞のレーンに点線の枠で示し（裏で解析中は「解析中…」、手動の設定で未解析なら「未解析」）、
+  未解析の区間がある間だけ `phoneme_status` を読んで、区間が増えたら描き直す。
 
 ### `inspect_lyrics_score(path)` / `import_lyrics(path, track?, dry_run?, song_start_sec?, reanalyze?, author?)`
 
@@ -263,6 +295,8 @@ Gliss の F0 はモデルの版も解析キャッシュとアーカイブの `f0
   `estimator="rmvpe"` と名前を指定したときは、重みが無ければエラー。
 - `estimator` を指定して解析すると、その方式がその曲の方式として残る（次に省いて呼んだときもその方式）。
 - 保存した解析（`cache/take-analysis.json`）が別の方式・別の版のものなら、テイクの F0 から解析し直す。
+  替える前の方式の結果は `cache/f0-<方式>.json`（掃引は `-sweep`）に残し、その方式に戻したときは計算し直さずにそこから戻す
+  （素材の切り出し・方式の版・解析の設定が同じときだけ。`force` では使わない。2026-10-10 承認）。
   ガイドの解析と対応付けは方式ごとの鍵付きの保存（`cache/guide/`）なので、方式を戻したときは読むだけで済む。
 - 方式・版を替えると音符の切れ目とノートの ID（解析ごとの通し番号）が変わる。そのため**替える前に、ノートの ID を対象にした編集
   （`target` が note。`shift_pitch(note_id=…)`・`set_pitch_curve(note_id=…)`・「ガイドに合わせる」のピッチ）を、今の解析での
@@ -474,7 +508,7 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 
 | ツール | 引数 | 意味 |
 |---|---|---|
-| `shift_pitch` | `cents`（+100 = 1 半音上）、`note_id` / 範囲 | 音程をずらす |
+| `shift_pitch` | `cents`（+100 = 1 半音上）、`note_id` / 範囲 / **`notes`** | 音程をずらす。`notes = [{note_id, cents}, ...]` は複数のノートを 1 回で（1 つの changeset = 取り消し 1 回。要素の `cents` を省くと引数の `cents`） |
 | `set_pitch_curve` | `points = [[区間頭からの秒, セント], ...]` | ピッチ曲線を与える（2 点以上）。`mode="draw"` は鉛筆（§2-1）、`mode="restore"` は points 無しで範囲を録音のピッチに戻す |
 | `move_note` | `ms`（+ が遅く）、`note_id` / **`note_ids`** / 範囲 | 横に動かす。接続側の隣が伸び縮み、切り離し側は隙間が吸収。子音・息・無音の区間も可（範囲で選ぶときは音程のあるノートだけ） |
 | `stretch` | `ratio`（0.25〜4.0）、`note_id` / 範囲 / **`phoneme_id`** | `note_id`: ノートの**尻**を動かす（画面の右端ドラッグと同じ）。`phoneme_id`: その音素の後ろの境界を動かす（`move_boundary` と同じ）。範囲: 1 つのノートの中だけ（同じノートの残りが吸収） |
@@ -800,7 +834,8 @@ move_boundary）は、範囲の端をまたぐ組があれば、時間の対応�
   （単体版のミキサー操作は値も戻す）。外したトラックは同じ id・同じ並びで戻り、そのトラックの編集もそのまま
 - F0 方式の Undo／Redo は各トラックの解析方式も戻す。現在の解析と方式が違えば再解析し、編集が参照するノートとの対応を復元する。解析に失敗した場合は履歴の位置と変更前のプロジェクトを保つ
 - `redo()`: 直近に取り消した操作をやり直す。新しい操作を入れると、やり直しの列は捨てる
-- `shift_pitch(group=…)`: 同じ group の続けての呼び出しは 1 回の取り消しにまとめる（画面の複数ノートのピッチのドラッグ）
+- `shift_pitch(notes=[…])`: 複数のノートを 1 回の呼び出し・1 つの changeset で動かす（画面の複数ノートのピッチのドラッグと「半音に合わせる」（Q）が使う。2026-10-10 承認）
+- `shift_pitch(group=…)`: 同じ group の続けての呼び出しは 1 回の取り消しにまとめる
 - `shift_pitch(label=…)` / `apply_plan(label=…)`: 取り消しの履歴に出す名前（既定「ピッチ」「ノートの長さ」など。画面の「半音に合わせる」（Q）・右クリックの「つなぐ」が使う）
 - `merge_notes(group=…)`: 同じ group の続けての結合は 1 回の取り消しにまとめる（画面で 3 つ以上を選んで Ctrl+J）
 - ポップアップの当て直し（`apply_plan` / `set_transition` の `replaces`）は、前回の項目と入れ替わる（ポップアップ 1 回 = 取り消し 1 回）
@@ -838,8 +873,8 @@ Electron の画面と Claude Code が同じプロジェクトを同時に触る�
 準備待ちの期限切れは `{ok:false, preparing:true, conflict:false, error}` で返り、準備が進むのを待って再試行できる。
 画面は競合時に今の操作と順番待ちの編集・古いプレビューを破棄して状態と履歴を読み直し、
 「別のエンジン（Claude Code など）がこのトラックを書き換えたので、読み直した。今の操作は当てていない」と表示する。
-画面の保存と競合の読み直しは編集と同じ順番待ちの中で行う。1 つの画面操作を何回かのツールで当てるもの（複数ノートの
-`shift_pitch`・`merge_notes`）は原子的ではないので、途中のツールが競合したら前の分は当たっている。画面は
+画面の保存と競合の読み直しは編集と同じ順番待ちの中で行う。1 つの画面操作を何回かのツールで当てるもの（3 つ以上の
+`merge_notes`）は原子的ではないので、途中のツールが競合したら前の分は当たっている。画面は
 「…今の操作は一部だけ当たった可能性がある。表示を確かめて」と表示する。Claude Code も、続けて呼んだツールの途中で
 `conflict:true` が返ったら、前のツールの分は当たっている前提で読み直す。
 準備待ちの期限切れは「準備中。少し待ってからもう一度」と表示する。
@@ -873,12 +908,12 @@ OS のロックを握り（10 秒取れなければ失敗）、書きかけの�
 | `render_region(start_sec?, end_sec?, backend?, channels?, path?)` | **区間 → PCM**（32 bit float の WAV のパス。`channels` の既定は `"all"`＝素材のチャンネルそのまま。Python の `render/region.py` の既定は `"mono"`）。長さが変わらず、中身は `export_wav` が同じ範囲に書くものと同じ。`source_start_sec`・`rendered_windows_sec`・`timing_sec` を返す（DAW 連携 段階 0） |
 | `render_audition(note_id, cents?, start_sec?, end_sec?, backend?)` | **画面向け**: つかんだノートのプレビュー音（issue #27）。ノートを `cents` 動かした**つもり**で範囲（既定はノートの範囲）を再合成したモノラルの WAV（`renders/audition-*.wav`。要求ごとに一意）のパス。返却後30秒以上保持し、次の要求時に古いファイルだけ掃除する。native側は応答を受けたら速やかに読み込む。最大1024件/512MiBで、新規要求は上限時にエラーとし、返却済みファイルを早期削除しない。`rev` は `ara_revs` と同じ解析:編集の版、`view_rev` は `export_view_data` と共通の描画入力版（表示範囲引数を含まない）。`track_id`/`ara_id`/`source_id` は対象識別用（単体利用ではnull可）。**プロジェクトは書き換えない**。ARAの同版PCMがある `cents=0` はそこから厳密に切り出す。PCM の窓に収まらない `cents=0` の範囲は、ARA の再生で作った同じ版の Segment 列を使って再合成する（編集の層を作り直さない。音は同じ）。ARA の `cents≠0`（ピッチのドラッグ）は、曲全体ではなく要求範囲の前後 7 秒だけに層を当てる（再合成する窓が範囲の端に触れたら省かず全体で作り直す。音は省かないときとビット一致）。再生用の PCM は版をまたいで、書き直していない窓の分を残す。長い連結窓に時間編集が無ければ試聴だけを局所再合成する（Praatでは全長窓と位相が違う場合がある）。時間編集を含む窓と通常のexport/ARAは全長窓を保つ |
 | `render_view(start_sec?, end_sec?, show_guide?, title?)` | ピアノロール PNG のパス（波形・テイク F0・ガイド F0・ノートの帯・編集区間） |
-| `export_view_data(start_sec?, end_sec?, peak_ms?, path?)` | **画面（UI）向け**の描画データ JSON のパス。応答の `view_rev` は表示範囲引数を含まない入力版で、`render_audition.view_rev` との照合に使う。**LLM 向けではない** |
+| `export_view_data(start_sec?, end_sec?, peak_ms?, path?, since?)` | **画面（UI）向け**の描画データ JSON のパス。応答の `view_rev` は表示範囲引数を含まない入力版で、`render_audition.view_rev` との照合に使う。`since` に前の `view_rev` を渡すと差分だけ（「描画データの差分」）。**LLM 向けではない** |
 | **`measure_against_guide(start_sec?, end_sec?, note_ids?, render?, threshold_cents?, threshold_ms?, suggest_cents?, limit?)`** | **補正の前後の残差**。ノートごと（`rows`）とガイドの平らな区間ごと（`summary.guide_segments`）に、元の音・今の編集・再合成して測り直した音の 3 つ。下の「補正の前後の残差」 |
 | `remeasure(start_sec?, end_sec?, backend?, keep_wav?)` | 編集後の音を測り直した結果。ガイドがあれば `deviation_summary.before/after`（タイミングはノートの頭で測る）と **`onset_timing`**（「ガイドに合わせる」が合わせる**発音の頭の組**ごとのガイドの頭とのずれ。`pairs`・`before`/`after` = `{n, abs_ms_median, abs_ms_p90, ms_median}`、+ はテイクが遅い。after は編集後の音から拾い直した頭。タイミングの補正が効いたかはこちらで見る） |
 | `list_changes(include_undone?)` | changeset と編集リストの一覧 |
 | `get_job(job_id)` | 長い処理の結果。`status`・`progress`・`cancellable`。裏の準備に合流した `analyze_take` は `joined`・`stage`・`stage_label` も（§1 `analyze_take`） |
-| `prep_status()` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない |
+| `prep_status(visible?, playhead_sec?)` | 裏の準備の状態（§3-2 の「裏の準備」）。エンジンのロックを取らない。`visible`（画面が見ているトラックの id。前ほど先）・`playhead_sec`（再生位置。ソングの秒）を渡すと、準備と DAW の差分の再合成をそこから進める（曲は変えない） |
 | `pause_prep(paused?)` | 裏の準備を一時停止／再開（走っている段は最後まで進み、次の段の前で止まる。合流して待っているトラックは止めない） |
 | `engine_info()` | バージョン・バックエンド・重みの有無・ログの場所。ピッチ検出の方式（`f0_estimator`＝これから解析する曲の方式（選んだ方式か既定）、`f0_estimator_chosen`＝選んだ方式（選んでいなければ null）、`f0_estimator_effective`＝開いている曲で実際に使う方式、`f0_estimator_default`、`f0_estimators`、`gliss_f0_model_found`） |
 | `set_render_version(version?, apply?)` | 選んでいる曲（トラック。ARA では選んでいる修飾）の**描画の版**（保存した編集から音を作る仕組みの版）を見る・替える。曲は作ったときの版のまま鳴る: 0.1.0-beta.6 までに作った曲（project.json・アーカイブに `render_version` が無い）は版 1 で beta.6 と同じ音、新しく作る曲・音の編集の無い曲（歌詞だけを入れた曲も）に最初の編集を足したときは最新（版 2。ピッチ曲線を重ねたときのつなぎ目で隣のノートのずらし量が漏れない）。編集のある曲に編集を足しても版は変わらない（同じトラックの中で古い描画と新しい描画を混ぜない）。`version`（1〜最新。省くと最新）、`apply`（既定 false = 替えずに、替えたら音が変わる区間だけを返す。true で替える。許可は編集。取り消しの履歴には入れず、戻すには `version` を明示して呼ぶ）。返り値 `{render_version, latest, target, changes: [{start_sec, end_sec, max_cents}]（ずらし量が 1 セント以上変わる区間。素材の秒。最大 50 件）, changed_sec, applied}`。版は project.json・ARA のアーカイブ（`render_version`）・`ara_revs` の署名に入る |
@@ -974,6 +1009,32 @@ issue #63 の 3）。鍵は素材・歌詞・編集の履歴・読み込んだ�
 発音の頭・引数・描画形式とエンジンのコード／ビルドの版から作る。最近の 8 件を残す（ガイドの付け外し・トラックの切り替えで戻る分）。裏の準備も、済んだトラックの
 分を作っておく。`path` を渡すとそこに毎回作り直して書く。
 `export_default_path` は書き出し先のファイルの有無で変わるので、結果（ツールの返り値）にも毎回入れる（画面はこちらを使う）。
+
+#### 描画データの差分（`since`。2026-10-10 承認）
+
+曲全体の描画データは長い曲で 1 MB を超え、1 つのノートの編集でも毎回全体を書いて読み直すと重い
+（合成の 180 秒・200 ノートで 1.13 MB。1 回のピッチの編集で変わるのは約 23 KB）。
+`since` に前に受け取った `view_rev` を渡すと、その版からの**差分だけ**を `<project>/cache/view-diff/` に書いて返す。
+
+| 結果のキー | 中身 |
+|---|---|
+| `diff` | `true` = `path` は差分のファイル。`false` = `path` は全体（`since` を渡さない・その版を覚えていない） |
+| `path` / `bytes` | 差分のとき差分のファイル `{diff_from, base_dir, ops}`。`diff_from` = 元の版、`base_dir` = 元のプロジェクト（描画データの `project_dir`） |
+| `full_path` / `full_bytes` | 差分のときも全体は `cache/view/` に書いてある。元が合わないときはこちらを読む |
+| `timing_sec` | `{build, diff}`（作る・読み直す時間と、差分を取る時間） |
+
+- 差分を取るのは**同じプロジェクト・同じ範囲の引数**の版とだけ。エンジンは版ごとに描画データのファイルを最近の 32 件覚え、
+  新しい 3 件は中身もメモリに持つ（それより古い版はファイルから読む。ファイルが消えていたら全体を返す）。エンジンを作り直すと忘れる。
+- `view_rev` は中身から作るので、同じ素材・同じ編集の別のトラックと同じ値になりうる。
+  当てる側は `diff_from` が手元の版と、`base_dir` が手元の `project_dir` と同じときだけ当て、違えば `full_path` を読む
+  （画面の `viewData`。`app/renderer/engine.js`）。
+- `ops` の形（`view_diff`。当てるのは `apply_view_diff`・画面の `applyViewDiff`（`app/renderer/view-diff.js`））:
+  - 辞書: `{"$set": {キー: 新しい値}, "$del": [キー], "$sub": {キー: 中の差分}}`（空のものは省く。変わらないキーは載らない）
+  - 同じ長さの数の列（`null` 混じり。64 個以上）: `{"$spans": [[先頭, [値…]], …]}`。32 個より近い変化は 1 つの区間にまとめる
+  - どの要素も一意の `id` を持つ辞書の列（`notes` など）: `{"$ids": [新しい並びの id], "$put": [変わった・増えた要素]}`
+  - それ以外の値と、半分を超えて変わった列は `$set` で丸ごと
+- `path` を渡したときは `since` を使わない（毎回全体）。差分のファイルは最近の 8 件を残す。
+- エンジンのログ（`vocal_engine.perf`）に `view op=export_view_data diff= cached= bytes= full_bytes= build= view_diff=` を出す。
 
 ```json
 // remeasure
@@ -1117,6 +1178,12 @@ DAW（ARA）の文書で、修飾ごとにガイドを決める手順（外部�
   変わっていたのを読み直した。画面ではなくエンジンが決めるので、Claude Code から操作しても同じ。
 - 1 本ずつ。順番は 今のトラック → ガイドのトラック → 最近選んだ順 → 並び順。今のトラックが待っていれば、ほかの
   トラックの準備は段の境目で譲る（済んだ段は鍵付きで保存してあるので、戻ったら続きから）。
+- 画面が `prep_status(visible=…, playhead_sec=…)` で見ている所を知らせたら（DAW で開いたとき）、順番は
+  今のトラック → 見ているトラック（`visible` の順）→ 残りは再生位置から（再生位置にかかる → 後ろへ近い順 → 前へ近い順）。
+  ガイドのトラックを先にしない。走っている準備は止めない（2026-10-10 承認）。
+- 同じガイドを使うトラックの間で、ガイドの F0 を分け合う。先に準備したトラックの鍵付きのガイドの解析
+  （素材の切り出し・方式・掃引・版が同じもの）を、ほかのトラックのガイドの F0 と、ガイドのトラック自身のテイクの F0 に使う。
+  `force` では使わない（2026-10-10 承認）。
 - ガイドの指定・位置が変わったら、古い組み合わせの準備はやめて（走っていれば次の段の境目で止まる）新しい組み合わせで
   入れ直す。
 - **エンジンのロックを握らない**。準備の間も編集・再生・保存のツールはそのまま返る。書き込むのは対象のトラックの
@@ -1136,6 +1203,14 @@ DAW（ARA）の文書で、修飾ごとにガイドを決める手順（外部�
 - 表で解析が要るとき（`analyze_take` を呼ばずに `list_notes` などを呼んだ・歌詞を入れて音素を取る）は、そのトラックの
   準備が順番待ち・準備中なら最優先にして待ち、計算は裏の 1 回で済ませる。表が自分で計算する間は、裏は同じトラックを
   始めない。
+- **テイクの音素はトラックの準備に含めない**（2026-10-10 承認）。開いた曲・直した歌詞の足りない区間は、プロジェクトごとの
+  音素の仕事にして区間ごとに計算し、`cache/phonemes/` に足す（表は次に読んだときに組み直す。`set_lyrics` の
+  「変わった区間だけを、テイクは裏で合わせ直す」）。曲を開いても歌詞を直しても待たせない。
+  - 順番: 合流・今のトラックの準備 → 「音素を解析」（`analyze_phonemes`）と表から頼まれた音素 → ほかのトラックの準備 →
+    裏の準備から頼まれた音素。仕事の中は、編集した区間（伸ばす・切るなどの範囲に重なる歌詞の区間）から先に。
+  - 利用者が操作している間は進めない: 表の重い処理・`pause_prep` の間と、表の保存（編集）から 1 秒は区間の間で待つ
+    （`analyze_phonemes` は待たない）。歌詞がまた変わったら、区間の間で止めて新しい歌詞で続ける。
+  - 「歌詞と音素を自動で解析する」が切なら頼まない（`analyze_phonemes` だけ）。
 - 別のプロセスのエンジン（画面と Claude Code）とは、準備の間 `<プロジェクト>/prep.lock` の OS のロックを握って
   同じトラックを同時に準備しない（握られていれば後回し。落ちたプロセスのロックは OS が外す）。`cache/preparing.json`
   （pid と時刻）は状態を見る人向けの印で、準備の間 5 秒ごとに時刻を更新する。
@@ -1262,20 +1337,42 @@ DAW のプラグイン（C++）がエンジンを子プロセスで 1 本起動�
 **差分の再合成**（`ara_render_dirty`。`render/region.py` の `EditCache` をファイルで渡すもの）:
 
 - エンジンは修飾ごとに「最後に渡した `rev` と、その時の Segment 列・窓」を覚える（このプロセスの中だけ）。
-  `since` がそれと同じなら、変わった範囲（`dirty_windows`）だけ。違う・初回・エンジンを起動し直した・解析か素材が変わった・
+  `since` がそれと同じなら、変わった Segment の付近だけ（`render/region.py` の `plan_update`。下の「作り直す範囲」）。違う・初回・エンジンを起動し直した・解析か素材が変わった・
   `backend` / `channels` が違うなら `reset: true` で全部の窓。
+- 作り直す範囲（2026-10-10 承認）: 変わった範囲（`dirty_windows`）の中でも、窓の中の**区切れる点**（`render/pipeline.py` の `clean_cuts`）で切って、
+  変わった Segment を含まない部分は前の PCM を残す。区切れる点は、出力の位置が元の位置と同じそのままの隙間の中で、両隣の Segment が動いておらず、
+  どの Segment からも 60 ms（`CUT_MARGIN_SEC`）離れた点。ここで切って両側を別々に作っても、窓をまとめて作った音と**サンプル単位で同じ**
+  （つなぎ目のクロスフェードも静かな点の探索も要らない。1 段）。残す範囲は、両端が編集の前と後の両方で区切れる点で、中の窓の切れ方が前後で同じものだけ。
+  `restore` はその作り直す範囲、`windows` はその中の窓の部分（窓の途中で始まり・終わることがある）。
+  実測（S3_M1、165 秒・最長の窓 48 秒、channels=all）: 窓の中の 1 音のピッチで作り直すのは 0.19 秒・鉛筆 0.27 秒・伸縮 1.45 秒（伸縮は音の位置がずれる範囲）で、
+  どれも全体の書き出しとの差 0。描画の版（`render_version`）に関わらず、渡された Segment 列の音は変えない。
 - 当て方（プラグイン）: `reset` なら手元の窓を全部捨てて原音から → `restore` の範囲を原音に戻す → `windows` を置く
   （`path` の `.f32` = float32 リトルエンディアンのインターリーブを窓の順に並べたもの。`byte_offset` が各窓の頭、
   長さは `frames × channels × 4` バイト）。結果は `render_region` の全体（＝書き出し）と**サンプル単位で同じ**。
   `.f32` は作業場所の `ara-out/` に修飾ごとに最近の 4 つだけ残る（読んだら手元に写す）。
 - `max_sec` を超える分は次に回す（`more: true`。`rev` は途中の印 `<版>~<n>`。`since=rev` で続けて呼ぶ。少なくとも窓 1 つは返す）。
   途中で編集が入っても、続きの呼び出しで正しく当たる。
+- ロック（2026-10-10 承認）: 窓を決める（今の Segment 列・版・作る窓の写しを取る）のと確定（作った窓を書いて `rev` を進める）だけを
+  エンジンのロックの中で行い、窓の再合成はロックの外で行う（そのレンダラーのロックだけを握る）。その間も画面の編集・`export_view_data`・
+  試聴は待たない。ただし `export_view_data` は、再合成が `RENDER_YIELD_SEC`（0.2 秒）以内に終わる見込み（同じ修飾の前の再合成の速さから）
+  なら、その確定を待ってからロックを取る（曲全体の組み立ては 0.1 秒を超え、先にロックを取ると作り終えた窓の確定がその後ろで待ち、
+  編集した音が遅れる。待った秒は `lock_wait` に入る）。見込みの無い・遠い再合成は待たない。確定のときに版（編集・解析・素材・backend / channels）が窓を決めた時と違えば、作った窓を捨てて今の版から決め直す
+  （`RENDER_RETRIES` = 2 回まで。それでも変わり続けるならロックを握ったまま作る）。捨てた窓は書かないので、返す音は常に `rev` の版の
+  `render_region` と同じ。`timing_sec` に `plan`・`commit`（ロックの中）・`lock_wait`（ロックを待った秒）・`retries` も入り、
+  `engine.log` の `render op=ara_render_dirty …` の行に出る。編集のツール（`EDIT_TOOLS`）は `edit op=<ツール> lock_wait= apply= summary= total=` の行を出す。
 - `rev` = `<解析の署名>:<編集の署名>`（素材・テイクの解析・編集リスト・歌詞から決まる）。`ara_revs` と同じ値なので、
   プラグインは手元の `rev` と違う修飾だけを呼べばよい（取り消しで別のトラックが変わったときも拾える）。
+- 解析の署名が見るのは、テイクの解析の**中身**（F0・ノート。解析を書くときに作る `analysis.take.content`）と方式。
+  解析の時刻・キャッシュのファイルが新しくなっただけ（裏の準備が表と同じ解析を後から書いた）では変わらず、窓を作り直さない。
+  中身の署名の無い古い project.json は、解析の時刻とキャッシュのファイルの署名で見る（2026-10-11 承認）。
+  裏の準備がキャッシュを書いた後、要約（`analysis.take`）を書く前に止まった（同期で取り消された）ときは、表がキャッシュを
+  読んで使うときに要約を書く。後から準備が同じ解析を書いても `rev` は変わらない。
 - 編集はあるがテイクの解析がまだ（別の PC でアーカイブから戻した直後など）なら、解析を待たずに窓を空で返す
   （`analysis_pending: true`。原音のまま）。裏の準備・`analyze_take` で解析が済むと `rev` が変わる。
 - 編集対象でないトラックも、編集対象を変えずにディスクのプロジェクトから作る（下ごしらえは修飾ごとに 4 本まで持つ）。
   再合成の間は裏の準備は次の段へ進まない。
+- 画面が `prep_status(playhead_sec=…)` で再生位置を知らせていれば、窓は再生位置にかかるもの → 後ろへ近い順 → 前へ近い順に
+  返す（`max_sec` で分けたときに、聞いている所から先に鳴る）。窓は重ならないので、当てた結果は順番によらず同じ（2026-10-10 承認）。
 
 呼ぶ順（プラグイン）: 起動 → `engine_info` →（あれば）`set_f0_estimator` → `ara_open(work_key)` →
 ソースの WAV を書いたら各修飾に `ara_set_modification`（アーカイブから戻すなら続けて `ara_restore`）→ `ara_render_dirty(since=null)`。
@@ -1430,7 +1527,7 @@ AI のエンジンは**呼び出しをプラグインのエンジンへ転送す
 | **保存・書き出し** | `save_project`・`export_wav`・`prepare_asr_model`（聞き取り用の数 GB のモデルをダウンロードして書く）、`render_region(path=…)`・`export_view_data(path=…)`・`render_preview(name=<フォルダーを含むパス>)`（ユーザーが指定した場所に書くとき） |
 | AI からは呼べない | DAW のプラグイン専用の `ara_*`（§3-4。`bridge.py` の `ARA_TOOLS`。`permission: "ara"` で断る） |
 | 許可なしで呼べる（DAW の文書） | `ara_documents`・`ara_attach`・`ara_detach`・`export_edits`（§3-4・§3-5。選んだ後のツールは DAW の Gliss の `GLISS_ARA_AI` に従い、`bridge.json` の許可は見ない） |
-| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`measure_against_guide`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・`engine_info`・`set_render_version()`（替えずに音が変わる所を見るだけ） |
+| 許可なしで呼べる | 開く・作る・閉じる（`open_project`・`new_project`・`load_project`・`project_status`・`close_project()`）、読む・測る（`analyze_take`・`list_notes`・`get_pitch`・`list_deviations`・`get_phonemes`・`get_lyrics`・`list_utterances`・`inspect_lyrics_score`・`list_connections`・`list_changes`・`list_tracks`・`select_track`・`plan_edit`）、聞き取り（`transcribe`＝候補を返すだけ・`asr_status`）、プロジェクトの中の一時ファイル（`render_preview`・`render_region`・`render_audition`・`render_view`・`remeasure`・`measure_against_guide`・`export_view_data`・`track_overview`・`render_tracks`）、ジョブ（`get_job`・`cancel_job`）・裏の準備（`prep_status`・`pause_prep`）・音素の解析（`analyze_phonemes`・`phoneme_status`・`set_auto_phonemes`）・`engine_info`・`set_render_version()`（替えずに音が変わる所を見るだけ） |
 
 `select_track` は編集対象を切り替えるだけ（履歴に入らない）なので許可なし。`plan_edit` は計画を作るだけで、当てるのは `apply_plan`（編集）。
 `transcribe` は候補を返すだけで確定の歌詞を変えない（取り込む `set_lyrics` / `set_note_syllable` が編集）。`prepare_asr_model` は大きなダウンロードを AI が勝手に始めないよう「保存・書き出し」に入れている。

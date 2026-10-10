@@ -5,7 +5,7 @@
 2. 表が解析を要するとき、順番待ちの準備に合流する（表と裏で 2 回計算しない）
 3. 作業場所を消した後に、裏の準備が古い project.json を書き戻さない
 4. 必要なキャッシュが欠けていたら「準備済み」の印を書かない。対応付けに失敗した組は「失敗」
-5. 歌詞を変えたら準備済みでなくなり、音素を裏で準備し直す
+5. 歌詞を変えても準備済みのまま、変わった区間の音素を裏で解析する（2026-10-10 承認）
 6. 別のプロセスとの準備の取り合いは OS のロックで決める。状態の印の時刻は長い段の途中でも更新する
 7. SHA-256・音声ファイルの情報は、トラックごとのロックの外で取る
 
@@ -382,66 +382,235 @@ def test_alignment_fallback_is_failed_not_ready(env, monkeypatch):
 
 
 # ---------------------------------------------------------------- 5. 歌詞を変えたら音素を準備し直す
-def test_lyrics_change_reprepares_phonemes(env, monkeypatch):
+def _part_align(calls, gate=None):
+    """区間ごとの偽のアライン（`align_lyrics_ranges` の parts・compute・on_part・should_stop の約束を守る）。"""
+    from vocal_engine.phoneme.model import PhonemeResult
+
+    def align(x, sr, entries, f0r=None, source="take", duration_sec=0.0, parts=None, compute=True,
+              order=None, on_part=None, should_stop=None, **_kw):
+        parts = {} if parts is None else parts
+        pending, stop = [], not compute
+        idx = [i for i in (order or []) if 0 <= i < len(entries)]
+        idx += [i for i in range(len(entries)) if i not in idx]
+        for i in idx:
+            e = entries[i]
+            key = "%s|%s|%s" % (e["text"], e.get("start_sec"), e.get("end_sec"))
+            if key in parts:
+                continue
+            stop = stop or (should_stop is not None and should_stop())
+            if stop:
+                pending.append(i)
+                continue
+            calls.append((threading.current_thread().name, e["text"]))
+            if gate is not None:
+                assert gate.wait(20)
+            parts[key] = {"text": e["text"]}
+            if on_part is not None:
+                on_part(i, key, parts[key])
+        text = "".join(e["text"] for e in entries)
+        info = [dict(e, index=i, kana=e["text"], n_phonemes=0, pending=i in pending)
+                for i, e in enumerate(entries)]
+        r = PhonemeResult(source=source, lyrics=text, kana=text, phonemes=[], boundaries=[],
+                          entries=info, duration_sec=duration_sec)
+        if pending:
+            r.aligner = {"pending_entries": sorted(pending)}
+        return r
+    return align
+
+
+def _phonemes_in_background(monkeypatch, prep):
+    from vocal_engine.phoneme import hubertfa
+    monkeypatch.setattr(hubertfa, "model_found", lambda *a, **k: True)
+    monkeypatch.setattr(prep, "PHONEME_IDLE_SEC", 0.0)
+
+
+def test_lyrics_change_realigns_changed_phrase_in_background(env, monkeypatch):
+    """歌詞を変えても準備済みのまま。歌詞を入れたツールは待たず、変わった区間だけを裏で解析する。"""
     m, mt, prep, fake, paths, sdir = env
     from vocal_engine.phoneme import analyze as PA
-    from vocal_engine.phoneme.model import PhonemeResult
-    ph = []
-    ph_gate = threading.Event()
-
-    def align(x, sr, entries, f0r=None, source="take", duration_sec=0.0, **k):
-        ph.append((threading.current_thread().name, [e["text"] for e in entries]))
-        assert ph_gate.wait(20)
-        text = "".join(e["text"] for e in entries)
-        return PhonemeResult(source=source, lyrics=text, kana=text, phonemes=[], boundaries=[],
-                             entries=list(entries), duration_sec=duration_sec)
-    monkeypatch.setattr(PA, "align_lyrics_ranges", align)
+    _phonemes_in_background(monkeypatch, prep)
+    ph, gate = [], threading.Event()
+    monkeypatch.setattr(PA, "align_lyrics_ranges", _part_align(ph, gate))
     r = _open(m, paths, sdir)
     t1 = r["session"]["current"]
     tb = _ok(mt.add_track(paths["b"]))["track"]
     _until(_ready(prep, t1, tb))
     _ok(mt.select_track(tb))
     _ok(m.set_lyrics("あ", start_sec=0.1, end_sec=0.5, reanalyze=False))
-    _ok(mt.select_track(t1))                     # b はもう開いていない
     s = m._state["session"]
-    assert not prep.is_ready(s, s.track(tb))     # 歌詞が変わった: 準備済みではない
+    pdir = s.project_dir_of(s.track(tb))
+    assert prep.is_ready(s, s.track(tb))         # 歌詞では準備し直さない
     _until(lambda: ph)
-    assert ph == [("gliss-prep", ["あ"])]          # 音素を裏で準備し直している
-    ph_gate.set()
-    _until(_ready(prep, tb))
-    assert prep.is_ready(s, s.track(tb))
+    assert ph == [("gliss-prep", "あ")]           # 裏で解析している
+    gate.set()
+    _until(lambda: prep.phoneme_status(pdir)["state"] == "ready")
     n = (len(fake.calls["f0"]), len(fake.calls["dtw"]), len(ph))
-    r = _ok(mt.select_track(tb))
-    assert r["analyzed"] is True
+    _ok(mt.select_track(t1))
+    _ok(mt.select_track(tb))
     a = _ok(m.analyze_take())                    # キャッシュを読むだけ（表で音素を計算しない）
     assert a["phonemes"]["has_lyrics"] is True
     assert (len(fake.calls["f0"]), len(fake.calls["dtw"]), len(ph)) == n
+    # 区間を足す: 足した区間だけを裏で解析する（前の区間は part を使い回す）
+    _ok(m.set_lyrics("い", start_sec=1.0, end_sec=1.5, reanalyze=False))
+    _until(lambda: len(ph) == 2)
+    assert ph[1] == ("gliss-prep", "い")
+    _until(lambda: prep.phoneme_status(pdir)["state"] == "ready")
+    assert len(ph) == 2
 
 
 def test_lyrics_change_by_other_engine_is_noticed(env, monkeypatch):
-    """別のエンジンが歌詞を変えた（project.json を直接書いた）: 開いたとき・確かめたときに準備済みでない。"""
+    """別のエンジンが歌詞を変えた（project.json を直接書いた）: 準備済みのまま、表が音素を読むときに裏で解析する。"""
     m, mt, prep, fake, paths, sdir = env
     from vocal_engine.phoneme import analyze as PA
-    from vocal_engine.phoneme.model import PhonemeResult
-
-    def align(x, sr, entries, f0r=None, source="take", duration_sec=0.0, **_kw):
-        text = "".join(e["text"] for e in entries)
-        return PhonemeResult(source=source, lyrics=text, kana=text, phonemes=[], boundaries=[],
-                             entries=list(entries), duration_sec=duration_sec)
-
-    monkeypatch.setattr(PA, "align_lyrics_ranges", align)
+    from vocal_engine.project import store
+    _phonemes_in_background(monkeypatch, prep)
+    ph = []
+    monkeypatch.setattr(PA, "align_lyrics_ranges", _part_align(ph))
     r = _open(m, paths, sdir)
     t1 = r["session"]["current"]
     tb = _ok(mt.add_track(paths["b"]))["track"]
     _until(_ready(prep, t1, tb))
     s = m._state["session"]
-    from vocal_engine.project.store import Project
-    ext = Project(s.project_dir_of(s.track(tb))).load()
+    pdir = s.project_dir_of(s.track(tb))
+    ext = store.Project(pdir).load()
     time.sleep(0.02)
-    ext.set_lyrics("い", start_sec=1.0, end_sec=1.5)
-    assert not prep.is_ready(s, s.track(tb))
-    _until(_ready(prep, tb))
+    with monkeypatch.context() as mp_:
+        mp_.setattr(store, "PREP_SAVED", None)   # 別のプロセスの保存は、このプロセスの裏の準備に届かない
+        ext.set_lyrics("い", start_sec=1.0, end_sec=1.5)
     assert prep.is_ready(s, s.track(tb))
+    assert ph == []
+    _ok(mt.select_track(tb))
+    _ok(m.analyze_take())                        # 待たない（足りない区間は裏に頼む）
+    _until(lambda: prep.phoneme_status(pdir)["state"] == "ready")
+    assert ph == [("gliss-prep", "い")]
+
+@pytest.fixture
+def manual():
+    """「歌詞と音素を自動で解析する」を切にする（2026-10-10 承認）。"""
+    from vocal_engine.project import store
+    store.set_auto_phonemes(False)
+    yield
+    store.set_auto_phonemes(None)
+
+
+def test_manual_setting_runs_nothing_until_command(env, monkeypatch, manual):
+    """設定が切なら、歌詞を直しても曲を開き直しても何も解析しない。「音素を解析」を押したときだけ解析する。"""
+    m, mt, prep, fake, paths, sdir = env
+    from vocal_engine.phoneme import analyze as PA
+    _phonemes_in_background(monkeypatch, prep)
+    ph = []
+    monkeypatch.setattr(PA, "align_lyrics_ranges", _part_align(ph))
+    r = _open(m, paths, sdir)
+    t1 = r["session"]["current"]
+    _until(_ready(prep, t1))
+    _ok(m.analyze_take())
+    a = _ok(m.set_lyrics("あ", start_sec=0.1, end_sec=0.5))
+    assert a["phonemes_state"] == "pending" and a["pending_entries"] == [0]
+    s = m._state["session"]
+    pdir = s.project_dir_of(s.track(t1))
+    # 開き直しても・描画データを作っても解析しない
+    m._state.update(project=None, session=None, track=None)
+    _open(m, paths, sdir)
+    _ok(m.analyze_take())
+    m.export_view_data()
+    time.sleep(0.5)
+    assert ph == [] and prep.phoneme_status(pdir)["state"] is None
+    st = _ok(m.phoneme_status())
+    assert st["auto"] is False and st["pending_entries"] == [0]
+    # 「音素を解析」: 裏で急ぎで解析する（待たない）
+    a = _ok(m.analyze_phonemes())
+    assert a["phonemes_state"] == "analyzing" and a["pending_entries"] == [0]
+    _until(lambda: prep.phoneme_status(pdir)["state"] == "ready")
+    assert ph == [("gliss-prep", "あ")]
+    # wait=True: その場で計算して、そろった結果を返す
+    _ok(m.set_lyrics("い", start_sec=1.0, end_sec=1.5))
+    a = _ok(m.analyze_phonemes(wait=True))
+    assert a["phonemes_state"] == "ready" and a["pending_entries"] == []
+    assert ph[-1][1] == "い" and ph[-1][0] != "gliss-prep"
+    assert _ok(m.phoneme_status())["pending_entries"] == []
+
+
+def test_set_auto_phonemes_tool_starts_pending(env, monkeypatch, manual):
+    """設定を切からオンにすると、開いている曲の足りない区間を裏で解析し始める。"""
+    m, mt, prep, fake, paths, sdir = env
+    from vocal_engine.phoneme import analyze as PA
+    _phonemes_in_background(monkeypatch, prep)
+    ph = []
+    monkeypatch.setattr(PA, "align_lyrics_ranges", _part_align(ph))
+    r = _open(m, paths, sdir)
+    _until(_ready(prep, r["session"]["current"]))
+    _ok(m.analyze_take())
+    _ok(m.set_lyrics("あ", start_sec=0.1, end_sec=0.5))
+    assert _ok(m.set_auto_phonemes())["auto"] is False
+    time.sleep(0.3)
+    assert ph == []
+    assert _ok(m.set_auto_phonemes(True))["auto"] is True
+    _until(lambda: ph)
+    assert ph == [("gliss-prep", "あ")]
+
+
+def test_background_phonemes_wait_while_operating(env, monkeypatch):
+    """裏の音素は、利用者の操作（保存）から PHONEME_IDLE_SEC 秒は始めない。「音素を解析」は待たない。"""
+    m, mt, prep, fake, paths, sdir = env
+    from vocal_engine.phoneme import analyze as PA
+    from vocal_engine.phoneme import hubertfa
+    monkeypatch.setattr(hubertfa, "model_found", lambda *a, **k: True)
+    monkeypatch.setattr(prep, "PHONEME_IDLE_SEC", 0.6)
+    at = []
+
+    class Timed(list):                           # 区間を計算し始めた時刻
+        def append(self, x):
+            at.append(time.monotonic())
+            super().append(x)
+    ph = Timed()
+    monkeypatch.setattr(PA, "align_lyrics_ranges", _part_align(ph))
+    r = _open(m, paths, sdir)
+    t1 = r["session"]["current"]
+    _until(_ready(prep, t1))
+    _ok(m.analyze_take())
+    s = m._state["session"]
+    pdir = s.project_dir_of(s.track(t1))
+    t0 = time.monotonic()
+    a = _ok(m.set_lyrics("あ", start_sec=0.1, end_sec=0.5))
+    assert a["phonemes_state"] == "analyzing"
+    _until(lambda: prep.phoneme_status(pdir)["state"] == "ready")
+    assert ph == [("gliss-prep", "あ")] and at[0] - t0 >= 0.5
+    # 操作が続いている間（ここでは待つ時間を長くする）は順番待ちのまま
+    monkeypatch.setattr(prep, "PHONEME_IDLE_SEC", 30.0)
+    _ok(m.set_lyrics("い", start_sec=1.0, end_sec=1.5))
+    time.sleep(0.5)
+    assert prep.phoneme_status(pdir)["state"] == "queued" and len(ph) == 1
+    a = _ok(m.analyze_phonemes())                # 急ぎ: 待たずに解析する
+    assert a["phonemes_state"] == "analyzing"
+    _until(lambda: prep.phoneme_status(pdir)["state"] == "ready", timeout=5)
+    assert ph[1] == ("gliss-prep", "い")
+
+
+def test_background_phonemes_start_with_edited_phrases(env, monkeypatch):
+    """伸ばした・切ったなど、新しい編集の範囲に重なる区間から解析する（2026-10-10 承認）。"""
+    m, mt, prep, fake, paths, sdir = env
+    from vocal_engine.phoneme import analyze as PA
+    from vocal_engine.project import store
+    _phonemes_in_background(monkeypatch, prep)
+    ph = []
+    monkeypatch.setattr(PA, "align_lyrics_ranges", _part_align(ph))
+    r = _open(m, paths, sdir)
+    t1 = r["session"]["current"]
+    _until(_ready(prep, t1))
+    _ok(m.analyze_take())
+    s = m._state["session"]
+    pdir = s.project_dir_of(s.track(t1))
+    _ok(m.pause_prep(True))                      # 自動の解析は止めておき、頼む順だけを見る
+    _ok(m.set_lyrics(entries=[{"start_sec": 0.1, "end_sec": 0.5, "text": "あ"},
+                              {"start_sec": 0.8, "end_sec": 1.2, "text": "い"},
+                              {"start_sec": 1.4, "end_sec": 1.9, "text": "う"}], reanalyze=False))
+    p = m._project()
+    monkeypatch.setattr(store.Project, "edit_span", lambda self, ed: ed)
+    monkeypatch.setattr(p, "edits", [(0.9, 1.0), (1.5, 1.6)])     # 後の編集ほど新しい
+    assert p.phoneme_priority("take") == [2, 1]
+    assert prep.schedule_phonemes(p, "take", urgent=True)
+    _until(lambda: prep.phoneme_status(pdir)["state"] == "ready")
+    assert [t for _, t in ph] == ["う", "い", "あ"]
 
 
 # ---------------------------------------------------------------- 6. 別のプロセスとの準備の取り合い

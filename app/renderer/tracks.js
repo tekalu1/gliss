@@ -888,7 +888,7 @@ function araMark(id) {
     const v = Number.isFinite(c.progress) ? c.progress : 0;
     return ['preparing', `DAW の音を読み込んでいる ${Math.round(v * 100)}%`, ring(v)];
   }
-  if (c.state === 'syncing') return ['preparing', '編集を DAW の再生に反映している', ring(0.5)];
+  if (c.state === 'syncing') return ['preparing', 'DAW に反映中…', ring(0.5)];
   if (c.state === 'waiting') {
     return ['queued', '解析の順番待ち（その間は原音が鳴る）', '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="4" class="dot"/></svg>'];
   }
@@ -931,7 +931,7 @@ function adoptPrep(list, { session = false } = {}) {
   for (const [id, p] of list) if (ids.has(id)) prep.set(id, p || null);
   paintPrep();
   watchAwaited();
-  schedulePrep(PREP_POLL_MS);
+  schedulePrep(session && ARA ? 0 : PREP_POLL_MS);     // プラグイン: 見ている所をすぐ知らせる（prepFocus）
 }
 
 /** 準備中・待ちのトラックがあれば、次の prep_status を 1 本だけ予約する（読んでいる途中なら、終わったところで決める）。 */
@@ -946,6 +946,22 @@ const normDir = (d) => String(d || '').replace(/[\\/]+/g, '/').replace(/\/$/, ''
 
 const sameSession = (r) => !r.session_dir || !S.session?.dir || normDir(r.session_dir) === normDir(S.session.dir);
 
+/** プラグイン: 今見ているトラック（編集対象と、開いた一覧で見えている行）と再生位置を prep_status に添える。
+ * エンジンは裏の準備をこの順に進め、DAW の差分の再合成も再生位置に近い所から返す（2026-10-10 承認）。 */
+function prepFocus() {
+  if (!ARA) return {};
+  const cur = S.session?.current || null;
+  const visible = cur ? [cur] : [];
+  if (tvOpen && tvBody && tvBody.clientHeight > 0) {
+    const top = tvBody.scrollTop;
+    const bottom = top + tvBody.clientHeight;
+    rows().forEach((t, i) => {
+      if ((i + 1) * TH > top && i * TH < bottom && !visible.includes(t.id)) visible.push(t.id);
+    });
+  }
+  return Number.isFinite(S.head) ? { visible, playhead_sec: S.head } : { visible };
+}
+
 async function pollPrep() {
   prepTimer = null;
   if (prepPolling) return;
@@ -953,7 +969,7 @@ async function pollPrep() {
   prepPolling = true;
   let r = null;
   try {
-    r = await call('prep_status', {});
+    r = await call('prep_status', prepFocus());
   } catch {
     r = null;
   } finally {

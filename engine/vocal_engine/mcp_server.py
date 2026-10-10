@@ -50,6 +50,59 @@ _plans = {}                     # plan_id -> timing.Plan（このプロセスの
 MAX_PLANS = 64
 _lock = threading.RLock()
 _jobs_lock = threading.RLock()
+_lock_stat = threading.local()  # このスレッドで走っているツールが _lock を待った秒（ログの lock_wait）
+
+
+@contextlib.contextmanager
+def _locked():
+    """_lock を取る。待った秒を、このスレッドで走っているツールの lock_wait に足す（ログ用）。"""
+    t = time.perf_counter()
+    with _lock:
+        _lock_stat.wait = getattr(_lock_stat, "wait", 0.0) + time.perf_counter() - t
+        yield
+
+
+# ロックの外で再合成している ARA の窓（ara_render_dirty）→ 確定まで終わる見込みの時刻（perf_counter。None = 分からない）
+_flights = {}
+_flights_cv = threading.Condition()
+RENDER_YIELD_SEC = 0.2          # 描画データは、ロックの外の再合成がこの秒以内に終わる見込みなら、その確定を先に通す
+YIELD_TOOLS = {"export_view_data"}
+
+
+@contextlib.contextmanager
+def _render_flight(eta_sec):
+    """ロックの外で窓を再合成して確定するまで（ara_render_dirty）。eta_sec: 終わるまでの見込みの秒（None = 分からない）。"""
+    key = object()
+    with _flights_cv:
+        _flights[key] = None if eta_sec is None else time.perf_counter() + eta_sec
+    try:
+        yield
+    finally:
+        with _flights_cv:
+            del _flights[key]
+            _flights_cv.notify_all()
+
+
+def _yield_to_renders():
+    """描画データを組み立てる前に、もうすぐ終わる再合成の確定を待つ（RENDER_YIELD_SEC まで）。
+
+    組み立て（曲全体で 0.1 秒を超える）が先にロックを取ると、作り終えた窓の確定がその後ろで待ち、
+    編集した音が鳴るのが遅れる（ロックの中で作っていた頃は、確定が先だった）。
+    終わる見込みが分からない・遠い再合成（長い窓・初回の下ごしらえ）は待たない。待った秒は lock_wait に足す。"""
+    if _lock._is_owned():                   # ロックを握ったまま呼ばれた（ara_relay の中継）: 待つと確定と行き詰まる
+        return
+    t = time.perf_counter()
+    deadline = t + RENDER_YIELD_SEC
+    with _flights_cv:
+        while _flights:
+            ends = list(_flights.values())
+            if any(e is None or e > deadline for e in ends):
+                break
+            left = deadline - time.perf_counter()
+            if left <= 0:
+                break
+            _flights_cv.wait(left)
+    _lock_stat.wait = getattr(_lock_stat, "wait", 0.0) + time.perf_counter() - t
 
 
 # ---------------------------------------------------------------- 共通
@@ -137,6 +190,26 @@ def _resolve_target(note_id=None, start_sec=None, end_sec=None, phoneme_id=None)
     return Target.range(t0, t1)
 
 
+# 表示のツール: エンジンのロックを取る前に、今のトラックの裏の準備（順番待ち・準備中）の終わりを待つ
+# （2026-10-10 承認）。ロックの中で待つと、その間ほかのトラックの音作り（ara_render_dirty）が止まる
+SETTLE_TOOLS = frozenset({"export_view_data", "list_notes", "get_pitch"})
+
+
+def _settle_before_lock():
+    p = _state.get("project")                 # ロックの外なので目安（違っていても、中の front がいつもどおり待つ）
+    if p is None or p._take_f0 is not None:
+        return
+    from . import prep
+    if not prep.enabled():
+        return
+    try:
+        t = time.perf_counter()
+        if prep.settle(p.dir):
+            log.get("tool").info("settle wait=%.2f（ロックの外で裏の準備を待った）", time.perf_counter() - t)
+    except Exception as e:                    # noqa: BLE001  待てなくても、ロックの中でいつもどおり待つ
+        log.get("tool").warning("裏の準備を待てない: %s", e)
+
+
 def _tool(fn=None, *, lock=True):
     """例外を JSON に畳んで返す（MCP のエラーにすると原因が分かりにくいため）。
 
@@ -184,10 +257,19 @@ def _tool(fn=None, *, lock=True):
                     if has_author:
                         ba.arguments["author"] = "ai"
                         a, kw = ba.args, ba.kwargs
+            outer_wait = getattr(_lock_stat, "wait", 0.0)
+            _lock_stat.wait = 0.0
             try:
+                t_apply = t_summary = None
                 if lock:
-                    with _lock:
+                    if f.__name__ in SETTLE_TOOLS:
+                        _settle_before_lock()
+                    if f.__name__ in YIELD_TOOLS:
+                        _yield_to_renders()
+                    with _locked():
+                        t_apply = time.perf_counter()
                         r = f(*a, **kw)
+                        t_summary = time.perf_counter()
                         if (f.__name__ in HISTORY_TOOLS and isinstance(r, dict)
                                 and r.get("ok") and "history" not in r):
                             r["history"] = _history_summary()
@@ -196,8 +278,13 @@ def _tool(fn=None, *, lock=True):
                             r["document"] = _document_info()      # 未保存か（画面のタイトルの「*」。issue #33）
                 else:
                     r = f(*a, **kw)
-                log.get("tool").info("%s ok (%.2f s)", f.__name__,
-                                     time.perf_counter() - t0)
+                t1 = time.perf_counter()
+                wait = _lock_stat.wait
+                log.get("tool").info("%s ok (%.2f s, lock_wait %.2f s)", f.__name__, t1 - t0, wait)
+                if f.__name__ in EDIT_TOOLS and t_apply is not None:
+                    # 段階の時間（docs/ara-plugin.md「エンジンとの同期」）。ロックの待ち・編集を当てる・履歴の要約
+                    log.get("perf").info("edit op=%s lock_wait=%.3f apply=%.3f summary=%.3f total=%.3f", f.__name__,
+                                         wait, t_summary - t_apply, t1 - t_summary, t1 - t0)
                 return r
             except Exception as e:      # noqa: BLE001
                 log.get("tool").error("%s failed: %s\n%s", f.__name__, e,
@@ -206,6 +293,8 @@ def _tool(fn=None, *, lock=True):
                 return {"ok": False, "error": str(e), "tool": f.__name__,
                         "conflict": isinstance(e, ProjectConflict),
                         "preparing": isinstance(e, PreparationPending), "log": log.current_log_file()}
+            finally:
+                _lock_stat.wait = outer_wait + _lock_stat.wait
         wrapper.engine_lock = lock              # 外部の AI の中継（ara_relay.execute）がロックの要否を見る
         return wrapper
     return deco(fn) if fn is not None else deco
@@ -223,6 +312,9 @@ HISTORY_TOOLS = {
     "mute_track_range", "open_project",
     "new_project", "load_project", "save_project", "apply_edits",
 }
+# 曲の中身を変えるツール（ログの `edit op=…` の行を出す）
+EDIT_TOOLS = HISTORY_TOOLS - {"export_view_data", "list_changes", "list_tracks", "select_track", "open_project",
+                              "new_project", "load_project", "save_project"}
 
 
 def _history_summary():
@@ -398,7 +490,9 @@ def set_lyrics(text: str = None, source: str = "take", start_sec: float = None,
       start_sec / end_sec: text を入れる区間（両方そろえる）
       source: "take"（既定）か "guide"。**ガイドにも入れると**タイミング補正が直接アラインになる
       mode: "replace"（既定。重なる区間を消してから入れる）か "add"（重なりを許さず足す）
-      reanalyze: すぐアラインし直す（既定 True）
+      reanalyze: 変わった区間の音素を合わせ直す（既定 True）。テイクは裏で解析して待たない
+        （返り値の phonemes_state が "analyzing"。済んだかは phoneme_status。2026-10-10 承認）。
+        「歌詞と音素を自動で解析する」が切なら解析しない（"pending"。analyze_phonemes で解析する）
 
     長音「ー」は直前の母音に吸収してからアラインする（段階2 の実測で、
     `トマー` を `t o m a a` と書くと 2 つ目の母音が 8〜10 ms に潰れるため）。
@@ -445,11 +539,14 @@ def set_lyrics(text: str = None, source: str = "take", start_sec: float = None,
            "lyrics": p.lyrics_text(source) or None,
            "changeset": cs.id if cs else None}
     if ent and reanalyze:
+        # 変わった区間だけを合わせ直す（2026-10-10 承認）。テイクは裏の準備に頼んで待たない
+        # （自動の設定のとき。手動なら analyze_phonemes を呼ぶまで未解析）。ガイドはここで計算する
         p.ensure_analyzed()
-        res = p.analyze_phonemes(source, force=True)
+        res = p.analyze_phonemes(source)
         p._save_analysis()
         _invalidate_renderer()
         if res is not None:
+            out.update(_phoneme_pending_info(p, source, res))
             out.update(kana=res.kana,
                        phonemes=len([x for x in res.phonemes if x.label != "silence"]),
                        boundaries=len(res.boundaries),
@@ -618,8 +715,10 @@ def set_note_syllable(note_id: str, kana: str, syllable_index: int = None,
     lex = [s for s in reading.syllables if s.romaji not in (G.SP, G.AP)]
     if len(lex) != 1 or not lex[0].kana:
         raise ProjectError("kana は 1 音節のかなにする（例: か / しゃ / ん）")
-    res = p.phonemes("take")
+    res = p.phonemes("take", complete=True)      # 音節の番号を数えるので、全区間がそろった音素で
     if res is None:
+        if p.phonemes_pending("take"):
+            raise ProjectError("まだ音素を解析していない区間がある。先に analyze_phonemes を呼ぶ")
         raise ProjectError("音素が無い。先に analyze_take を呼ぶ")
     candidates = [s for s in res.syllables
                   if s["end_sec"] > note.start_sec and s["start_sec"] < note.end_sec]
@@ -670,13 +769,85 @@ def set_note_syllable(note_id: str, kana: str, syllable_index: int = None,
                                      label="音節の修正")
     _rec(p, cs, "音節の修正")
     if cs:
-        p.analyze_phonemes("take", force=True)
+        p.analyze_phonemes("take")              # 直した区間だけを裏で合わせ直す（2026-10-10 承認）
         p._save_analysis()
         _invalidate_renderer()
     return _ok(note_id=note_id, syllable_index=target["index"],
                 before=entry.get("reading") or entry["text"],
                 after=normalized[ent_index].get("reading") or normalized[ent_index]["text"],
                 changeset=cs.id if cs else None)
+
+
+@_tool
+def analyze_phonemes(wait: bool = False) -> dict:
+    """「音素を解析」のコマンド: テイクの歌詞と音素のうち、まだ解析していないものを解析する（2026-10-10 承認）。
+
+    歌詞の無い発声区間があれば歌詞を推定し（まだ推定していないとき）、音素の足りない区間を合わせる。
+    「歌詞と音素を自動で解析する」が切（`set_auto_phonemes(False)`）でも解析する。済んだ区間は計算し直さない。
+
+    wait: False（既定）なら裏の準備に急ぎで頼んで待たない（操作の途中でも進める。済んだかは phoneme_status）。
+      True ならここで計算して、全区間がそろった結果を返す。
+    返り値の phonemes_state: "ready" / "analyzing" / "pending"（`set_lyrics` と同じ）。"""
+    from . import prep
+    p = _project()
+    p.reload_if_changed()
+    p.ensure_analyzed()
+    inferred = 0
+    if "auto_lyrics" not in p.analysis:
+        p._infer_missing_lyrics()                # 手動の設定で、まだ歌詞を推定していない
+        inferred = len(p._auto_proposed)
+        if "auto_lyrics" in p.analysis:
+            p._save_analysis()
+    if p.guide is not None and p.has_lyrics("guide") and p.phonemes_pending("guide"):
+        p.analyze_phonemes("guide", compute=True)  # ガイドの音素は表で（手動の設定で、まだ解析していない）
+    if not p.has_lyrics("take"):
+        return _ok(phonemes_state="no_lyrics", pending_entries=[], inferred_entries=inferred,
+                   reason="歌詞が無い。set_lyrics で歌詞を入れる")
+    if not wait and prep.schedule_phonemes(p, "take", urgent=True):
+        res = p.analyze_phonemes("take", compute=False)
+    else:
+        res = p.analyze_phonemes("take", compute=True)
+        p._save_analysis()
+    _invalidate_renderer()
+    return _ok(**_phoneme_pending_info(p, "take", res), inferred_entries=inferred,
+               n_entries=len(p.lyrics_entries("take")))
+
+
+@_tool(lock=False)
+def phoneme_status() -> dict:
+    """**画面向け**: テイクの音素の裏の解析の状態（エンジンのロックを握らないので、ほかの処理の最中でもすぐ返る）。
+
+    state: "queued"（待ち・操作の間は止めている）/ "preparing"（解析中）/ "ready" / "failed"（error）/ null（頼んでいない）
+    gen: 裏の解析が 1 回進むたびに増える（変わったら get_phonemes・export_view_data を取り直す）
+    paused: 利用者の操作の間で、区間の間で待っている
+    auto: 「歌詞と音素を自動で解析する」の設定
+    pending_entries: 表が最後に組んだ音素で、まだ解析していない歌詞の区間の番号（計算はしない）"""
+    from . import prep
+    p = _project(required=False)
+    if p is None or not isinstance(p, Project):
+        from .project.store import auto_phonemes
+        return _ok(state=None, gen=0, auto=auto_phonemes(), pending_entries=[])
+    r = p._phonemes.get("take")
+    pending = list((r.aligner.get("pending_entries") if r is not None else None) or [])
+    return _ok(**prep.phoneme_status(p.dir), pending_entries=pending)
+
+
+@_tool
+def set_auto_phonemes(enabled: bool = None) -> dict:
+    """「歌詞と音素を自動で解析する」の設定（既定 オン。2026-10-10 承認）。enabled を省くと今の値を返す。
+
+    オン: 曲を開いたら・歌詞を直したら、足りない区間を裏で解析する（利用者の操作の間は止めて、手が空いたら続ける。
+    伸ばした・切ったなど編集した区間を先に）。
+    切: 自動では何も解析しない（歌詞の推定も音素も）。「音素を解析」（analyze_phonemes）を呼んだときだけ解析する。
+    切からオンにすると、開いている曲の足りない区間を裏で解析し始める。"""
+    from . import prep
+    from .project.store import auto_phonemes, set_auto_phonemes as _set
+    if enabled is not None:
+        _set(enabled)
+        p = _project(required=False)
+        if enabled and isinstance(p, Project) and p.has_lyrics("take") and p.phonemes_pending("take"):
+            prep.schedule_phonemes(p, "take")
+    return _ok(auto=auto_phonemes())
 
 
 @_tool
@@ -865,6 +1036,20 @@ def _count(xs):
     return d
 
 
+def _phoneme_pending_info(p, source, res):
+    """まだ音素を解析していない歌詞の区間と、その状態（2026-10-10 承認）。
+
+    phonemes_state: "ready"（全区間そろった）/ "analyzing"（裏で解析中・解析待ち）/
+    "pending"（解析しない。手動の設定・裏の準備が無い。analyze_phonemes で解析する）。"""
+    from . import prep
+    pending = list((res.aligner.get("pending_entries") if res is not None else None) or [])
+    if not pending:
+        return {"phonemes_state": "ready", "pending_entries": []}
+    st = prep.phoneme_status(p.dir) if source == "take" else {"state": None}
+    busy = st.get("state") in (prep.QUEUED, prep.PREPARING) and (st.get("urgent") or st.get("auto"))
+    return {"phonemes_state": "analyzing" if busy else "pending", "pending_entries": pending}
+
+
 def _phoneme_summary(p):
     """analyze_take の返り値に入れる音素の要約。"""
     from .analysis.phonemes import backend_info
@@ -891,6 +1076,7 @@ def _phoneme_summary(p):
            "n_warnings": len(r.warnings),
            # 音素を切れなかった歌詞の区間（その区間は音素なしで続けている。issue #58）
            "failed_entries": list(r.aligner.get("failed_entries") or [])}
+    out.update(_phoneme_pending_info(p, "take", r))
     g = p.phonemes("guide") if p.has_lyrics("guide") else None
     if g is not None:
         out["guide"] = {"voiced": len([x for x in g.phonemes if x.label != "silence"]),
@@ -1059,19 +1245,46 @@ def _add(kind, target, params, author, label, note=None, hist=None, group=None):
 
 
 @_tool
-def shift_pitch(cents: float, note_id: str = None, start_sec: float = None,
+def shift_pitch(cents: float = None, note_id: str = None, start_sec: float = None,
                 end_sec: float = None, author: str = "ai", note: str = None,
-                group: str = None, label: str = None) -> dict:
+                group: str = None, label: str = None, notes: list = None) -> dict:
     """音程を cents だけ動かす（+100 = 1 半音上）。対象は note_id か範囲。
 
+    notes: 複数のノートを 1 回で動かす。[{"note_id": "n012", "cents": -12.5}, ...]
+      （cents を省いた要素は引数の cents）。1 回の呼び出し = 1 つの changeset = 取り消し 1 回
+      （画面の複数ノートのピッチのドラッグ・「半音に合わせる」）。note_id・範囲とは併用しない
     group: 同じ文字列を渡した続けての呼び出しは、取り消しの履歴で 1 回にまとめる
       （画面の複数ノートのピッチのドラッグ = Ctrl+Z 1 回で全部戻る）
     label: 取り消しの履歴に出す名前（既定「ピッチ」。画面の「半音に合わせる」など）
     """
-    t = _resolve_target(note_id, start_sec, end_sec)
-    return _add("pitch_shift", t, {"cents": float(cents)}, author,
-                "%s を %+.0f セント" % (t.describe(), cents), note, hist=label or "ピッチ",
-                group=group)
+    if notes is None:
+        if cents is None:
+            raise ProjectError("cents が要る")
+        t = _resolve_target(note_id, start_sec, end_sec)
+        return _add("pitch_shift", t, {"cents": float(cents)}, author,
+                    "%s を %+.0f セント" % (t.describe(), cents), note, hist=label or "ピッチ",
+                    group=group)
+    if note_id is not None or start_sec is not None or end_sec is not None:
+        raise ProjectError("notes と note_id・範囲は一緒に渡さない")
+    if not isinstance(notes, list) or not notes:
+        raise ProjectError("notes は [{note_id, cents}, ...] の空でない配列")
+    specs = []
+    for it in notes:
+        nid = it.get("note_id") if isinstance(it, dict) else None
+        c = it.get("cents", cents) if isinstance(it, dict) else None
+        if not nid or c is None:
+            raise ProjectError("notes の要素には note_id と cents が要る: %r" % (it,))
+        t = _resolve_target(nid, None, None)
+        specs.append({"kind": "pitch_shift", "target": t, "params": {"cents": float(c)}, "note": note})
+    p = _project()
+    first = specs[0]
+    desc = ("%s を %+.0f セント" % (first["target"].describe(), first["params"]["cents"])
+            if len(specs) == 1 else "%d 個のノートのピッチ" % len(specs))
+    cs, edits = p.apply_edits(specs, author=author, label=desc)
+    _rec(p, cs, label or "ピッチ", group=group)
+    return _ok(changeset=cs.id, edits=[e.to_json() for e in edits],
+               total_edits=len(p.edits),
+               next="render_preview / render_view / remeasure で確かめる。戻すなら undo")
 
 
 @_tool
@@ -2077,7 +2290,7 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
     if p.reload_if_changed():
         _invalidate_renderer()
     from .render.region import RegionRenderer, audition as _aud
-    from .mcp_ara import _rev_parts, audition_pcm, audition_region, audition_renderer, audition_segs
+    from .mcp_ara import _rev_parts, audition_pcm, audition_region, audition_renderer, audition_segs, renderer_lock
     name = resolve_backend_name(backend)
     with _prep_yield():
         p.ensure_analyzed()
@@ -2129,7 +2342,8 @@ def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
                 n = p.note(note_id)
                 region = audition_region(ara_id, p, n.start_sec if start_sec is None else float(start_sec),
                                          n.end_sec if end_sec is None else float(end_sec))
-            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs, region=region)
+            with renderer_lock(rr):           # ARA の再生用のレンダラーは、ロックの外の再合成（ara_render_dirty）と分け合う
+                y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs, region=region)
         if p.view_key() != view_rev or _rev_parts(p) != (asig, erev):
             raise ProjectConflict("試聴中に解析または編集の版が変わった。結果を破棄した")
     if y.ndim == 2 and y.shape[1] > 1:
@@ -2219,7 +2433,7 @@ def render_view(start_sec: float = None, end_sec: float = None, show_guide: bool
 
 @_tool
 def export_view_data(start_sec: float = None, end_sec: float = None,
-                     peak_ms: float = None, path: str = None) -> dict:
+                     peak_ms: float = None, path: str = None, since: str = None) -> dict:
     """**画面（UI）向け**の描画データを JSON ファイルに書いてパスを返す。
 
     LLM 向けではない。エージェントがこれを読む必要はない（要約が欲しいときは
@@ -2231,11 +2445,15 @@ def export_view_data(start_sec: float = None, end_sec: float = None,
     ガイド F0（ガイドの時刻 + 全体のずれでテイク時間に置いたもの）、ノート一覧（id・開始/終了・音名・
     編集前後の中心ピッチ・ピッチ編集対象外フラグ）、境界一覧（編集前後の秒）、
     編集前→編集後の時間写像、編集リストと取り消し履歴。
+
+    since に前に受け取った view_rev を渡すと、その版との差分だけを書いて返す（diff: true。
+    当て方は engine/docs/MCP.md「描画データの差分」）。その版を覚えていなければ全体（diff: false）。
     """
     p = _project()
     p.reload_if_changed()
-    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path)
-    return _ok(**out, view_rev=p.view_key())
+    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path, since=since)
+    out.setdefault("view_rev", p.view_key())
+    return _ok(**out)
 
 
 @_tool
@@ -2414,7 +2632,7 @@ def cancel_job(job_id: str) -> dict:
 
 
 @_tool(lock=False)
-def prep_status() -> dict:
+def prep_status(visible: list | None = None, playhead_sec: float | None = None) -> dict:
     """**画面向け**: トラックごとの裏の準備（issue #63）の状態。エンジンのロックを握らないので、
     ほかの処理の最中でもすぐ返る。
 
@@ -2423,8 +2641,14 @@ def prep_status() -> dict:
              "queued"（待ち）/ "failed"（失敗。error。選んだときに表でもう一度解析する）
       paused: 表の重い処理・一時停止の間、次の段へ進まずに待っている
     running: 今準備しているトラックの id（無ければ null）。
+    visible・playhead_sec（省略可）: 画面が今見ているトラックの id（前ほど先）と再生位置（ソングの秒）。
+      渡すと、裏の準備は編集対象 → 見ているトラック → 残りは再生位置から順に進み、DAW の差分の再合成
+      （ara_render_dirty）も再生位置に近い窓から返す（DAW で開いたとき。2026-10-10 承認）。曲は変えない。
     """
     from . import prep
+    s = _state.get("session")
+    if s is not None and (visible is not None or playhead_sec is not None):
+        prep.set_focus(s.dir, visible, playhead_sec)
     return _ok(**prep.overview())
 
 
@@ -2590,7 +2814,7 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
 
 TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllable,
          inspect_lyrics_score, import_lyrics, analyze_take, get_pitch, list_notes, list_deviations,
-         get_phonemes,
+         get_phonemes, analyze_phonemes, phoneme_status, set_auto_phonemes,
          shift_pitch, set_pitch_curve, move_note, stretch, move_boundary, correct_to_guide,
          set_transition, split_note, merge_notes,
          plan_edit, apply_plan, list_connections, set_connection,
@@ -2663,6 +2887,9 @@ def main():
         log.get().exception("アドオンを読めなかった")
     log.get().info("=== vocal_engine MCP サーバー起動（%s / pid %d）", __version__, os.getpid())
     server = build_server()
+    from . import warmup
+    warmup.mark_ready()
+    warmup.start()                               # librosa・numba・モデルを裏で読んでおく（ロックは取らない）
     try:
         server.run(transport="stdio")
     finally:

@@ -37,12 +37,17 @@ Claude Code などのエージェントがこのツールを呼ぶ理由は無�
 crop はその区間を出さない／silence はその時刻に無音を挟む）。編集後の秒は 1 µs に丸める
 （画面が計画の節と突き合わせるため。0.1 ms に丸めると節の外に出てしまう）。
 """
+import collections
+import itertools
 import json
 import os
+import threading
+import time
 import weakref
 
 import numpy as np
 
+from .. import log
 from ..analysis.f0 import hz_to_midi, midi_to_name
 from ..render.pipeline import MIN_GAP_MS, edits_to_segments
 from ..project.correction import PITCH_REF_CENTS, TIMING_REF_MS
@@ -290,7 +295,8 @@ def _phoneme_block(project, pres, src_pts, out_pts, t0, t1):
         project.estimated_excluded_note_ids())
     devs = []
     try:
-        if project.guide is not None:
+        # 未解析の区間がある間は出さない（全区間の音素が要るので、ここで計算すると編集・曲を開くのを待たせる）
+        if project.guide is not None and not pres.aligner.get("pending_entries"):
             devs, _ = project.boundary_deviations()
     except Exception:                          # noqa: BLE001
         devs = []
@@ -342,6 +348,8 @@ def _phoneme_block(project, pres, src_pts, out_pts, t0, t1):
         "phonemes": phs, "boundaries": bds, "syllables": sylls,
         "warnings": pres.warnings, "entries": list(pres.entries),
         "min_phoneme_ms": 20.0,
+        # まだ音素を解析していない歌詞の区間の番号（裏で解析中・手動の設定。2026-10-10 承認）
+        "pending_entries": list(pres.aligner.get("pending_entries") or []),
     }
 
 
@@ -350,6 +358,11 @@ def _no_phonemes(project, pres=None):
 
     全体の失敗（`phoneme_error`）と、すべての区間が失敗して音素が 1 つも無い結果の両方。"""
     err = project.phoneme_error("take") if project.has_lyrics("take") else None
+    pending = list((pres.aligner.get("pending_entries") if pres is not None else None) or [])
+    if err is None and pending:
+        return {"supported": True, "has_lyrics": True, "phonemes": [], "boundaries": [],
+                "syllables": [], "entries": list(pres.entries), "pending_entries": pending,
+                "reason": "音素をまだ解析していない"}
     if err is None and pres is not None:
         fails = [w for w in pres.warnings if w.get("kind") == "align_failed"]
         if fails:
@@ -369,10 +382,15 @@ VIEW_KEEP = 8                   # cache/view/ に残す描画データの数（�
 
 
 VIEW_DATA_VERSION = 1  # 描画 JSON の形式・計算方法を変えたら上げる
+VIEW_MEM = 3                    # 差分の元としてメモリに持つ描画データの数（版ごと。曲全体で 1 つ数 MB）
+VIEW_REVS = 32                  # 版 → 描画データのファイルを覚えておく数（メモリに無い版はファイルから読む）
+DIFF_KEEP = 8                   # cache/view-diff/ に残す差分のファイルの数
+DIFF_GAP = 32                   # 数の列の差分: これより近い変わった区間は 1 つにまとめる
+DIFF_MIN_LEN = 64               # これより短い列は区間に分けず丸ごと差し替える
 
 
 def export_view_data(project, start_sec=None, end_sec=None, peak_ms=None,
-                     path=None):
+                     path=None, since=None):
     """画面描画用の JSON を書いてパスを返す（UI 向け。LLM 向けではない）。
 
     `peak_ms` を省くと**範囲の長さから決める**（2 ms 刻みだと 158 秒の素材で
@@ -383,7 +401,12 @@ def export_view_data(project, start_sec=None, end_sec=None, peak_ms=None,
     書き出しの既定のパス（`export_default_path`）はファイルの有無で変わるので、結果に毎回入れる。
     **ここで新しい入力（セッション・別のファイルなど）を読むようにしたら、`Project.view_key` にも足すこと**
     （足さないと、入力が変わっても前に作ったものを返す）。
+
+    since（前に受け取った `view_rev`）を渡すと、その版の描画データとの**差分**（`view_diff`）を
+    `cache/view-diff/` に書いて返す（`diff: true`。2026-10-10 承認）。その版を覚えていなければ全体を返す
+    （`diff: false`）。差分は同じプロジェクト・同じ範囲の引数の版とだけ取る。path を渡したときは使わない。
     """
+    t_start = time.perf_counter()
     project.ensure_analyzed()
     if path is None:
         args = [start_sec, end_sec, peak_ms]
@@ -391,16 +414,20 @@ def export_view_data(project, start_sec=None, end_sec=None, peak_ms=None,
         vdir = project.sub(os.path.join("cache", "view"))
         hit = _cached_view(vdir, key)
         if hit is not None:
-            return dict(hit, cached=True, export_default_path=_export_default(project))
-        out = _build(project, start_sec, end_sec, peak_ms)
-        # 作る途中で読んだもの（音素など）があれば鍵が変わる: 作った後の鍵で残す
-        key = project.view_key(*args)
-        path = os.path.join(vdir, key + ".json")
-        _write_json(path, out.pop("_data"))
-        _write_json(path[:-5] + ".meta.json", out)
-        _prune_views(vdir, keep=path)
-        return dict(out, path=os.path.abspath(path), bytes=os.path.getsize(path), cached=False,
-                    export_default_path=_export_default(project))
+            out, data = dict(hit, cached=True, export_default_path=_export_default(project)), None
+        else:
+            out = _build(project, start_sec, end_sec, peak_ms)
+            # 作る途中で読んだもの（音素など）があれば鍵が変わる: 作った後の鍵で残す
+            key = project.view_key(*args)
+            path = os.path.join(vdir, key + ".json")
+            # 差分の元には書いたものを読み戻して持つ（画面が読むものと同じ形。作った側の配列を後で書き換えても崩れない）
+            data = json.loads(_write_json(path, out.pop("_data")))
+            _write_json(path[:-5] + ".meta.json", out)
+            _prune_views(vdir, keep=path)
+            out = dict(out, path=os.path.abspath(path), bytes=os.path.getsize(path), cached=False,
+                       export_default_path=_export_default(project))
+        out["view_rev"] = project.view_key()
+        return _with_diff(project, args, out, data, since, t_start)
     out = _build(project, start_sec, end_sec, peak_ms)
     _write_json(path, out.pop("_data"))
     return dict(out, path=os.path.abspath(path), bytes=os.path.getsize(path), cached=False,
@@ -427,9 +454,11 @@ def _cached_view(vdir, key):
 def _write_json(path, data):
     from ..project.store import _tmp_name, replace_file
     tmp = _tmp_name(path)
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     with open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(data, ensure_ascii=False, separators=(",", ":")))
+        f.write(text)
     replace_file(tmp, path)
+    return text
 
 
 def _prune_views(vdir, keep):
@@ -446,6 +475,197 @@ def _prune_views(vdir, keep):
                 os.remove(q)
             except OSError:
                 pass
+
+
+# ---------------------------------------------------------------- 差分（since）
+_revs = collections.OrderedDict()      # (プロジェクト, 範囲の引数, view_rev) → {"path", "data"}（data は新しい VIEW_MEM 個だけ）
+_revs_lock = threading.Lock()
+_diff_seq = itertools.count(1)
+
+
+def _remember(slot, path, data):
+    with _revs_lock:
+        hit = _revs.pop(slot, None) or {}
+        _revs[slot] = {"path": path, "data": data if data is not None else hit.get("data")}
+        for i, e in enumerate(reversed(_revs.values())):
+            if i >= VIEW_MEM:
+                e["data"] = None
+        while len(_revs) > VIEW_REVS:
+            _revs.popitem(last=False)
+
+
+def _recall(slot):
+    """覚えている版の描画データ（無ければ None）。メモリから外れていればファイルから読む。"""
+    with _revs_lock:
+        e = _revs.get(slot)
+        if e is None:
+            return None
+        _revs.move_to_end(slot)
+        data, path = e["data"], e["path"]
+    if data is not None:
+        return data
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None                             # 古い描画データは消えていることがある（_prune_views）
+
+
+def forget_views():
+    """覚えている版を忘れる（試験用）。"""
+    with _revs_lock:
+        _revs.clear()
+
+
+def _with_diff(project, args, out, data, since, t_start):
+    pdir = os.path.normcase(os.path.abspath(project.dir))
+    akey = json.dumps(args)
+    rev = out["view_rev"]
+    t_diff = time.perf_counter()
+    base = _recall((pdir, akey, since)) if since else None
+    if base is not None and data is None:
+        data = _recall((pdir, akey, rev))
+        if data is None:
+            try:
+                with open(out["path"], encoding="utf-8") as f:
+                    data = json.load(f)
+            except (OSError, ValueError):
+                base = None
+    _remember((pdir, akey, rev), out["path"], data)
+    if base is None:
+        out = dict(out, diff=False)
+    else:
+        ops = view_diff(base, data)
+        ddir = project.sub(os.path.join("cache", "view-diff"))
+        dpath = os.path.join(ddir, "%d-%d.json" % (os.getpid(), next(_diff_seq)))
+        _write_json(dpath, {"diff_from": since, "base_dir": project.dir, "ops": ops})
+        _prune_diffs(ddir, keep=dpath)
+        out = dict(out, path=os.path.abspath(dpath), bytes=os.path.getsize(dpath), diff=True, since=since,
+                   full_path=out["path"], full_bytes=out["bytes"])
+    now = time.perf_counter()
+    out["timing_sec"] = {"build": round(t_diff - t_start, 4), "diff": round(now - t_diff, 4)}
+    log.get("perf").info("view op=export_view_data diff=%d cached=%d bytes=%d full_bytes=%d build=%.3f view_diff=%.3f",
+                         int(out["diff"]), int(bool(out.get("cached"))), out["bytes"],
+                         out.get("full_bytes", out["bytes"]), t_diff - t_start, now - t_diff)
+    return out
+
+
+def _prune_diffs(ddir, keep):
+    try:
+        paths = sorted((os.path.join(ddir, n) for n in os.listdir(ddir) if n.endswith(".json")),
+                       key=os.path.getmtime, reverse=True)
+    except OSError:
+        return
+    for p in paths[DIFF_KEEP:]:
+        if os.path.normcase(p) != os.path.normcase(keep):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def view_diff(old, new):
+    """描画データ old → new の差分（`ops`）。当て方は `apply_view_diff`（画面は app/renderer/engine.js の
+    `applyViewDiff`。engine/docs/MCP.md「描画データの差分」）。
+
+    - 辞書: `{"$set": {キー: 新しい値}, "$del": [キー], "$sub": {キー: 中の差分}}`（空のものは省く）
+    - 同じ長さの数の列（null 混じり。64 個以上）: `{"$spans": [[先頭, [値…]], …]}`（変わった区間だけ）
+    - どの要素も一意の `id` を持つ辞書の列（ノートなど）: `{"$ids": [新しい並びの id], "$put": [変わった・増えた要素]}`
+    - それ以外・変わった量が半分を超える列は `$set` で丸ごと差し替える
+    """
+    return _diff_dict(old, new)
+
+
+def _diff_dict(old, new):
+    sets, subs = {}, {}
+    for k, v in new.items():
+        if k not in old:
+            sets[k] = v
+            continue
+        o = old[k]
+        if o == v:
+            continue
+        sub = _diff_value(o, v)
+        if sub is None:
+            sets[k] = v
+        else:
+            subs[k] = sub
+    d = {}
+    if sets:
+        d["$set"] = sets
+    dels = [k for k in old if k not in new]
+    if dels:
+        d["$del"] = dels
+    if subs:
+        d["$sub"] = subs
+    return d
+
+
+def _diff_value(o, v):
+    if isinstance(o, dict) and isinstance(v, dict):
+        return _diff_dict(o, v)
+    if isinstance(o, list) and isinstance(v, list):
+        if len(o) == len(v) >= DIFF_MIN_LEN and _numbers(o) and _numbers(v):
+            return _diff_spans(o, v)
+        if _with_ids(o) and _with_ids(v):
+            return _diff_ids(o, v)
+    return None
+
+
+def _numbers(xs):
+    return all(x is None or type(x) is float or type(x) is int for x in xs)
+
+
+def _diff_spans(o, v):
+    a = np.array(o, dtype="float64")            # None → nan
+    b = np.array(v, dtype="float64")
+    same = (a == b) | (np.isnan(a) & np.isnan(b))
+    idx = np.flatnonzero(~same)
+    if len(idx) == 0:
+        return {}
+    cuts = np.flatnonzero(np.diff(idx) > DIFF_GAP)
+    starts = np.concatenate(([idx[0]], idx[cuts + 1]))
+    ends = np.concatenate((idx[cuts], [idx[-1]])) + 1
+    if int((ends - starts).sum()) * 2 > len(v):
+        return None
+    return {"$spans": [[int(s), v[int(s):int(e)]] for s, e in zip(starts, ends)]}
+
+
+def _with_ids(xs):
+    ids = set()
+    for x in xs:
+        if not isinstance(x, dict) or x.get("id") is None or x["id"] in ids:
+            return False
+        ids.add(x["id"])
+    return True
+
+
+def _diff_ids(o, v):
+    old = {x["id"]: x for x in o}
+    put = [x for x in v if old.get(x["id"]) != x]
+    if len(put) * 2 > len(v):
+        return None
+    return {"$ids": [x["id"] for x in v], "$put": put}
+
+
+def apply_view_diff(old, ops):
+    """`view_diff` の差分を当てる（試験と、画面の applyViewDiff の正本の写し）。old は書き換えない。"""
+    if "$spans" in ops:
+        out = list(old)
+        for s, vals in ops["$spans"]:
+            out[s:s + len(vals)] = vals
+        return out
+    if "$ids" in ops:
+        by = {x["id"]: x for x in old}
+        by.update((x["id"], x) for x in ops["$put"])
+        return [by[i] for i in ops["$ids"]]
+    out = dict(old)
+    for k in ops.get("$del", ()):
+        out.pop(k, None)
+    out.update(ops.get("$set", {}))
+    for k, sub in ops.get("$sub", {}).items():
+        out[k] = apply_view_diff(old[k], sub)
+    return out
 
 
 def _build(project, start_sec, end_sec, peak_ms):

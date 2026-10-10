@@ -82,6 +82,70 @@ P1, P2 = M.text("C.part1"), M.text("C.part2")
 LYRICS = M.text("C.lyrics")             # P1 + " " + P2
 
 
+def _ph(res):
+    """音素・境界・音節（時刻・確信度・番号まで）。"""
+    return ([p.to_json() for p in res.phonemes], [b.to_json() for b in res.boundaries], res.syllables)
+
+
+def test_changed_phrase_is_realigned_alone_and_boundaries_stay(proj, tmp_path, monkeypatch):
+    """歌詞を直したら、変わった区間だけを合わせ直す。結果（区間の境目の音素も）は全体を合わせ直したものと
+    同じ（2026-10-10 承認）。"""
+    from vocal_engine.phoneme import analyze as A
+    from vocal_engine.project import Project
+    real, done = A.align_lyrics_ranges, []
+
+    def counting(*a, on_part=None, **k):
+        def note(i, key, part):
+            done.append(i)
+            if on_part is not None:
+                on_part(i, key, part)
+        return real(*a, on_part=note, **k)
+    monkeypatch.setattr(A, "align_lyrics_ranges", counting)
+    proj.set_lyrics(P1, start_sec=R1[0], end_sec=R1[1])
+    proj.set_lyrics(P2, start_sec=R2[0], end_sec=R2[1])
+    first = proj.analyze_phonemes("take", compute=True)
+    assert sorted(done) == [0, 1]
+    # 後半の歌詞だけを変える: 後半だけを計算する
+    done.clear()
+    proj.set_lyrics(P1, start_sec=R2[0], end_sec=R2[1])
+    inc = proj.analyze_phonemes("take", compute=True)
+    assert done == [1]
+    assert not inc.aligner.get("pending_entries")
+    # 新しい作業場所で全体を合わせたものと同じ
+    fresh = Project.open(TAKE, project_dir=str(tmp_path / "fresh"))
+    fresh.ensure_analyzed()
+    fresh.set_lyrics(P1, start_sec=R1[0], end_sec=R1[1])
+    fresh.set_lyrics(P1, start_sec=R2[0], end_sec=R2[1])
+    full = fresh.analyze_phonemes("take", force=True)
+    assert _ph(inc) == _ph(full)
+    # 前半の音素（後半との境目まで）の位置・種類は、前の結果から変わらない（確信度は結果全体で掛ける係数が
+    # 変わるので比べない。全体を合わせ直しても同じ値になることは上で見た）
+    def head(res):
+        return [(x["label"], x["text"], x["start_sec"], x["end_sec"], x["syllable_index"])
+                for x in _ph(res)[0] if x["end_sec"] <= R2[0]]
+    assert len(head(first)) > 2 and head(first) == head(inc)
+    # 同じ歌詞で開き直すと、part から組む（計算しない）
+    done.clear()
+    again = Project.open(TAKE, project_dir=proj.dir)
+    again.ensure_analyzed()
+    assert _ph(again.analyze_phonemes("take", compute=True)) == _ph(inc) and done == []
+
+
+def test_unaligned_phrase_is_pending_without_compute(proj):
+    """計算しない（手動の設定・裏で解析する前）なら、変わった区間は未解析のまま、ほかの区間の音素は出す。"""
+    proj.set_lyrics(P1, start_sec=R1[0], end_sec=R1[1])
+    proj.analyze_phonemes("take", compute=True)
+    proj.set_lyrics(P2, start_sec=R2[0], end_sec=R2[1])
+    res = proj.analyze_phonemes("take", compute=False)
+    assert res.aligner["pending_entries"] == [1]
+    assert [e.get("pending", False) for e in res.entries] == [False, True]
+    voiced = [p for p in res.phonemes if p.label != "silence"]
+    assert voiced and all(p.end_sec <= R2[0] for p in voiced)
+    assert proj.phonemes_pending("take")
+    assert proj.phonemes("take", complete=True) is not None      # 自動の設定で裏が無いので、ここで計算する
+    assert not proj.phonemes_pending("take")
+
+
 def test_two_ranges_align_independently(proj):
     proj.set_lyrics(" %s " % P1, start_sec=R1[0], end_sec=R1[1])
     proj.set_lyrics(P2, start_sec=R2[0], end_sec=R2[1])

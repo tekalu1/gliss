@@ -5,6 +5,9 @@
 `cache/phonemes/take-<歌詞の鍵>.json` が無いことがある（印を書いた後に表が音素を取り直すと、次の準備が
 「変わったキャッシュ」として鍵付きの保存を外していた）。裏の準備は今の写しを読むだけで鍵付きの保存を書かず、
 準備済みの印（`write_stamp`）が「準備のキャッシュが欠けている」で失敗し続けていた。
+
+2026-10-10 承認からテイクの音素は準備済みの印に入らない（区間ごとに裏で解析する）。古い作業場所でも準備は済み、
+表が音素を読むときに今の写しから鍵付きの保存を作る。
 """
 import glob
 import os
@@ -49,7 +52,7 @@ def _reopen(m, prep, paths, sdir):
 
 
 def test_old_workdir_without_keyed_phonemes_gets_prepared(env, monkeypatch):
-    """今の写しだけがあり鍵付きの保存が空: 裏の準備が今の写しから鍵付きの保存を作り、準備済みになる（計算し直さない）。"""
+    """今の写しだけがあり鍵付きの保存が空: 準備済みのまま。表が音素を読むと今の写しから鍵付きの保存を作る（計算し直さない）。"""
     m, mt, prep, fake, paths, sdir = env
     from vocal_engine.phoneme import analyze as PA
     calls = []
@@ -62,14 +65,16 @@ def test_old_workdir_without_keyed_phonemes_gets_prepared(env, monkeypatch):
     _reopen(m, prep, paths, sdir)
     st = _until(lambda: (lambda x: x if x and x["state"] in ("ready", "failed") else None)(_state(prep, tb)))
     assert st["state"] == "ready", st.get("error")
-    assert glob.glob(os.path.join(pdir, "cache", "phonemes", "take-*.json"))
-    assert len(calls) == n                       # 音素は今の写しから（アラインし直さない）
     s = m._state["session"]
     assert prep.is_ready(s, s.track(tb))
+    _ok(mt.select_track(tb))
+    _ok(m.analyze_take())
+    assert glob.glob(os.path.join(pdir, "cache", "phonemes", "take-*.json"))
+    assert len(calls) == n                       # 音素は今の写しから（アラインし直さない）
 
 
 def test_reprepare_keeps_keyed_phonemes_updated_by_front(env, monkeypatch):
-    """印を書いた後に表が音素を取り直した（鍵付きの保存の中身が変わった）: 次の準備はそれを外さない。"""
+    """印を書いた後に表が音素を取り直した（鍵付きの保存の中身が変わった）: 準備済みのまま、それを外さない。"""
     m, mt, prep, fake, paths, sdir = env
     from vocal_engine.phoneme import analyze as PA
     from vocal_engine.project.store import Project
@@ -83,7 +88,7 @@ def test_reprepare_keeps_keyed_phonemes_updated_by_front(env, monkeypatch):
     with open(keyed, "a", encoding="utf-8") as f:
         f.write(" ")                             # 同じ大きさで書き直されても見分けられるよう、大きさも変える
     s = m._state["session"]
-    assert not prep.is_ready(s, s.track(tb))
+    assert prep.is_ready(s, s.track(tb))         # テイクの音素は準備済みの印に入らない
     _reopen(m, prep, paths, sdir)
     st = _until(lambda: (lambda x: x if x and x["state"] in ("ready", "failed") else None)(_state(prep, tb)))
     assert st["state"] == "ready", st.get("error")

@@ -835,12 +835,12 @@ public:
         beginTest ("which successful calls ask for a sync");
         {
             const auto ok = parseJson (R"({"ok":true})");
-            for (auto* tool : { "shift_pitch", "undo", "redo", "apply_plan", "set_pitch_curve", "split_note", "select_track",
+            for (auto* tool : { "shift_pitch", "undo", "redo", "apply_plan", "set_pitch_curve", "split_note",
                                 "analyze_take", "set_guide_track", "set_lyrics", "some_future_tool" })
                 expect (tools::shouldSyncAfter (tool, ok), tool);
 
             for (auto* tool : { "list_tracks", "list_notes", "get_pitch", "export_view_data", "track_overview", "engine_info",
-                                "prep_status", "render_audition", "plan_edit", "project_status" })
+                                "prep_status", "render_audition", "plan_edit", "project_status", "select_track" })
                 expect (! tools::shouldSyncAfter (tool, ok), tool);
 
             expect (! tools::shouldSyncAfter ("shift_pitch", parseJson (R"({"ok":false,"error":"x"})")));

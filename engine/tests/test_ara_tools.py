@@ -8,6 +8,7 @@
 - 同じソースの 2 つの修飾が別の編集を持つ
 - `ara_render_dirty` を編集ごとに当てた結果が `render_region` の全体と一致する（取り消し・やり直しも）
 - `since` 違い・エンジンの作り直しで `reset`。`max_sec` で分けても同じ結果（途中で編集が入っても）
+- 解析を同じ中身で書き直しても `reset` しない。中身が変わる（解析し直し・方式の切り替え・ガイドの差し替え）と作り直す
 - `ara_archive` → 別の作業場所で `ara_restore` → 同じ PCM。中身の違う素材は `mismatch`
 - `ara_sync` で位置を変えると `reopened`・履歴に入らない。`ara_*` の後の `undo` が DAW の操作を戻さない
 - `ara_archive` / `ara_revs` がジョブ中（エンジンのロックを握られている間）も待たない
@@ -23,7 +24,7 @@ import numpy as np
 import pytest
 import soundfile as sf
 
-from conftest import VENV_PY
+from conftest import VENV_PY, needs_model
 
 SR = 44100
 # (頭の秒, 長さ, MIDI)。かたまり（窓）が分かれるように 0.6 秒あける
@@ -318,14 +319,170 @@ def test_since_mismatch_and_engine_restart_reset(ara, tmp_path):
     # backend が違えば reset
     r2 = _ok(a.ara_render_dirty("mod-A", since=r["rev"], backend="psola"))
     assert r2["reset"]
-    # 解析が変わった（解析し直した）: reset
+    # 解析が変わった（解析し直して F0 が違う）: reset
+    from vocal_engine.project import store
+    est = store.estimate_f0
     c3 = Cache(src)
     c3.sync(a, "mod-A")
-    _ok(m.analyze_take(force=True, background=False))
+    with pytest.MonkeyPatch.context() as mp:
+        def higher(**kw):
+            f = est(**kw)
+            f.f0 = np.where(f.voiced, f.f0 * 1.01, 0.0)
+            return f
+        mp.setattr(store, "estimate_f0", higher)
+        _ok(m.analyze_take(force=True, background=False))
     r3 = _ok(a.ara_render_dirty("mod-A", since=c3.rev))
     assert r3["reset"]
     c3.apply(r3)
     _same(c3, a, "mod-A")
+
+
+def _analysis_of(m):
+    from vocal_engine import mcp_tracks as mt
+    s = m._state["session"]
+    p, _ = mt._track_project(s, s.track(mt.current_track_id()))
+    return p.analysis["take"]
+
+
+def test_rewriting_the_same_analysis_keeps_the_windows(ara, tmp_path, monkeypatch):
+    """裏の準備が表と同じ解析を後から書き直しても（時刻・キャッシュのファイルだけが新しい）、版を変えず窓を作り直さない
+    （2026-10-11 承認。プラグインの通し試験の段 13）。署名は解析を書くときに 1 回だけ作る。"""
+    m, a = ara
+    from vocal_engine.project import store
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    # 裏の準備が先に拾った（解析の前の状態を読んだ）。表が先に解析し、裏は後から同じ解析を書き足す
+    pdir = m._state["session"].project_dir_of(m._state["session"].track(tid))
+    q = store.Project(pdir).load()
+    q.background = True
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(100, note_id=notes[1]))
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    before = dict(_analysis_of(m))
+    rev = _ok(a.ara_revs())["revs"]["mod-A"]
+    calls = []
+    real = store._analysis_content
+    monkeypatch.setattr(store, "_analysis_content", lambda f, n: calls.append(1) or real(f, n))
+    cache = before["cache"]
+    old_stat = os.stat(cache)
+    time.sleep(0.02)
+    q.analyze(force=True, commit=lambda _a: store.Project(q.dir).load().merge_background(q))   # prep.py の commit と同じ
+    new_stat = os.stat(cache)
+    assert new_stat.st_mtime_ns != old_stat.st_mtime_ns                  # キャッシュのファイルは書き直された
+    assert store.Project(pdir).load().analysis["take"]["content"] == before["content"]
+    assert len(calls) == 1
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == rev
+    r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+    assert r["reset"] is False and r["windows"] == [] and r["restore"] == [] and r["rev"] == c.rev
+    # project.json の解析の時刻だけが新しい（ほかの所が変わって書かれた）
+    pp = store.Project(pdir).load()
+    pp.analysis["take"]["analyzed_at"] = "2099-01-01T00:00:00"
+    pp.save()
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == rev
+    r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+    assert r["reset"] is False and r["windows"] == [] and r["rev"] == c.rev
+    _ok(m.analyze_take(force=True, background=False))        # 表でも計算し直す（中身は同じ）
+    assert len(calls) == 2
+    for _ in range(3):                                        # キャッシュを読むだけの解析・1 秒ごとの問い合わせ: 作り直さない
+        _ok(m.analyze_take(background=False))
+        r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+        assert r["reset"] is False and r["windows"] == []
+    assert len(calls) == 2
+    # 中身の署名の無い古い project.json: 前のとおり解析の時刻で見る
+    from vocal_engine import mcp_tracks as mt
+    s = m._state["session"]
+    p, _ = mt._track_project(s, s.track(tid))
+    p.analysis["take"].pop("content")
+    old = a._rev_parts(p)
+    p.analysis["take"]["analyzed_at"] = "2099-01-01T00:00:01"
+    assert a._rev_parts(p)[0] != old[0]
+
+
+def test_analysis_cache_without_summary_keeps_the_windows(ara, tmp_path):
+    """裏の準備がキャッシュを書いた後、要約（`analysis.take`）を書く前に止まった（同期で取り消された）。表がキャッシュを
+    読んで再合成したときに要約も書くので、後から準備が同じ解析を書いても版を変えず作り直さない（プラグインの段 13）。"""
+    m, a = ara
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.project import store
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(100, note_id=notes[1]))
+    s = m._state["session"]
+    p, _ = mt._track_project(s, s.track(tid))
+    cache = p.analysis["take"]["cache"]
+    p.analysis.pop("take")
+    p.save()
+    p._forget_analysis()
+    a._reset_render()
+    assert os.path.exists(cache)
+    q = store.Project(p.dir).load()              # 裏の準備が拾った（要約の無い状態を読んだ）
+    q.background = True
+    c = Cache(src)
+    r = c.sync(a, "mod-A")
+    assert r["reset"] and len(r["windows"]) == 1
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == c.rev
+    q.analyze(force=True, commit=lambda _a: store.Project(q.dir).load().merge_background(q))
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == c.rev
+    r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+    assert r["reset"] is False and r["windows"] == [] and r["rev"] == c.rev
+    _same(c, a, "mod-A")
+    assert "content" in store.Project(p.dir).load().analysis["take"]
+
+
+@needs_model
+def test_switching_the_estimator_rebuilds_the_windows(ara, tmp_path):
+    """方式を替えると解析の中身が変わるので作り直す。戻したときも（方式ごとの保存から戻す）同じ音になる。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(100, note_id=notes[1]))
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    praat = _analysis_of(m)["content"]
+    for est in ("rmvpe", "praat"):
+        _ok(m.analyze_take(estimator=est, background=False))
+        k = len(c.calls)
+        c.sync(a, "mod-A")
+        assert c.calls[k]["reset"] and c.calls[k]["windows"], est
+        _same(c, a, "mod-A")
+    assert _analysis_of(m)["content"] == praat
+
+
+def test_changing_the_guide_rebuilds_what_changed(ara, tmp_path):
+    """ガイドを替える・動かすと、ガイドに合わせた編集の音が変わる。差分の再合成を当てた結果は全体の再合成と同じ。"""
+    m, a = ara
+    from vocal_engine import mcp_tracks as mt
+    take = _wav(tmp_path / "src" / "take.wav", _voice())
+    guide = _wav(tmp_path / "src" / "guide.wav", _voice(transpose=0.5, seed=2))
+    guide2 = _wav(tmp_path / "src" / "guide2.wav", _voice(transpose=-0.7, seed=3))
+    _open(a)
+    t1 = _add(a, "take", take)["track"]["id"]
+    _add(a, "guide", guide)
+    _add(a, "guide2", guide2)
+    _select_and_analyze(m, t1)
+    _ok(a.ara_sync(guide="guide"))
+    _ok(mt.select_track(t1))
+    _ok(m.analyze_take(background=False))
+    _ok(m.correct_to_guide(pitch_strength=1.0))
+    c = Cache(take)
+    c.sync(a, "take")
+    _same(c, a, "take")
+    first = c.buf.copy()
+    _ok(a.ara_sync(guide="guide2"))                            # ガイドを差し替える
+    _ok(mt.select_track(t1))
+    _ok(m.analyze_take(background=False))
+    _ok(m.correct_to_guide(pitch_strength=1.0))
+    k = len(c.calls)
+    c.sync(a, "take")
+    assert any(x["windows"] for x in c.calls[k:])
+    _same(c, a, "take")
+    assert not np.array_equal(c.buf, first)
 
 
 def test_max_sec_splits_into_several_calls_with_the_same_result(ara, tmp_path):
@@ -358,6 +515,34 @@ def test_max_sec_splits_into_several_calls_with_the_same_result(ara, tmp_path):
     assert all(len(x["windows"]) <= 1 for x in part.calls)
     whole.sync(a, "mod-A")
     assert np.array_equal(part.buf, whole.buf)
+
+
+def test_dirty_windows_come_from_the_playhead(ara, tmp_path, monkeypatch):
+    """画面が再生位置を知らせると（prep_status）、差分の再合成は再生位置にかかる窓 → 後ろ → 前の順に返す。
+    当てた結果は順番を変えない場合と同じ（2026-10-10 承認）。"""
+    m, a = ara
+    from vocal_engine import prep
+    src = _wav(tmp_path / "src" / "a.wav", _voice(stereo=True))
+    _open(a)
+    tid = _add(a, "mod-A", src, offset_sec=1.0)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    for k in (0, 2, 4):
+        _ok(m.shift_pitch(50 + 30 * k, note_id=notes[k]))
+    whole = Cache(src)
+    whole.sync(a, "mod-A")
+
+    a._reset_render()
+    if _prep_off():                               # 裏の準備を止めたテストでも、このセッションの再生位置を覚えさせる
+        monkeypatch.setattr(prep.PREPARER, "_sdir", m._state["session"].dir)
+    _ok(m.prep_status(playhead_sec=1.0 + 2.8 + 0.3))         # ソングの秒（トラックは 1 秒から）。3 つ目のノートの中
+    assert prep.playhead(m._state["session"].dir) is not None
+    part = Cache(src)
+    part.sync(a, "mod-A", max_sec=0.01)
+    starts = [x["windows"][0]["start_frame"] / SR for x in part.calls if x["windows"]]
+    assert len(starts) == 3
+    assert starts[0] < 2.8 < starts[0] + 1.0 and starts[1] > 3.5 and starts[2] < 1.0   # かかる → 後ろ → 前
+    assert np.array_equal(part.buf, whole.buf)
+    _same(part, a, "mod-A")
 
 
 # ================================================================ アーカイブ
@@ -683,6 +868,239 @@ def test_archive_and_revs_do_not_wait_for_the_engine_lock(ara, tmp_path):
     finally:
         release.set()
         th.join(5)
+
+
+# ================================================================ ロックの外の再合成
+def _hold_render(monkeypatch, a, during):
+    """ロックの外の再合成（`_render_plan`）に入るたびに during(回目) を呼ぶ。返り値は呼ばれた回数の入れ物。"""
+    orig = a._render_plan
+    calls = []
+
+    def hook(plan, stat):
+        calls.append(plan["todo"])
+        during(len(calls))
+        return orig(plan, stat)
+
+    monkeypatch.setattr(a, "_render_plan", hook)
+    return calls
+
+
+def test_edit_during_render_does_not_wait_and_the_stale_windows_are_rebuilt(ara, tmp_path, monkeypatch):
+    """窓を作っている間（エンジンのロックの外）に入った編集は待たない。作った窓は捨てて今の版から作り直し、
+    結果は render_region の全体と同じ。取り消しも効く。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice(stereo=True))
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    _ok(m.shift_pitch(150, note_id=notes[0]))
+    entered, go = threading.Event(), threading.Event()
+
+    def during(k):
+        if k == 1:
+            entered.set()
+            assert go.wait(10)
+
+    calls = _hold_render(monkeypatch, a, during)
+    out = {}
+    th = threading.Thread(target=lambda: out.setdefault("r", c.sync(a, "mod-A")), daemon=True)
+    th.start()
+    assert entered.wait(10)
+    try:
+        t0 = time.perf_counter()
+        _ok(m.shift_pitch(-120, note_id=notes[4]))           # 再合成の途中の編集（ロックを待たない）
+        assert time.perf_counter() - t0 < 2.0
+    finally:
+        go.set()
+    th.join(30)
+    assert not th.is_alive()
+    r = out["r"]
+    assert r["timing_sec"]["retries"] == 1 and len(calls) == 2
+    assert len(c.calls) == 2 and r["reset"] is False
+    _same(c, a, "mod-A")
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == c.rev
+    # 取り消し・やり直しも、差分を当てた結果が全体と同じ
+    for step in (m.undo, m.undo, m.redo):
+        _ok(step())
+        c.sync(a, "mod-A")
+        _same(c, a, "mod-A")
+
+
+def test_view_data_lets_a_render_about_to_finish_commit_first(ara, tmp_path, monkeypatch):
+    """描画データの組み立ては、もうすぐ終わるロックの外の再合成の確定を先に通す（組み立てが先にロックを取ると、
+    作り終えた窓の確定がその後ろで待ち、編集した音が遅れる）。終わる見込みが遠い再合成は待たない。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    m.export_view_data()
+    order = []
+    orig_commit, orig_view = a._commit_plan, m._export_view_data
+    monkeypatch.setattr(a, "_commit_plan", lambda *x, **k: (order.append("commit"), orig_commit(*x, **k))[1])
+    monkeypatch.setattr(m, "_export_view_data", lambda *x, **k: (order.append("view"), orig_view(*x, **k))[1])
+    entered, go = threading.Event(), threading.Event()
+
+    def during(k):
+        entered.set()
+        assert go.wait(10)
+
+    _hold_render(monkeypatch, a, during)
+
+    def run(rate, cents, hold_sec):
+        """再合成の速さの見込みを rate にして、作っている最中に描画データを頼む。
+        再合成を hold_sec 止めている間（描画データが組み立てに入ればそこで止めるのをやめる）の順を返す。"""
+        a._render_rate["mod-A"] = rate
+        _ok(m.shift_pitch(cents, note_id=notes[1]))
+        entered.clear()
+        go.clear()
+        del order[:]
+        th = threading.Thread(target=lambda: c.sync(a, "mod-A"), daemon=True)
+        th.start()
+        assert entered.wait(10)
+        view = {}
+        tv = threading.Thread(target=lambda: view.setdefault("r", m.export_view_data()), daemon=True)
+        tv.start()
+        t0 = time.perf_counter()
+        while not order and time.perf_counter() - t0 < hold_sec:
+            time.sleep(0.01)
+        seen = list(order)
+        go.set()
+        th.join(30)
+        tv.join(30)
+        assert not th.is_alive() and not tv.is_alive()
+        _ok(view["r"])
+        return seen
+
+    # 見込みがすぐ（窓 1 秒を 1 ms）: 描画データは確定を待つ（再合成を止めている間は組み立てに入らない）
+    monkeypatch.setattr(m, "RENDER_YIELD_SEC", 10.0)
+    assert run(0.001, 80, hold_sec=0.5) == [] and order == ["commit", "view"]
+    _same(c, a, "mod-A")
+    # 見込みが遠い（窓 1 秒を 100 秒）: 待たずに組み立てる。確定はその後
+    assert run(100.0, 80, hold_sec=10.0) == ["view"] and order == ["view", "commit"]
+    _same(c, a, "mod-A")
+
+
+def test_render_under_the_lock_after_repeated_edits(ara, tmp_path, monkeypatch):
+    """作っている間に毎回編集が入る: RENDER_RETRIES 回作り直した後は、ロックを握ったまま作って必ず返す。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    _ok(m.shift_pitch(100, note_id=notes[0]))
+    locked = []
+
+    def free():
+        """別のスレッドからエンジンのロックが取れるか。"""
+        out = []
+
+        def f():
+            got = m._lock.acquire(blocking=False)
+            if got:
+                m._lock.release()
+            out.append(got)
+
+        th = threading.Thread(target=f, daemon=True)
+        th.start()
+        th.join(5)
+        return out[0]
+
+    def during(k):
+        locked.append(free())
+        if k <= a.RENDER_RETRIES:
+            _ok(m.shift_pitch(20 * k, note_id=notes[2 * (k % 2)]))
+
+    _hold_render(monkeypatch, a, during)
+    r = c.sync(a, "mod-A")
+    assert r["timing_sec"]["retries"] == a.RENDER_RETRIES
+    # 作り直しの間はロックの外、最後の 1 回はロックの中
+    assert locked == [True] * a.RENDER_RETRIES + [False]
+    _same(c, a, "mod-A")
+
+
+def test_two_callers_and_audition_at_the_same_time(ara, tmp_path):
+    """同じ修飾を 2 本が同時に作っても、試聴が同時でも、それぞれの結果が全体と同じ。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    for k in (0, 2, 4):
+        _ok(m.shift_pitch(60 + 20 * k, note_id=notes[k]))
+    caches = [Cache(src), Cache(src)]
+    errors = []
+
+    def run(c):
+        try:
+            for _ in range(3):
+                c.sync(a, "mod-A")
+        except BaseException as e:               # noqa: BLE001
+            errors.append(e)
+
+    ths = [threading.Thread(target=run, args=(c,), daemon=True) for c in caches]
+    for th in ths:
+        th.start()
+    for _ in range(3):
+        _ok(m.render_audition(notes[2], cents=40))
+    for th in ths:
+        th.join(60)
+    assert not errors and not any(th.is_alive() for th in ths)
+    for c in caches:
+        _same(c, a, "mod-A")
+
+
+def test_lock_wait_is_logged(ara, tmp_path):
+    """ロックを待った秒が、編集のログ（edit op=…）と ara_render_dirty の timing_sec に出る。"""
+    import logging
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    lines = []
+
+    class H(logging.Handler):
+        def emit(self, rec):
+            lines.append(rec.getMessage())
+
+    h = H()
+    perf = logging.getLogger("vocal_engine.perf")
+    perf.addHandler(h)
+    held = threading.Event()
+
+    def hold():
+        with m._lock:
+            held.set()
+            time.sleep(0.4)
+
+    try:
+        th = threading.Thread(target=hold, daemon=True)
+        th.start()
+        assert held.wait(5)
+        _ok(m.shift_pitch(100, note_id=notes[0]))
+        th.join(5)
+        th = threading.Thread(target=hold, daemon=True)
+        held.clear()
+        th.start()
+        assert held.wait(5)
+        r = _ok(a.ara_render_dirty("mod-A"))
+        th.join(5)
+    finally:
+        perf.removeHandler(h)
+    edit = [x for x in lines if x.startswith("edit op=shift_pitch ")]
+    assert edit, lines
+    wait = float(edit[0].split("lock_wait=")[1].split()[0])
+    assert 0.2 < wait < 5
+    assert 0.2 < r["timing_sec"]["lock_wait"] < 5
+    assert set(r["timing_sec"]) >= {"prepare", "render", "plan", "commit", "lock_wait", "retries", "total"}
+    assert any(x.startswith("render op=ara_render_dirty ") for x in lines)
 
 
 # ================================================================ 細かいところ

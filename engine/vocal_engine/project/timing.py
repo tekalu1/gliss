@@ -275,10 +275,10 @@ class Structure:
         return self.knots[k].unit
 
 
-def _phoneme_list(project, confirmed_only=False):
+def _phoneme_list(project, confirmed_only=False, complete=False):
     if not project.has_lyrics("take"):
         return []
-    r = project.phonemes("take")
+    r = project.phonemes("take", complete=complete)
     if r is None:
         return []
     if not confirmed_only:
@@ -327,7 +327,7 @@ def build_structure(project, overrides=None, attacks=None, confirmed_only=False,
     （音程の付く少し前の隙間にある発音の頭を、ノートと一緒に動かす）。ふつうの編集では使わない。"""
     tm = current_map(project)
     ns = pitched_notes(project) if guide else blocks(project)
-    phs = _phoneme_list(project, confirmed_only=confirmed_only)
+    phs = _phoneme_list(project, confirmed_only=confirmed_only, complete=guide)
     dur = project.duration_sec
     conn = ({(a.id, b.id): c for a, b, c, _ in connections(project)} if guide else connection_map(project))
     if overrides:
@@ -1362,7 +1362,7 @@ def _guide_anchors(project, st, tm, gt, sel, threshold_ms=0.0, interpolate=True)
     confirmed_starts = []
     if gt.source == "syllables":
         from ..phoneme.lyrics import confirmed_syllable_indices
-        result = project.phonemes("take")
+        result = project.phonemes("take", complete=True)
         if result is not None:
             confirmed = confirmed_syllable_indices(project.lyrics_entries("take"),
                                                     result.syllables)
@@ -1473,7 +1473,7 @@ def _syllable_end_pairs(project, gt):
         return []
     from ..phoneme.lyrics import confirmed_syllable_indices
     from ..analysis.guide_timing import MAX_SHIFT_SEC
-    rt, rg = project.phonemes("take"), project.phonemes("guide")
+    rt, rg = project.phonemes("take", complete=True), project.phonemes("guide", complete=True)
     if rt is None or rg is None:
         return []
     ok_t = confirmed_syllable_indices(project.lyrics_entries("take"), rt.syllables)

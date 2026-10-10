@@ -116,6 +116,8 @@ def test_every_tool_is_classified():
             "set_f0_estimator",
             # 裏の準備（issue #63）: 状態を見る・一時停止（曲は変えない）
             "prep_status", "pause_prep",
+            # 音素の解析（2026-10-10 承認）: 解析する・状態を見る・自動で解析するかの設定（曲は変えない）
+            "analyze_phonemes", "phoneme_status", "set_auto_phonemes",
         "list_tracks", "select_track", "track_overview", "render_tracks",
         # 聞き取り（issue #54）: 候補を返すだけで確定の歌詞は変えない・使えるかを見るだけ
         "transcribe", "asr_status",

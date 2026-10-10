@@ -53,7 +53,10 @@ Gliss を変える作業の標準の手順。エージェントは作業を始�
 | `GLISS_TEST_PYTHON` | 画面のテスト（`first-run`・`addons-view`）がフィクスチャを作る python。既定はエンジンと同じ |
 | `VOCAL_EDITOR_MUTE`・`VOCAL_EDITOR_HIDDEN`・`VOCAL_EDITOR_IGNORE_MOUSE` | テスト用。音を出さない・透明で前面を奪わない・人のマウスを素通しする。`app/playwright.config.js` が入れる（見るときは `pnpm test:headed`） |
 | `GLISS_ASR_FAKE` | 偽の認識器（聞き取りのテスト用） |
+| `GLISS_AUTO_PHONEMES` | `0` で歌詞と音素を自動で解析しない（「音素を解析」のときだけ）。画面が設定 `autoPhonemes` から入れる。既定はオン（`engine/vocal_engine/project/store.py`） |
 | `GLISS_TEST_PREP` | `1` でエンジンのテストを裏の準備ありで流す（既定は止める。`engine/tests/conftest.py`） |
+| `GLISS_WARMUP` | `0` でエンジンの起動直後の下ごしらえ（`engine/vocal_engine/warmup.py`）を止める |
+| `GLISS_SPEED_SCALE`・`GLISS_SPEED` | 速さの回帰（`engine/tests/test_speed.py`）の上限の倍率・`0` で skip |
 
 ## 実装と検証
 

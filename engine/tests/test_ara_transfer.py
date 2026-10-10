@@ -723,7 +723,8 @@ def test_v2_ara_estimator_undo_restores_model_version_and_note_targets(tr, tmp_p
         s.save()
     assert _ok(m.undo())["undone"]["kind"] == "estimator"
     assert p.take_f0.meta["version"] == F.GLISS_F0_V2_VERSION
-    assert np.array_equal(p.take_f0.f0, old_f0)
+    # 方式ごとの保存（cache/f0-gliss.json）から戻す。保存は 0.0001 Hz に丸めている（2026-10-10 承認）
+    assert np.allclose(p.take_f0.f0, old_f0, rtol=0, atol=1e-4)
     assert p._missing_note_targets() == []
     reloaded = Project(s.project_dir_of(s.find_ara("mod-1"))).load()
     assert reloaded.f0_model_version == F.GLISS_F0_V2_VERSION

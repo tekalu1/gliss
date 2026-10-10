@@ -3,13 +3,15 @@
 export const $ = (s) => document.querySelector(s);
 import { beginBusy, laterBusy } from './busy.js';
 import { S } from './state.js';
+import { applyViewDiff } from './view-diff.js';
 
 let statusEl = null;
 let pendingStatus = null;
-export function status(text) {
+export function status(text, { error = false } = {}) {
   statusEl = statusEl || $('#status');
   clearTimeout(pendingStatus);
   if (!statusEl) return;
+  statusEl.classList.toggle('err', !!error && !!text);
   if (/(?:している|読み込んでいる|開いている|作っている).*…/.test(text || '')) {
     pendingStatus = setTimeout(() => { statusEl.textContent = text; }, 300);
   } else {
@@ -139,8 +141,11 @@ export async function callJob(name, args, onProgress, options = {}) {
     busy.cancelWith(cancellable && r.cancellable ? cancel : null);
     const t0 = Date.now();
     let offered = false;
+    // 短い仕事を 200 ms 待たせない: 25 ms から 1.5 倍ずつ 200 ms まで延ばして聞く
+    let wait = 25;
     for (;;) {
-      await Promise.race([new Promise((res) => setTimeout(res, 200)), stopped]);
+      await Promise.race([new Promise((res) => setTimeout(res, wait)), stopped]);
+      wait = Math.min(200, wait * 1.5);
       if (gaveUp) throw giveUpError();
       const j = await Promise.race([window.api.call('get_job', { job_id: r.job_id }), stopped.then(() => null)]);
       if (gaveUp || !j) throw giveUpError();
@@ -195,10 +200,31 @@ export async function analyzeTake({ hold = null, label = 'トラックを準備�
   }
 }
 
-/** 画面向けの描画データ。配列は JSON ファイルの中にあるので main に読んでもらう。 */
+// 前に受け取った描画データ（差分の元。adopt が上に足すものは写しの vd に付くので、ここは受け取ったまま）
+let viewBase = null;
+
+/** 画面向けの描画データ。配列は JSON ファイルの中にあるので main に読んでもらう。
+ *
+ * 前の版（view_rev）を since で渡し、変わったところだけの差分を前の版に当てる（2026-10-10 承認。
+ * engine/docs/MCP.md「描画データの差分」）。エンジンがその版を覚えていなければ全体が返る。
+ * 差分の元が手元のものと違う（別のトラックの同じ中身の版など）ときは全体（full_path）を読む。 */
 export async function viewData(range) {
-  const r = await call('export_view_data', range || {});
-  const vd = await window.api.readJson(r.path);
+  const args = range || {};
+  const key = JSON.stringify(args);
+  const base = viewBase?.key === key ? viewBase : null;
+  const r = await call('export_view_data', base?.rev ? { ...args, since: base.rev } : args);
+  let data = null;
+  if (r.diff) {
+    try {
+      const d = await window.api.readJson(r.path);
+      if (base && d.diff_from === base.rev && d.base_dir === base.data.project_dir) data = applyViewDiff(base.data, d.ops);
+    } catch { /* 差分が読めなければ全体を読む */ }
+    if (!data) data = await window.api.readJson(r.full_path);
+  } else {
+    data = await window.api.readJson(r.path);
+  }
+  viewBase = { key, rev: r.view_rev || null, data };
+  const vd = { ...data };
   // The view file name also includes export range arguments; the unqualified
   // revision is returned explicitly by both export_view_data and render_audition.
   vd.view_rev = r.view_rev || null;

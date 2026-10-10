@@ -176,10 +176,17 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
     };
     callbacks.contentChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, bool notifyHost)
     {
-        juce::MessageManager::callAsync ([this, token, ids, notifyHost]
+        const auto posted = juce::Time::getMillisecondCounterHiRes();
+        juce::MessageManager::callAsync ([this, token, ids, notifyHost, posted]
         {
-            if (token.lock() != nullptr)
-                notifyContentChanged (ids, notifyHost);
+            if (token.lock() == nullptr)
+                return;
+
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            notifyContentChanged (ids, notifyHost);
+            diag::log ("sync: notified content changed (" + juce::String (ids.size()) + (notifyHost ? " host" : "") + ") queue "
+                       + juce::String ((int) (started - posted)) + " ms, notify "
+                       + juce::String ((int) (juce::Time::getMillisecondCounterHiRes() - started)) + " ms");
         });
     };
     callbacks.notesChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, const juce::StringArray& sources,
@@ -925,7 +932,11 @@ void GlissDocumentController::onSyncEvent (const juce::String& name, const juce:
         const auto estimator = loadedState().getProperty ("f0Estimator", {}).toString();
 
         if (estimator.isNotEmpty() && env ("GLISS_F0_ESTIMATOR").isEmpty())
-            bridgePool.addJob ([s = sync.get(), estimator] { s->callTool ("set_f0_estimator", object ({ { "estimator", estimator } }), 30000); });
+            bridgePool.addJob ([s = sync.get(), estimator]
+            {
+                if (tools::shouldSyncAfter ("set_f0_estimator", s->callTool ("set_f0_estimator", object ({ { "estimator", estimator } }), 30000)))
+                    s->requestEditSync();
+            });
     }
 
     sendEvent (name, data);
@@ -1108,7 +1119,7 @@ void GlissDocumentController::engineCall (const juce::String& tool, const juce::
                    + " (" + juce::String ((int) (juce::Time::getMillisecondCounter() - started)) + " ms)");
 
         if (tools::shouldSyncAfter (tool, result))
-            sync->requestSync();
+            sync->requestEditSync();
 
         juce::MessageManager::callAsync ([token, done, result]
         {

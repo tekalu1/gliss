@@ -83,8 +83,24 @@ DocumentController がエンジン（`McpClient`。`plugin/src/engine`）を **1
 1. エンジンの遅延起動（最初のソースの読み出しが許されたとき、または画面が開いたとき）→ `engine_info` → `ara_open(work_key)`。
 2. ソースの音をホストから読み（`ARAAudioSourceReader`。リーダーはメッセージスレッドで作り・壊す）、`<作業場所>\ara-src\<persistentID の FNV-1a 64 の 16 桁>.wav`（float32、ソースの周波数・チャンネルのまま）に書いて、**すぐ** `ara_set_modification`（保留のアーカイブがあれば続けて `ara_restore`）。音が変わったら読み直す。
 3. 外した修飾は `ara_remove_modification`、位置（代表のリージョン＝ソングで最初のものでソースの 0 秒が置かれる秒）・名前・DAW のトラック名の変化とアーカイブのガイドは `ara_sync`。
-4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty` → ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`。下の「ホストに知らせないもの」）→ ノートを取った版と違う修飾に `ara_notes`（下の「DAW に返すもの」）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
-5. 画面の `engineCall` が成功したら（読むだけのもの以外）同期を予約する。途中で次の予約が来たら、終わってからもう 1 回だけ回す。
+4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty`（エンジンは変わったノートの付近だけを作り直して返す。1 音の編集で 0.2〜1.5 秒。`restore` と重なる手元の窓は頭と尾を残して切る。2026-10-10 承認。`engine/docs/MCP.md` の「差分の再合成」）→ ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`。下の「ホストに知らせないもの」）→ ノートを取った版と違う修飾に `ara_notes`（下の「DAW に返すもの」）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
+5. 画面の `engineCall` が成功したら（読むだけのもの以外）同期を予約する（`requestEditSync`）。途中で次の予約が来たら、終わってからもう 1 回だけ回す。
+
+編集が来たときの同期（2026-10-10 承認）:
+
+- 1 回の編集で同期は 1 周。エンジンが動いている間の `callTool` は同期を起こさず、中身を変えたツール（`tools::shouldSyncAfter`）の後だけ
+  `requestEditSync` が予約する（以前は呼び出しのたびに起こし、編集 → 描画データの読み直しのたびに空の周が付いて 3 周回っていた）。
+  `select_track`（編集対象の切り替え）は保存するものを変えないので、読むだけのツールに入れて同期しない。
+- `requestEditSync` は、`more` の続きを作っている途中なら、今の 1 回を当てた所で打ち切る（`sync: ara_render_dirty <ara_id> interrupted by an edit`）。
+  残りの窓はエンジンが覚えていて、次の周で最新の版の変化と合わせて作る。打ち切った周はノートを取らない（次の周で最新の版のノートを取る）。
+  打ち切る前に保存するものの変化（ガイドの指定など）を知らせ、続けて途中まで作った音の知らせを送る。
+  続きの残っている修飾（手元の版が `<版>~<n>`）は後に回し、編集した修飾の音を先に作る。
+- エンジンは `ara_render_dirty` の再合成をロックの外で行う（`engine/docs/MCP.md` の「差分の再合成」）。同期が長い窓を作っている間も、
+  画面の編集と描画データは待たない。描画データは、0.2 秒以内に終わる見込みの再合成だけ、その確定を先に通す（編集した音を遅らせない）。
+- `plugin.log` の段ごとの時間: `sync: cycle <ms> ms (revs, render … for <修飾の数>, notify, notes, archives)`（何かを作った・取った周だけ）・
+  `sync: ara_render_dirty … (call <ms> ms, apply <ms> ms)`・`sync: notified content changed (…) queue <ms> ms, notify <ms> ms`
+  （メッセージスレッドで待った時間と、ホストへの知らせの時間）。エンジンの側は `engine.log` の `render op=ara_render_dirty` と `edit op=` の行。
+- 時間は `GlissARATest -perf`（「検証」）で測る。
 
 エンジンが落ちたら `engine` の知らせ（`failed`）を出し、最後のキャッシュのまま鳴らす。画面の［つなぎ直す］（`restartEngine`）で起動し直し、`ara_open` → 全修飾の `ara_set_modification` → 全部の窓を取り直す。ドキュメントを閉じるとエンジンの stdin を閉じ、2 秒待って Job Object を閉じる（作業場所は消さない）。
 
@@ -424,7 +440,8 @@ Copy-Item -Recurse "$env:LOCALAPPDATA\Programs\Gliss\resources\plugin\Gliss.vst3
 
 ```powershell
 powershell -NoProfile -File plugin\scripts\test-plugin.ps1              # ビルドして、下の検証を流す（初回は依存の取得と JUCE・ARA_Examples のビルドで数分から 10 分ほど）
-powershell -NoProfile -File plugin\scripts\test-plugin.ps1 -SkipBuild   # 流すだけ（約 1〜2 分）
+powershell -NoProfile -File plugin\scripts\test-plugin.ps1 -SkipBuild   # 流すだけ（約 5〜6 分。`-perf` が上限を超えて 3 回測ると約 3 分延びる）
+powershell -NoProfile -File plugin\scripts\test-plugin.ps1 -SkipBuild -SkipPerf   # 時間の検証（`-perf`。約 1 分半）を除く
 ```
 
 エンジンにつなぐ検証（下の表の「エンジン」）は、main の作業ディレクトリの `.venv` の python（worktree には無い）で、worktree の `engine` を cwd にして起動する。
@@ -444,8 +461,9 @@ ARA SDK のホスト（`ARATestHost` と `GlissARATest`）は `plugin/tests/arat
 | **GlissHostCheck `--ara-playback`**（`AraPlaybackCheck.h`。エンジンなし） | JUCE の ARA ホストで正弦波のソースのドキュメントを作り、再生の役で 1 回だけ準備する。そのあと `prepareToPlay` をやり直さずに、(1) リージョンを足す・(2) サンプルへのアクセスを切って（切っている間に別の位置を読ませて）戻す・(3) `updateAudioSourceContent(samplesAreAffected)` を知らせる、のそれぞれで、まだ読んでいない位置・読めなかった位置・足したリージョンの音が鳴り、最初のリージョンも鳴り続けること。プラグインのログ（`GLISS_PLUGIN_LOG_FILE`）に `renderer: prepare`・`source reader replaced`（`samples-access`・`content`）・`regions synced`・`renderer: release` が出ること。修正前（beta.12）のプラグインでは (1)〜(3) と最初のリージョンの 4 項目が無音で落ちる |
 | **GlissHostCheck `--ara-preview`**（`AraPreviewCheck.h`。エンジンなし。`GLISS_TEST_HOOKS` のビルド） | 同じ ARA ドキュメントに 2 つのインスタンスを結び付け、インスタンス 1 の EditorRenderer にだけ修飾 N のリージョンを渡す。試験用の口（`GLISS_TEST_BRIDGE_DIR` の `"@preview"`。画面の `preview` の代わり。`requester` は EditorRenderer の id で、プラグインのトレースログの `preview: editor renderer N created` から読む）で、N の試聴をインスタンス 1 から求めるとインスタンス 1 だけに音が乗る・止める・どの EditorRenderer も持たない M の試聴をインスタンス 2 から求めるとインスタンス 2 だけに音が乗り、前の所有者のインスタンス 1 は足さない。修正前（beta.13）は M がインスタンス 1 から鳴り、求めたインスタンス 2 は無音 |
 | **GlissHostCheck `--ara-preview-playback`**（同じ `AraPreviewCheck.h` の変種） | EditorRenderer にはリージョンを割り当てず、PlaybackRenderer にだけ割り当てる（N はインスタンス 1、M はインスタンス 2。Studio Pro と同じ）。試聴を求めた側（`requester`。エディタの窓を開いたインスタンス）を、わざとその修飾を持たない側にして、N の試聴はインスタンス 1 だけ、M の試聴はインスタンス 2 だけに音が乗り、求めた側は足さない。修正前（beta.14）は絞り込みが requester になり、求めた側（別のトラック）から鳴って、リージョンを持つインスタンスは無音 |
-| エンジン: **GlissARATest `-changes`** | 修飾 2 つの文書で、保存するものが変わる操作のたびにホストへ知らせが届くこと（画面の操作はプラグインの試験用の口 `GLISS_TEST_BRIDGE_DIR` から画面と同じ `engineCall` で: 編集・歌詞だけ・F0 の方式だけ・トラックごとのガイド・取り消し／やり直し、外部の AI は `relay_client.py edit / guide` で）、編集対象の切り替えだけでは届かないこと、保存した文書を同じ作業場所・別の作業場所で戻しただけでは届かないこと、描画の版 1 のアーカイブを戻しても届かず（beta.6 の音のまま）、画面から版を上げると届くこと、再合成が長い間（3 秒ずつ 3 回）に外したガイドの指定の知らせが、再合成が終わる前に届くこと。操作ごとの数は `changes.json` |
+| エンジン: **GlissARATest `-changes`** | 修飾 2 つの文書で、保存するものが変わる操作のたびにホストへ知らせが届くこと（画面の操作はプラグインの試験用の口 `GLISS_TEST_BRIDGE_DIR` から画面と同じ `engineCall` で: 編集・歌詞だけ・F0 の方式だけ・トラックごとのガイド・取り消し／やり直し、外部の AI は `relay_client.py edit / guide` で）、編集対象の切り替えだけでは届かないこと、保存した文書を同じ作業場所・別の作業場所で戻しただけでは届かないこと、描画の版 1 のアーカイブを戻しても届かず（beta.6 の音のまま）、画面から版を上げると届くこと、再合成が長い間（3 秒ずつ 3 回）に外したガイドの指定の知らせが、残りの窓の音より前に届くこと（ガイドの指定で続きを打ち切るので、途中までの音の知らせとは同じ回に届いてよい）。操作ごとの数は `changes.json` |
 | エンジン: **GlissARATest `-relay`** ＋ `verify_ara_relay.py` | 外部の AI の代わり（`plugin/tests/relay_client.py`。別のプロセスの `vocal_engine.mcp` を stdio で起動）が、開いているドキュメントを `ara_documents` で見つけ、`ara_attach` → `analyze_take` → `shift_pitch`（+100 セント）を中継で呼ぶ。編集の前の描画が原音・後の描画がエンジンの `render_region` とサンプル単位で同じ・保存（アーカイブ）に作者 `ai` の changeset・DAW に返すノートが adjusted で 1 半音上・プラグインのログに `sync: external edit`・ドキュメントを閉じたら中継の記録が消える・外部の編集の後にホストへ修飾とリージョンの「音が変わった」が届く（`updates-r.json`） |
+| エンジン: **GlissARATest `-perf <秒>`** ＋ `verify_ara_perf.py`（`-SkipPerf` で飛ばす） | 編集してから画面・ホスト・再生の音に出るまでの時間。合成の歌声もどき（8 音のフレーズを 9 秒ごと。`test-plugin.ps1` は 18 秒）のドキュメントを解析して待ち、画面の代わり（`GLISS_TEST_BRIDGE_DIR`）から画面と同じ順で `set_pitch_curve`（ノートの真ん中を ±50〜70 セント）→ `export_view_data`（2 回目からは `since`）を呼ぶ。場面は同じノートを 8 回（same）・隣のノートへ 8 回（walk）・1 つおきの 3 音を続けて 4 回（burst。音は最後のノートで見る）・2 つ目のフレーズから曲の終わりまでを ±100 セント（`shift_pitch`）にして、その再合成の最中に頭のフレーズのノートを 1 つ編集する 4 回（during。時刻はその編集から）。1 回ごとに、編集の答え（t_edit）・最後の描画データ（t_view）・ホストへの知らせ（t_notify）・DAW の再生と同じく同期を待たない描画（100 ms ごと）の音が、編集の前の音（`GLISS_ARA_SYNC_WAIT_MS` で同期が落ち着くまで待つ描画で取る）と変わった時刻（t_sound）を、編集を投げた時刻からの ms で `perf.jsonl` に書く。`verify_ara_perf.py` は、全部の答えと音の変化が揃い、場面ごとの中央値が `plugin/tests/aratest/perf-limits.json` の上限（2026-10-10 承認の修正の後に 3 回測った中央値の 1.5 倍）以下であることを確かめる。時間は揺れるので、最後の描画データの大きさ（`view_bytes`。差分で返っていれば数 KB、全体なら 200 KB ほど）にも上限を置く。時間は PC の負荷で揺れるので、`test-plugin.ps1` は 1 回目が上限を超えたときだけ 2 回足し、場面ごとに 3 回の中央値の中央値で比べる（答えと音の変化はどの回でも揃っていること）。上限を測り直すときは `verify_ara_perf.py --write-limits <出力 1> <出力 2> <出力 3>`。`-perfraw <float32 のモノラル> -perfrate <Hz>` で手元の音でも測れる（素材は公開しない） |
 | **GlissHostCheck `--editor`**（`EditorCheck.h`・`FakeDocumentBridge.h`） | Gliss.vst3 を読まず、エディタの画面の部品（`plugin/src/editor`）を**偽の DocumentBridge** につないでこのプロセスの中で画面の外に開く: `app/renderer` が読み込まれ `ui-ready` が来る（その前の知らせは捨てる）・`window.api` と `data-mode=ara`・user script から `/juce/index.js` の動的 import・`engineCall` の往復（`{ok:false}` も値で・別スレッドの completion も）・ほかのネイティブ関数・`/fs/`（空白・`%`・`+`・日本語の名前を読める／外・`..`・無い・フォルダ・知らない資源は拒否）・知らせ 6 種が画面の受け手に届く・F8 は窓へ渡り Space は渡らない・応答の前に閉じても落ちない・2 つ同時に 20 回開閉。`--expect-web-dir` で `GLISS_PLUGIN_WEB_DIR` から読むこと |
 
 どの検証もタイムアウトを持ち、終わりに起動したプロセス（ホスト・WebView2・エンジン）を木ごと止めて、残りが 0 であることを確かめる。
@@ -497,6 +515,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 | `plugin/tests/verify_render_trace.py` | 再生の記録を試験信号と突き合わせる（numpy が要る） |
 | `plugin/tests/verify_ara_engine.py` | `GlissARATest` の出力をエンジンの `render_region`・`ara_notes` と突き合わせる（エンジンの python・cwd は engine） |
 | `plugin/tests/relay_client.py`・`verify_ara_relay.py` | `GlissARATest -relay`・`-changes` が起動する外部の AI の代わりと、その出力の確かめ |
+| `plugin/tests/verify_ara_perf.py`・`aratest/perf-limits.json` | `GlissARATest -perf` の時間を上限と比べる・上限 |
 | `plugin/scripts/test-plugin.ps1` | ビルドと検証の一式 |
 
 ## 段階と残り

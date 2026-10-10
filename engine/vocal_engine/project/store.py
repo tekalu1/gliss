@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import threading
+import time
 from collections import OrderedDict
 from threading import Lock
 
@@ -271,8 +272,12 @@ def front(pdir, wait=True):
     @contextlib.contextmanager
     def ctx():
         held.add(key)
+        t0 = time.perf_counter()
         try:
             with PREP_FRONT(pdir, wait=wait):
+                waited = time.perf_counter() - t0
+                if waited >= 0.05:
+                    log.get().info("front wait=%.2f（裏の準備の終わりを待った）", waited)
                 yield True
         finally:
             held.discard(key)
@@ -398,6 +403,15 @@ def _code_sig():
     return _code_sig_value
 
 
+def _analysis_content(f0r, notes):
+    """解析の中身（F0・ノート。保存する値と同じ丸め）の署名。計算に掛かった秒は入れない。
+    同じ中身を後から書き直しても（裏の準備が表と同じ解析を書く）、再合成の版を変えないため。"""
+    d = f0r.to_json()
+    d.pop("elapsed_sec", None)
+    return hashlib.sha1(json.dumps([d, [n.to_json() for n in notes]], sort_keys=True, default=str)
+                        .encode("utf-8")).hexdigest()[:16]
+
+
 def _stable(analysis, drop=("analyzed_at",)):
     """解析の要約から、解析した時刻を除いたもの（中身が同じか比べる）。"""
     return {k: ({kk: vv for kk, vv in v.items() if kk not in drop} if isinstance(v, dict) else v)
@@ -424,6 +438,35 @@ PREP_SAVED = None
 # 内容ハッシュの使い回しを取り消し、そのトラックを準備し直す（issue #63。同サイズ・同時刻の上書きはハッシュの
 # 使い回しでは見分けられないので、実際に読んで失敗したところで拾う）
 PREP_BROKEN = None
+# テイクの音素の足りない区間を裏で解析するよう頼む（`prep.py` が入れる。引数は Project・source）。
+# 頼めたら True（そのときは表で計算しない）。False なら呼んだ側で計算する
+PHONEME_SCHEDULE = None
+
+# 歌詞と音素を自動で解析するか（2026-10-10 承認）。既定値はここ 1 か所だけ。False にすると完全に手動になる
+# （歌詞を直しても・曲を開いても解析せず、「音素を解析」のコマンド＝MCP の analyze_phonemes を押したときだけ解析する）
+AUTO_PHONEMES_DEFAULT = True
+_auto_phonemes = None           # 画面の設定（`set_auto_phonemes`）。None なら環境変数 GLISS_AUTO_PHONEMES・既定値
+
+
+def auto_phonemes():
+    """歌詞と音素を自動で解析するか（画面の設定 → 環境変数 GLISS_AUTO_PHONEMES の 0/1 → 既定値）。"""
+    if _auto_phonemes is not None:
+        return _auto_phonemes
+    v = os.environ.get("GLISS_AUTO_PHONEMES")
+    if v in ("0", "1"):
+        return v == "1"
+    return AUTO_PHONEMES_DEFAULT
+
+
+def set_auto_phonemes(value):
+    """画面の設定を入れる（None で既定値に戻す）。"""
+    global _auto_phonemes
+    _auto_phonemes = None if value is None else bool(value)
+    return auto_phonemes()
+
+
+# 区間ごとの音素の結果（part）の置き場を読み書きする間のロック（表の MCP と裏の準備のスレッドが同じファイルを書く）
+_PARTS_LOCK = threading.Lock()
 
 
 def replace_file(tmp, dst, tries=40, wait=0.025):
@@ -481,6 +524,7 @@ class Project:
         self._guide_f0 = None
         self._take_notes = None
         self._guide_notes = None
+        self._take_content = None   # (F0, ノート, 中身の署名)。同じ解析の署名を作り直さない
         self._notes_cache = None    # (解析のノート列, split/merge の id 列, 当てた結果)
         self._alignment = None
         self._onsets = {}           # role -> (鍵, 発音の頭の秒)
@@ -490,6 +534,7 @@ class Project:
         self._media_changed = False
         self._onset_sigs = {}
         self.guide_take_cache_path = None  # セッション中のガイドトラック自身の解析結果
+        self.guide_peer_dirs = ()          # 同じガイドを使うほかのトラック・ガイドのトラックのプロジェクト（`_shared_guide_f0`）
         self._guide_cache_path = None
         # 裏の準備用のインスタンス（`prep.py`。issue #63）: project.json と、今の組み合わせを指す写し
         # （cache/guide-analysis.json など）は書かず、鍵付きの保存だけに書く。project.json へは
@@ -1097,20 +1142,26 @@ class Project:
                 int(info["sr"]), int(info.get("offset_frames") or 0), int(info["frames"]),
                 bool(info.get("pad"))]
 
+    @staticmethod
+    def _guide_cache_name(key):
+        return hashlib.sha256(json.dumps(key, ensure_ascii=False, sort_keys=True).encode(
+            "utf-8")).hexdigest()[:24]
+
     def _guide_cache_dir(self, kind, key):
         """別トラックの Project で準備しても同じ結果に到達する鍵付きの置き場。"""
-        digest = hashlib.sha256(json.dumps(key, ensure_ascii=False, sort_keys=True).encode(
-            "utf-8")).hexdigest()[:24]
-        return os.path.join(self.sub(os.path.join("cache", "guide", kind)), digest)
+        return os.path.join(self.sub(os.path.join("cache", "guide", kind)), self._guide_cache_name(key))
 
-    def _guide_analysis_cache_dir(self, estimator, sweep):
-        """F0・音符・発音の頭はガイドの切り出しと解析設定だけに依存する。"""
-        key = [1, self._clip_cache_identity(self.guide), estimator, bool(sweep),
+    def _guide_analysis_key(self, info, estimator, sweep):
+        key = [1, self._clip_cache_identity(info), estimator, bool(sweep),
                RMVPE_THRESHOLD, ENERGY_FLOOR_DB]
         version = self._gliss_version_for(estimator) or f0mod.estimator_version(estimator)
         if version is not None:
             key.append(version)   # 方式の中身を変えたら作り直す（RMVPE は前と同じ鍵）
-        return self._guide_cache_dir("analysis", key)
+        return key
+
+    def _guide_analysis_cache_dir(self, estimator, sweep):
+        """F0・音符・発音の頭はガイドの切り出しと解析設定だけに依存する。"""
+        return self._guide_cache_dir("analysis", self._guide_analysis_key(self.guide, estimator, sweep))
 
     def _alignment_cache_dir(self):
         """歌詞や編集で取り直し区間が変わっても、従来どおり DTW を使い回す。"""
@@ -1152,15 +1203,38 @@ class Project:
                 result = F0Result.from_json(json.load(f)["f0"])
         except (OSError, ValueError, KeyError, TypeError):
             return None
-        same_estimator = self._same_take_estimator(result.estimator, result.meta.get("version"), estimator)
+        return result if self._f0_fits(result, g, estimator, sweep) else None
+
+    def _f0_fits(self, result, info, estimator, sweep, latest=False):
+        """ほかのプロジェクトで解析した F0 が、info の音声をこの方式・設定で解析したものと同じか。"""
+        same_estimator = self._same_take_estimator(result.estimator, result.meta.get("version"), estimator, latest)
         vuv_rule = "%s f0>0 AND rms > %.1f dBFS" % (result.estimator, ENERGY_FLOOR_DB)
         if not same_estimator or bool(result.meta.get("sweep")) != bool(sweep) or \
                 result.meta.get("threshold") != RMVPE_THRESHOLD or \
-                result.meta.get("vuv_rule") != vuv_rule or result.sr != int(g["sr"]) or \
+                result.meta.get("vuv_rule") != vuv_rule or result.sr != int(info["sr"]) or \
                 result.hop_s != 0.01:
-            return None
-        expected = int(np.floor(int(g["frames"]) / result.sr / result.hop_s)) + 1
-        return result if result.n_frames == expected else None
+            return False
+        expected = int(np.floor(int(info["frames"]) / result.sr / result.hop_s)) + 1
+        return result.n_frames == expected
+
+    def _shared_guide_f0(self, name, info, estimator, sweep, latest=False):
+        """同じガイドを使うほかのトラックが、鍵付きの置き場 `cache/guide/analysis/<name>` にもう作ったガイドの F0。
+
+        置き場の名前はガイドの切り出しと解析の設定だけで決まる（`_guide_analysis_key`）ので、ほかのトラックの
+        同じ名前の置き場は同じ入力から作ったもの。開いた順・準備の順に関係なく、ガイドの F0 を 1 回だけ計算する
+        （2026-10-10 承認）。無ければ None。"""
+        for pdir in self.guide_peer_dirs:
+            path = os.path.join(pdir, "cache", "guide", "analysis", name, "guide-analysis.json")
+            if not os.path.exists(path):
+                continue
+            try:
+                result = F0Result.from_json(read_json(path)["f0"])
+            except (OSError, *_BROKEN_ERRORS):
+                continue                                 # 書きかけ・壊れている: そのトラックのものは使わない
+            if self._f0_fits(result, info, estimator, sweep, latest):
+                log.get().info("ガイドの F0 をほかのトラックの解析から使う: %s", os.path.basename(pdir))
+                return result
+        return None
 
     def guide_timing(self):
         """ガイドのリズムの基準（ガイドの時刻 + 全体のずれ）と発音の頭の組（`analysis/guide_timing.py`）。
@@ -1258,6 +1332,15 @@ class Project:
             elif cancel is not None and cancel.is_set():
                 raise InterruptedError("解析を取り消した")
 
+        laps = {}
+        lap_at = [time.perf_counter()]
+
+        def lap(name):
+            # 段ごとの秒（ログの `analyze …` の行。キャッシュを読んだだけの段も載る）
+            t = time.perf_counter()
+            laps[name] = laps.get(name, 0.0) + t - lap_at[0]
+            lap_at[0] = t
+
         def enter(name):
             if stage is not None:
                 stage(name)
@@ -1284,21 +1367,37 @@ class Project:
         t0 = now_iso()
         take_cache = self._cache_path("take-analysis.json")
         reuse = not force and os.path.exists(take_cache)
+        before_f0 = None
         if reuse:
             if self._take_f0 is None or self._srcs.get("take") != _src_sig(take_cache):
                 self._load_take_analysis(take_cache)     # 同じファイルをもう読んでいれば読み直さない
             # 方式を替えた（画面の「ピッチ検出の方式」・MCP の estimator）: 解析し直す
             reuse = self._same_take_estimator(self._take_f0.estimator,
                                               self._take_f0.meta.get("version"), estimator, latest)
+            if not reuse:
+                before_f0 = (self._take_f0, self._take_notes)
         if not reuse:
             enter("take_f0")
-            x, sr = self.audio("take")
-            kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
-            old_version = self._gliss_version_for(estimator, latest)
-            if old_version:
-                kwargs["gliss_version"] = old_version
-            f0r = estimate_f0(**kwargs)
-            notes = segment_notes(f0r, source="take")
+            if before_f0 is not None:
+                # 方式を替える: 前の方式の結果を方式ごとの置き場へ残す（ここで残すので、この版より前に
+                # 解析した曲も移行は要らない）。force は残さない（素材を差し替えた後の解析し直しもある）
+                self._store_f0_variant(*before_f0)
+            found = None if force else self._load_f0_variant(estimator, sweep, latest)
+            if found is not None:
+                f0r, notes = found               # 前に同じ方式で解析した: 計算し直さない（2026-10-10 承認）
+            else:
+                # ガイドのトラック: それをガイドにするトラックがもう解析したガイドの F0 があれば、それを使う
+                f0r = None if force or not self.guide_peer_dirs else self._shared_guide_f0(
+                    self._guide_cache_name(self._guide_analysis_key(self.take, estimator, sweep)),
+                    self.take, estimator, sweep, latest)
+                if f0r is None:
+                    x, sr = self.audio("take")
+                    kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
+                    old_version = self._gliss_version_for(estimator, latest)
+                    if old_version:
+                        kwargs["gliss_version"] = old_version
+                    f0r = estimate_f0(**kwargs)
+                notes = segment_notes(f0r, source="take")
             self._take_f0, self._take_notes = f0r, notes
             tmp = _tmp_name(take_cache)
             with open(tmp, "w", encoding="utf-8") as f:
@@ -1306,34 +1405,31 @@ class Project:
                           f, ensure_ascii=False)
             replace_file(tmp, take_cache)
             self._srcs["take"] = _src_sig(take_cache)
-            log.get().info("テイクを解析: %d フレーム / %d ノート（%.2f s）",
-                           f0r.n_frames, len(notes), f0r.elapsed_sec)
+            if found is None:
+                log.get().info("テイクを解析: %d フレーム / %d ノート（%.2f s）",
+                               f0r.n_frames, len(notes), f0r.elapsed_sec)
+            else:
+                log.get().info("テイクの解析を方式ごとの保存から戻した: %s / %d ノート", f0r.estimator, len(notes))
         if estimator == "gliss":
             self.f0_model_version = (self._take_f0.meta.get("version")
                                      if self._take_f0.meta.get("version") == f0mod.GLISS_F0_V2_VERSION else None)
         else:
             self.f0_model_version = None
 
-        self.analysis["take"] = {
-            "analyzed_at": t0, "estimator": self._take_f0.estimator,
-            "hop_s": self._take_f0.hop_s, "n_frames": int(self._take_f0.n_frames),
-            "n_notes": len(self._take_notes),
-            "voiced_ratio": round(float(np.mean(self._take_f0.voiced)), 4),
-            "cache": take_cache,
-        }
-        if self._take_f0.meta.get("version") is not None:
-            self.analysis["take"]["estimator_version"] = self._take_f0.meta["version"]
+        self.analysis["take"] = self._take_summary(t0, take_cache)
+        lap("take_f0")
         advance(0.45)
 
         # 歌詞が未設定の発声区間だけを推定する。初回解析のベース状態とし、
         # その後の手動修正や削除は編集履歴へ入れる。
         self._auto_proposed = []
-        if auto_lyrics and "auto_lyrics" not in self.analysis:
+        if auto_lyrics and "auto_lyrics" not in self.analysis and auto_phonemes():
             enter("lyrics")
             try:
                 self._infer_missing_lyrics()
             except Exception as e:  # 推定失敗はピッチ解析を妨げない
                 log.get("phoneme").warning("歌詞の自動推定をスキップ: %s", e)
+            lap("lyrics")
 
         if with_guide and self.guide is not None:
             guide_dir = self._guide_analysis_cache_dir(estimator, sweep)
@@ -1350,6 +1446,8 @@ class Project:
             else:
                 enter("guide_f0")
                 gf0 = self._guide_f0_from_track(estimator, sweep)
+                if gf0 is None and not force:
+                    gf0 = self._shared_guide_f0(os.path.basename(guide_dir), self.guide, estimator, sweep, latest)
                 if gf0 is None:
                     gx, gsr = self.audio("guide")
                     kwargs = {"x": gx, "sr": gsr, "estimator": estimator, "sweep": sweep}
@@ -1370,6 +1468,7 @@ class Project:
             self.analysis["guide"] = {
                 "analyzed_at": t0, "n_frames": int(self._guide_f0.n_frames),
                 "n_notes": len(self._guide_notes), "cache": g_cache}
+            lap("guide_f0")
             advance(0.65)
 
             a_cache = self._cache_path("alignment.json")
@@ -1415,6 +1514,7 @@ class Project:
                     if publish:
                         self._publish_cache(keyed_alignment, a_cache)
             self.analysis["alignment"] = dict(self._alignment.summary(), cache=a_cache)
+            lap("alignment")
             advance(0.82)
             # 発音の頭（「ガイドに合わせる」のタイミングの単位）も先に取っておく
             enter("onsets")
@@ -1422,6 +1522,7 @@ class Project:
             self.onsets("guide")
             self._prune_guide_cache("analysis")
             self._prune_guide_cache("alignment")
+            lap("onsets")
             advance(0.9)
 
         # ---- 歌詞があれば音素の強制アラインメント（段階2）
@@ -1443,9 +1544,13 @@ class Project:
                 if isinstance(e, AlignerError):
                     persist()
                     raise
+            lap("phonemes")
 
         advance(1.0)
         persist()
+        lap("persist")
+        log.get().info("analyze method=%s total=%.2f %s", estimator, sum(laps.values()),
+                       " ".join("%s=%.2f" % kv for kv in laps.items()))
         return self.analysis
 
     def _save_analysis(self):
@@ -1524,7 +1629,8 @@ class Project:
         if ta.get("estimator") is not None and not self._same_take_estimator(
                 ta["estimator"], ta.get("estimator_version"), estimator):
             return False                                 # 方式を替えた: テイクから解析し直す
-        if "auto_lyrics" not in self.analysis and os.environ.get("VOCAL_ENGINE_AUTO_LYRICS", "1") != "0":
+        if "auto_lyrics" not in self.analysis and auto_phonemes() and \
+                os.environ.get("VOCAL_ENGINE_AUTO_LYRICS", "1") != "0":
             from ..phoneme.hubertfa import model_found
             if model_found():
                 return False
@@ -1555,8 +1661,9 @@ class Project:
                 continue
             if self._phonemes.get(role) is not None:
                 continue
-            if not os.path.exists(self._keyed_phoneme_cache(role, entries)):
-                return False
+            if not os.path.exists(self._keyed_phoneme_cache(role, entries)) and \
+                    self._phoneme_compute(role, None):
+                return False                             # 表で計算する（裏・手動に回すなら待たない）
         return True
 
     def view_key(self, *extra):
@@ -1601,12 +1708,86 @@ class Project:
         except _BROKEN_ERRORS as e:
             raise self._cache_broken(path, e) from e
 
+    def _f0_variant_path(self, estimator, sweep):
+        """方式ごとのテイクの F0 とノート（`cache/f0-<方式>[-sweep].json`。2026-10-10 承認）。
+
+        `take-analysis.json` は今の方式の結果だけを持つ。方式を替えるときに前の方式の結果をここへ残し
+        （初めての解析では書かない）、戻したときは計算し直さずにここから戻す。素材の切り出し（`_clip_cache_identity`）を一緒に書き、
+        素材が替わっていたら使わない。"""
+        return self._cache_path("f0-%s%s.json" % (estimator, "-sweep" if sweep else ""))
+
+    def _f0_variant_fits(self, f0r, sweep):
+        """保存した F0 が、今のテイクと解析の設定（確信度のしきい値・無声の判定・掃引）で作ったものか。"""
+        take = self.take
+        if not take or f0r.sr != int(take["sr"]) or f0r.hop_s != 0.01:
+            return False
+        vuv_rule = "%s f0>0 AND rms > %.1f dBFS" % (f0r.estimator, ENERGY_FLOOR_DB)
+        if bool(f0r.meta.get("sweep")) != bool(sweep) or f0r.meta.get("threshold") != RMVPE_THRESHOLD or \
+                f0r.meta.get("vuv_rule") != vuv_rule:
+            return False
+        expected = int(np.floor(int(take["frames"]) / f0r.sr / f0r.hop_s)) + 1
+        return f0r.n_frames == expected
+
+    def _store_f0_variant(self, f0r, notes):
+        """F0 とノートを方式ごとの置き場へ書く。書けなくても解析は続ける（次に戻したときに計算するだけ）。"""
+        sweep = bool(f0r.meta.get("sweep"))
+        if not self._f0_variant_fits(f0r, sweep):
+            return
+        path = self._f0_variant_path(f0r.estimator, sweep)
+        try:
+            tmp = _tmp_name(path)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"clip": self._clip_cache_identity(self.take), "f0": f0r.to_json(),
+                           "notes": [n.to_json() for n in notes]}, f, ensure_ascii=False)
+            replace_file(tmp, path)
+        except OSError as e:
+            log.get().warning("方式ごとの F0 を残せない: %s: %s", path, e)
+
+    def _load_f0_variant(self, estimator, sweep, latest=False):
+        """estimator で前に解析した F0 とノート（無い・合わない・壊れていれば None）。"""
+        path = self._f0_variant_path(estimator, sweep)
+        if not os.path.exists(path):
+            return None
+        try:
+            d = read_json(path)
+            if d.get("clip") != self._clip_cache_identity(self.take):
+                return None
+            f0r = F0Result.from_json(d["f0"])
+            notes = [_note_from_json(n) for n in d["notes"]]
+        except (OSError, *_BROKEN_ERRORS) as e:
+            log.get().warning("方式ごとの F0 が読めない（外して解析し直す）: %s: %s", path, e)
+            _remove(path)
+            return None
+        if not self._same_take_estimator(f0r.estimator, f0r.meta.get("version"), estimator, latest) or \
+                not self._f0_variant_fits(f0r, sweep):
+            return None
+        return f0r, notes
+
     def _read_alignment(self, path):
         """対応付けのキャッシュを読む。読めなければ `CacheBroken`。"""
         try:
             return Alignment.from_json(read_json(path))
         except _BROKEN_ERRORS as e:
             raise self._cache_broken(path, e) from e
+
+    def _take_content_sig(self):
+        """テイクの解析の中身の署名（`_analysis_content`）。同じ F0・ノートの物なら覚えた値を返す。"""
+        memo = self._take_content
+        if memo is None or memo[0] is not self._take_f0 or memo[1] is not self._take_notes:
+            memo = (self._take_f0, self._take_notes, _analysis_content(self._take_f0, self._take_notes))
+            self._take_content = memo
+        return memo[2]
+
+    def _take_summary(self, analyzed_at, cache):
+        """解析の要約（`analysis.take`）。メモリにあるテイクの F0・ノートから作る。"""
+        f0r, notes = self._take_f0, self._take_notes
+        s = {"analyzed_at": analyzed_at, "estimator": f0r.estimator,
+             "hop_s": f0r.hop_s, "n_frames": int(f0r.n_frames), "n_notes": len(notes),
+             "voiced_ratio": round(float(np.mean(f0r.voiced)), 4),
+             "cache": cache, "content": self._take_content_sig()}
+        if f0r.meta.get("version") is not None:
+            s["estimator_version"] = f0r.meta["version"]
+        return s
 
     def _load_take_analysis(self, path):
         sig = _src_sig(path)                    # 読む前に（読んでいる間に置き換わったら、次に読み直す）
@@ -1645,7 +1826,13 @@ class Project:
                 self._srcs["alignment"] = sig
         for role in ("take", "guide"):
             src = self._srcs.get("ph_" + role)
-            if self._phonemes.get(role) is not None and src and _src_sig(src[0]) != src:
+            cur = self._phonemes.get(role)
+            keyed = getattr(self, "_ph_keyed_sig", {}).get(role)
+            if cur is not None and src and _src_sig(src[0]) != src:
+                self._phonemes[role] = None
+                self._srcs.pop("ph_" + role, None)
+            elif cur is not None and cur.aligner.get("pending_entries") and keyed and _src_sig(keyed[0]) != keyed[1]:
+                # 未解析の区間を含む結果: part の置き場は変わらずに、全区間の結果が鍵付きの保存にできた
                 self._phonemes[role] = None
                 self._srcs.pop("ph_" + role, None)
             if role in self._onsets:
@@ -1697,6 +1884,12 @@ class Project:
                         return self._ensure_analyzed()
             if os.path.exists(cache):
                 self._load_take_analysis(cache)
+                if "take" not in self.analysis and not self.background:
+                    # 裏の準備がキャッシュを書いた後、要約を書く前に止まった（同期で取り消されたなど）。
+                    # 要約をここで書く。書かないと、後で準備が同じ解析の要約を書いたときに DAW の再合成の版
+                    # （`mcp_ara._rev_parts`）が変わり、同じ音を作り直してホストへ「変わった」と知らせてしまう
+                    self.analysis["take"] = self._take_summary(now_iso(), cache)
+                    self._save_analysis()
                 g = self._cache_path("guide-analysis.json")
                 if self.guide and os.path.exists(g):
                     self._load_guide_analysis(g)
@@ -1830,12 +2023,14 @@ class Project:
         if self.guide is None:
             raise ProjectError("ガイドが設定されていない（open_project の guide_path）")
         self.ensure_analyzed()
-        tp = self.phonemes("take")
+        tp = self.phonemes("take", complete=True)
         if tp is None:
+            if self.phonemes_pending("take"):
+                raise ProjectError("テイクの音素がまだ解析されていない（analyze_phonemes）")
             raise ProjectError("テイクに歌詞が無い（set_lyrics → analyze_take）")
         g2t, basis = self.guide_to_take()
         dtw = basis["basis"] == "dtw"
-        devs, meta = boundary_deviations(tp, self.phonemes("guide"), self.guide_notes,
+        devs, meta = boundary_deviations(tp, self.phonemes("guide", complete=True), self.guide_notes,
                                          self._alignment, guide_to_take=None if dtw else g2t,
                                          offset_sec=None if dtw else basis["offset_ms"] / 1000.0)
         meta["basis"] = basis["basis"]
@@ -2410,17 +2605,30 @@ class Project:
             return None
         return str(m[1]) or type(m[1]).__name__
 
-    def analyze_phonemes(self, source="take", force=False):
+    def analyze_phonemes(self, source="take", force=False, compute=None, order=None,
+                         should_stop=None):
         """歌詞があれば強制アラインメントして `PhonemeResult` を返す（無ければ None）。
 
         区間ごとの失敗は結果の `warnings`（`align_failed`）に入り、その区間は音素なしで続く。
         全体が失敗したとき（重みが無い・音声が読めないなど）は例外を上げ、**同じ歌詞・音声では覚えておいて
         やり直さない**（`force=True`・歌詞や音声が変われば取り直す。issue #58: 操作のたびに重いアラインを
         やり直して失敗していた）。
+
+        区間ごとの結果（part）を `cache/phonemes/parts-<source>.json` に残し、歌詞を直したら変わった区間だけを
+        計算し直す（2026-10-10 承認）。足りない区間を計算するかは compute で決める:
+
+          compute=None: 設定と裏の準備に任せる（`_phoneme_compute`）。自動で解析する設定で裏の準備があれば、
+            テイクは裏に頼んで（`PHONEME_SCHEDULE`）、ここでは計算しない。手動の設定なら計算しない
+          compute=True: ここで計算する（order の区間から。should_stop が True を返したら残りは未解析のまま）
+          compute=False: 計算しない
+
+        計算しなかった区間が残る結果は「未解析」の区間を含む（`aligner["pending_entries"]`。その区間は音素なし）。
+        そのときは今の写し・鍵付きの保存には書かない（全区間がそろったら書く）。
+        force=True は前の結果（part・写し・鍵付きの保存・失敗の覚え）を捨てて取り直す。
         """
         if not self.has_lyrics(source):
             return None
-        from ..phoneme.analyze import ALIGN_REVISION, align_lyrics_ranges
+        from ..phoneme.analyze import ALIGN_REVISION, align_lyrics_ranges, entry_plan
         from ..phoneme.model import PhonemeResult
         if not hasattr(self, "_phoneme_failed"):
             self._phoneme_failed = {}
@@ -2432,13 +2640,21 @@ class Project:
             raise failed[1].with_traceback(None)
         keyed = self._keyed_phoneme_cache(source, entries)
         src = self._srcs.get("ph_" + source)
-        if not force and self._phonemes.get(source) is not None and src is not None and \
-                _src_sig(src[0]) == src and (self.background or os.path.exists(cache)):
-            # 今の歌詞の音素を、同じファイルからもう読んでいる（歌詞を変えると _phonemes は捨てる）
-            if not os.path.exists(keyed):
-                _copy(src[0], keyed)
-            self._register_phonemes(source, keyed if self.background else None)
-            return self._phonemes[source]
+        cur = self._phonemes.get(source)
+        if not force and cur is not None and src is not None and _src_sig(src[0]) == src:
+            if not cur.aligner.get("pending_entries"):
+                if self.background or os.path.exists(cache):
+                    # 今の歌詞の音素を、同じファイルからもう読んでいる（歌詞を変えると _phonemes は捨てる）
+                    if not os.path.exists(keyed):
+                        _copy(src[0], keyed)
+                    self._register_phonemes(source, keyed if self.background else None)
+                    return cur
+            elif not self._phoneme_compute(source, compute):
+                return cur                               # 未解析の区間を含む結果を、同じ part から組んである
+        if force:
+            self._phoneme_failed.pop(source, None)
+            for path in (cache, keyed, self._phoneme_parts_path(source)):
+                _remove(path)
         for path in ((cache, keyed) if not force else ()):
             if not os.path.exists(path):
                 continue
@@ -2474,27 +2690,52 @@ class Project:
                     _copy(path, keyed)
                 self._register_phonemes(source)
                 return self._phonemes[source]
-        if not self.background:
-            # 裏の準備が同じトラックを順番待ち・準備中なら、合流して待ってから鍵付きの保存を見直す。
-            # 自分で計算するときは、その間トラックを占有する（歌詞を変えた後に裏と表で 2 回計算しない）
-            with front(self.dir, wait=not force) as entered:
-                if entered:
-                    return self.analyze_phonemes(source, force=force)
-        x, sr = self.audio(source)
-        f0r = self.take_f0 if source == "take" else self.guide_f0
+
+        # 区間ごとの結果（part）から組む。足りない区間は compute のときだけ計算する
+        want = self._phoneme_compute(source, compute)
         info = self.take if source == "take" else self.guide
+        dur = float(info["duration_sec"])
+        parts, parts_sig = self._read_phoneme_parts(source)
+        x, sr = None, int(info["sr"])
+        if want:
+            norm = LY.normalize(entries)
+            plan = entry_plan(norm, LY.spans(norm, dur), dur, sr)
+            if any(key not in parts for *_, key in plan):
+                x, sr = self.audio(source)
+        f0r = self._take_f0 if source == "take" else self._guide_f0
+        if f0r is None:
+            f0r = self.take_f0 if source == "take" else self.guide_f0
+        sigs = [parts_sig]
+
+        def on_part(_i, key, part):
+            sigs.append(self._write_phoneme_parts(source, {key: part}, parts))
+
         try:
-            res = align_lyrics_ranges(x, sr, entries, f0r=f0r, source=source,
-                                      duration_sec=float(info["duration_sec"]))
+            res = align_lyrics_ranges(x, sr, entries, f0r=f0r, source=source, duration_sec=dur,
+                                      parts=parts, compute=want, order=order, on_part=on_part,
+                                      should_stop=should_stop)
         except Exception as e:                           # noqa: BLE001
-            self._phoneme_failed[source] = (in_key, e)
-            log.get().error("%s の音素アラインに失敗（同じ歌詞・音声ではやり直さない）: %s", source, e)
+            if want:
+                self._phoneme_failed[source] = (in_key, e)
+                log.get().error("%s の音素アラインに失敗（同じ歌詞・音声ではやり直さない）: %s", source, e)
             raise
-        self._phoneme_failed.pop(source, None)
+        if want:
+            self._phoneme_failed.pop(source, None)
         if res.aligner.get("failed_entries"):
             log.get().warning("%s の音素: 歌詞の区間 %s を切れなかった（音素なしで続ける）",
                               source, res.aligner["failed_entries"])
         self._phonemes[source] = res
+        if res.aligner.get("pending_entries"):
+            # 未解析の区間が残る: part の置き場の署名で覚える（裏が区間を足したら組み直す）
+            if sigs[-1] is None:
+                sigs.append(self._write_phoneme_parts(source, {}, parts))
+            self._srcs["ph_" + source] = sigs[-1]
+            # 全区間の結果が鍵付きの保存にできたら（裏の準備・別のエンジンが計算した）組み直す（_refresh_analysis_sources）
+            if not hasattr(self, "_ph_keyed_sig"):
+                self._ph_keyed_sig = {}
+            self._ph_keyed_sig[source] = (keyed, _src_sig(keyed))
+            self._register_phonemes(source, self._phoneme_parts_path(source))
+            return res
         if self.background:
             # 裏の準備: 鍵付きの保存だけに書く（今の写しは、トラックを選んだときの analyze が写す）
             tmp = _tmp_name(keyed)
@@ -2512,6 +2753,95 @@ class Project:
         self._prune_phoneme_cache(source)
         self._register_phonemes(source, cache)
         return res
+
+    def phoneme_priority(self, source="take"):
+        """裏で音素を解析するとき先に回す歌詞の区間の番号（新しい編集＝伸ばす・切るなど の範囲に重なる区間から。
+        2026-10-10 承認）。"""
+        entries = LY.normalize(self.lyrics_entries(source))
+        if not entries or source != "take":
+            return []
+        ranges = LY.spans(entries, self.duration_sec)
+        out = []
+        for ed in reversed(list(self.edits or [])):
+            try:
+                a, b = self.edit_span(ed)
+            except Exception:                            # noqa: BLE001  範囲の分からない編集は順に効かせない
+                continue
+            out += [i for i, (s0, s1) in enumerate(ranges) if i not in out and s0 < b and s1 > a]
+        return out
+
+    def _phoneme_compute(self, source, compute):
+        """足りない区間をここで計算するか（`analyze_phonemes` の compute=None の決め方）。
+
+        手動の設定（`auto_phonemes()` が False）なら計算しない。自動なら、テイクは裏の準備に頼めたら
+        ここでは計算しない（曲を開いても・歌詞を直しても待たせない。2026-10-10 承認）。頼めなければ計算する
+        （裏の準備が無い・止めてある・重みが無いなど。重みが無ければここで失敗を覚える）。"""
+        if compute is not None:
+            return bool(compute)
+        if not auto_phonemes():
+            return False
+        if source == "take" and PHONEME_SCHEDULE is not None:
+            try:
+                if PHONEME_SCHEDULE(self, source):
+                    return False
+            except Exception as e:                       # noqa: BLE001  頼めなければ表で計算する
+                log.get().warning("音素の解析を裏に頼めない（表で計算する）: %s", e)
+        return True
+
+    def _phoneme_parts_path(self, source):
+        return os.path.join(self.sub(os.path.join("cache", "phonemes")), "parts-%s.json" % source)
+
+    def _phoneme_parts_audio(self, source):
+        info = self.take if source == "take" else self.guide
+        return None if info is None else self._clip_cache_identity(info)
+
+    def _read_phoneme_parts(self, source):
+        """区間ごとの音素の結果（鍵 -> part）と置き場の署名。音声が違えば空（置き場は音声ごとに 1 つ）。"""
+        path = self._phoneme_parts_path(source)
+        with _PARTS_LOCK:
+            sig = _src_sig(path)
+            try:
+                d = read_json(path)
+            except (OSError, ValueError):
+                return {}, sig
+        if not isinstance(d, dict) or d.get("version") != 1 or \
+                d.get("audio") != self._phoneme_parts_audio(source) or \
+                not isinstance(d.get("parts"), dict):
+            return {}, sig
+        return d["parts"], sig
+
+    def _write_phoneme_parts(self, source, new, parts=None):
+        """part を足して書く（ディスクの今の中身と合わせる。合わせた中身は parts にも入れる）。新しい署名を返す。
+
+        表と裏の準備が同じ置き場に書くので、読んで・足して・置き換えるまでをロックで 1 本にする。
+        残す数は `PHONEME_PARTS_KEEP`（古いものから捨てる。parts にある鍵＝今の歌詞のものは後ろに回して残す）。"""
+        path = self._phoneme_parts_path(source)
+        audio = self._phoneme_parts_audio(source)
+        with _PARTS_LOCK:
+            try:
+                d = read_json(path)
+                cur = d["parts"] if isinstance(d, dict) and d.get("version") == 1 and \
+                    d.get("audio") == audio and isinstance(d.get("parts"), dict) else {}
+            except (OSError, ValueError, KeyError):
+                cur = {}
+            keep = set(parts or ()) | set(new)
+            merged = {k: v for k, v in cur.items() if k not in keep}
+            for k in keep:
+                v = new.get(k) if k in new else cur.get(k, (parts or {}).get(k))
+                if v is not None:
+                    merged[k] = v
+            while len(merged) > self.PHONEME_PARTS_KEEP:
+                merged.pop(next(iter(merged)))
+            tmp = _tmp_name(path)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "audio": audio, "parts": merged}, f, ensure_ascii=False)
+            replace_file(tmp, path)
+            if parts is not None:
+                for k, v in cur.items():
+                    parts.setdefault(k, v)
+            return _src_sig(path)
+
+    PHONEME_PARTS_KEEP = 1024       # part を残す数（古い歌詞のものから捨てる。今の歌詞のものは残す）
 
     PHONEME_CACHE_KEEP = 8          # 歌詞ごとの音素のキャッシュを残す数（取り消しで戻す用）
 
@@ -2544,20 +2874,44 @@ class Project:
             "aligner": r.aligner.get("name"), "rtf": r.aligner.get("rtf"),
             "warnings": len(r.warnings),
             "failed_entries": list(r.aligner.get("failed_entries") or []),
+            "pending_entries": list(r.aligner.get("pending_entries") or []),
             "cache": cache or self._cache_path("%s-phonemes.json" % source),
         }
 
-    def phonemes(self, source="take"):
+    def phonemes(self, source="take", complete=False):
         """解析済みの音素（未解析なら歌詞があるときだけ走らせる）。
 
         アラインが失敗したら None（**例外にしない**。画面の描画・再生・戻す・ガイドに合わせるは音素なしで
-        続ける。理由は `phoneme_error()`）。失敗は覚えておくので、呼ぶたびにやり直さない（issue #58）。"""
-        if self._phonemes.get(source) is None and self.has_lyrics(source):
+        続ける。理由は `phoneme_error()`）。失敗は覚えておくので、呼ぶたびにやり直さない（issue #58）。
+
+        足りない区間を裏で解析する間（2026-10-10 承認）は、解析の済んだ区間だけの結果を返す（未解析の区間は
+        音素なし。`phonemes_pending()`）。complete=True は全区間がそろった結果だけを返す: 自動で解析する設定なら
+        足りない区間をここで計算し、手動の設定でまだ足りなければ None（ガイドに合わせる・ずれの一覧など、
+        音節を組にする操作が使う。一部だけの音素で組を作らない）。"""
+        if self.has_lyrics(source):
+            cur = self._phonemes.get(source)
+            if cur is None or cur.aligner.get("pending_entries") or complete:
+                try:
+                    self.analyze_phonemes(
+                        source, compute=(auto_phonemes() or None) if complete else None)
+                except Exception:                        # noqa: BLE001  ログは analyze_phonemes が 1 回だけ出す
+                    return None
+        r = self._phonemes.get(source)
+        if complete and r is not None and r.aligner.get("pending_entries"):
+            return None
+        return r
+
+    def phonemes_pending(self, source="take"):
+        """まだ音素を解析していない歌詞の区間の番号（裏で解析中・手動の設定で未解析）。計算はしない。"""
+        if not self.has_lyrics(source):
+            return []
+        r = self._phonemes.get(source)
+        if r is None:
             try:
-                self.analyze_phonemes(source)
-            except Exception:                            # noqa: BLE001  ログは analyze_phonemes が 1 回だけ出す
-                return None
-        return self._phonemes.get(source)
+                r = self.analyze_phonemes(source, compute=False)
+            except Exception:                            # noqa: BLE001  失敗は phoneme_error
+                return []
+        return list((r.aligner.get("pending_entries") if r is not None else None) or [])
 
     def phoneme(self, phoneme_id, source="take"):
         r = self.phonemes(source)

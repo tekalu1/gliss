@@ -24,15 +24,18 @@
 
 **差分の再合成**（`ara_render_dirty`）は `render/region.py` の `EditCache` と同じ考え方をファイルで渡す:
 エンジンは修飾ごとに「最後に渡した版と、その時の Segment 列・窓」を覚え、`since` が同じなら
-変わった範囲（`dirty_windows`）を原音に戻させ（`restore`）、そこに掛かる窓だけを再合成して渡す（`windows`）。
+変わった Segment の付近（`plan_update`。窓の中も区切れる点で切る）を原音に戻させ（`restore`）、
+その中の窓の部分だけを再合成して渡す（`windows`）。
 プラグインは原音の上に順に当てるだけで、結果は `render_region` の全体（＝書き出し）とサンプル単位で同じ。
 `max_sec` を超える分は次の呼び出しに回す（`more`。返す版は途中の印 `<版>~<n>`。`_lock` を長く握らない）。
 """
 import collections
+import contextlib
 import copy
 import hashlib
 import json
 import os
+import threading
 import time
 
 import numpy as np
@@ -70,6 +73,9 @@ _REF_KEYS = ("source_id", "source_kind", "source_name", "sha256", "sr", "channel
 _render = {}
 _renderers = collections.OrderedDict()      # ara_id → (鍵, RegionRenderer)
 _out_seq = [0]
+_render_gen = [0]               # _render・_renderers を捨てた回数（ロックの外で作った窓を、捨てた後の状態に書かない）
+RENDER_RETRIES = 2              # ロックの外で作っている間に版が変わったら、捨てて作り直す回数（超えたらロックを握って作る）
+_render_rate = {}               # ara_id → 前の再合成の速さ（窓 1 秒を作る秒。描画データが確定を待つかの見込みに使う）
 
 
 # ---------------------------------------------------------------- 共通
@@ -198,12 +204,14 @@ _fit_tried = set()                          # (ara_id, 今の方式, 当たら�
 def _drop_render(ara_id):
     _render.pop(ara_id, None)
     _renderers.pop(ara_id, None)
+    _render_gen[0] += 1
 
 
 def _reset_render():
     _render.clear()
     _renderers.clear()
     _fit_tried.clear()
+    _render_gen[0] += 1
 
 
 def _analyzed(s, t):
@@ -456,21 +464,25 @@ def _state_sig(t, p):
 
 
 def _rev_parts(p):
-    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式・時刻・キャッシュのファイル）・描画の版と、
+    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式と、F0・ノートの中身）・描画の版と、
     編集リスト・利用者の歌詞（自動推定のままの区間は除く）から決まる。
 
-    `analyzed_at` は秒の単位なので、同じ秒の解析し直しはキャッシュのファイルの署名（大きさ・更新時刻）で見分ける。"""
+    解析の中身は、解析を書くときに作った署名（`analysis.take.content`）で見る。裏の準備が表と同じ解析を後から
+    書き直しても（解析の時刻・キャッシュのファイルが新しくなるだけ）版を変えず、窓を作り直さない（2026-10-11 承認）。
+    署名の無い古い project.json は、前のとおり解析の時刻とキャッシュのファイルの署名（大きさ・更新時刻）で見る。"""
     tk = p.take or {}
     a = (p.analysis or {}).get("take") or {}
-    cache = None
-    if a.get("cache"):
-        try:
-            st = os.stat(a["cache"])
-            cache = [st.st_size, st.st_mtime_ns]
-        except OSError:
-            pass
+    content = a.get("content")
+    if content is None:
+        content = [a.get("analyzed_at"), None]
+        if a.get("cache"):
+            try:
+                st = os.stat(a["cache"])
+                content[1] = [st.st_size, st.st_mtime_ns]
+            except OSError:
+                pass
     asig = hashlib.sha1(json.dumps([tk.get("sha256"), tk.get("offset_frames"), tk.get("frames"),
-                                    a.get("analyzed_at"), a.get("estimator"), cache, getattr(p, "render_version", RENDER_VERSION)],
+                                    content, a.get("estimator"), getattr(p, "render_version", RENDER_VERSION)],
                                    sort_keys=True, default=str).encode("utf-8")).hexdigest()[:10]
     erev = hashlib.sha1(json.dumps([[e.to_json() for e in p.edits], _without_estimates(p.lyrics)],
                                    sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:10]
@@ -533,16 +545,6 @@ def _guide_ara_id(s):
 
 
 # ---------------------------------------------------------------- 差分の再合成
-def _merge(spans):
-    from .render.region import _merge as merge
-    return merge(spans)
-
-
-def _inside(w, spans):
-    """窓 w が spans のどれかと**中で**重なるか（端が触れるだけは重ならない）。"""
-    return any(w[0] < b - 1e-9 and a < w[1] - 1e-9 for a, b in spans)
-
-
 def _analysis_ready(p):
     """テイクの解析をメモリかキャッシュから読むだけで使えるか（`Project._ensure_analyzed` が計算しないで済むか）。"""
     return p._take_f0 is not None or os.path.exists(os.path.join(p.dir, "cache", "take-analysis.json"))
@@ -556,11 +558,19 @@ def _renderer_for(ara_id, p, backend, channels, asig):
         _renderers.move_to_end(ara_id)
         return hit[1]
     rr = RegionRenderer.for_project(p, backend=backend, channels=channels)
+    rr.sync_lock = threading.Lock()    # 再合成はエンジンのロックの外で走る（ara_render_dirty）。試聴と同時に使わない
     _renderers[ara_id] = (key, rr)
     _renderers.move_to_end(ara_id)
     while len(_renderers) > RENDERERS_MAX:
         _renderers.popitem(last=False)
     return rr
+
+
+def renderer_lock(rr):
+    """ARA の再生用のレンダラー（`_renderer_for`）を使う間に握るロック。ほかのレンダラーは何もしない。
+    順序はエンジンのロック → これ（逆に取らない。ara_render_dirty はこれだけを握って再合成する）。"""
+    lk = getattr(rr, "sync_lock", None)
+    return lk if lk is not None else contextlib.nullcontext()
 
 
 def audition_renderer(ara_id, p, backend, asig):
@@ -638,14 +648,28 @@ def _pcm_parts(pcm):
 
 
 def _kept_parts(previous, restore, sr, ch, n):
-    """前の PCM の一覧から、今回の再合成で書き直す範囲（restore: [[頭のフレーム, 長さ]]。保留の窓も入る）に掛からない窓を残す。
+    """前の PCM の一覧から、今回の再合成で書き直す範囲（restore: [[頭のフレーム, 長さ]]。保留の窓も入る）の外を残す。
+    掛かる窓は範囲の外の頭と尻を残す（プラグインの EditedPcm の removeOverlappingRanges と同じ）。
     形式（周波数・チャンネル数・長さ）が違えば捨てる。"""
     if not previous or previous["sr"] != int(sr) or previous["channels"] != int(ch) or previous["source_frames"] != int(n):
         return []
     kept = []
     for part in _pcm_parts(previous):
-        ws = [w for w in part["windows"]
-              if not any(w["start_frame"] < r0 + rn and r0 < w["start_frame"] + w["frames"] for r0, rn in restore)]
+        ws = [dict(w) for w in part["windows"]]
+        for r0, rn in restore:
+            cut = []
+            for w in ws:
+                w0, w1 = w["start_frame"], w["start_frame"] + w["frames"]
+                if r0 + rn <= w0 or r0 >= w1:
+                    cut.append(w)
+                    continue
+                if r0 > w0:
+                    cut.append(dict(w, frames=r0 - w0))
+                if r0 + rn < w1:
+                    skip = r0 + rn - w0
+                    cut.append({"start_frame": r0 + rn, "frames": w1 - (r0 + rn),
+                                "byte_offset": w["byte_offset"] + skip * int(ch) * 4})
+            ws = cut
         if ws:
             kept.append({"path": part["path"], "windows": ws})
     return kept
@@ -959,28 +983,56 @@ def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str |
                guides_changed=guides_changed, rejected=rejected, reopened=bool(reopened), session=_mt.summary(s))
 
 
-@_tool
+@_tool(lock=False)
 def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praat", channels: str = "all",
                      max_sec: float | None = None) -> dict:
     """**DAW（ARA）のプラグイン向け**: 修飾の編集を当てた音の**差分**（前に渡した版 `since` から）。
 
     返り値: rev（今の版。途中なら `<版>~<n>`）・reset（true なら手元の窓を全部捨てて原音から当て直す。
     初回・since が違う・エンジンを起動し直した・解析や素材が変わった・backend / channels が違う）・
-    restore（[[start_frame, frames]]。原音に戻す範囲）・windows（[{start_frame, frames, byte_offset}]。
-    再合成した窓。PCM は path の .f32 = float32 リトルエンディアンのインターリーブを窓の順に並べたもの）・
+    restore（[[start_frame, frames]]。原音に戻す範囲。変わった Segment の付近だけ）・windows（[{start_frame, frames, byte_offset}]。
+    再合成した窓の部分（restore の中。窓の途中で始まり・終わることがある）。
+    PCM は path の .f32 = float32 リトルエンディアンのインターリーブを窓の順に並べたもの）・
     more（max_sec を超えた残りがある。since=rev で続けて呼ぶ）・sr・channels・source_frames・
     analysis_pending（編集はあるがテイクの解析がまだ。窓は空＝原音のまま。解析が済むと ara_revs の版が変わる）。
     当てる順: reset なら空から → restore の範囲を原音に → windows を置く（重なる古い窓は消す）。
     結果は render_region の全体（＝書き出し）とサンプル単位で同じ。編集の無い修飾は空（原音のまま）。
     backend: "praat"（既定）/ "psola"。channels: "all"（既定。ソースのチャンネルのまま）/ "mono"。
     max_sec: 1 回で再合成する窓の長さの上限（秒。既定 10。少なくとも窓 1 つは返す）。
+    窓の再合成はエンジンのロックの外で行う（その間も編集・描画データ・試聴が待たない。描画データは、もうすぐ終わる見込みなら
+    確定を先に通す）。作っている間に版が変わったら、作った窓を捨てて今の版から作り直す（RENDER_RETRIES 回まで。それでも変わり続けるならロックを握ったまま作る）。
+    timing_sec: prepare（下ごしらえ）・render（窓の再合成）・plan（ロックの中で窓を決める）・commit（ロックの中で確定）・
+    lock_wait（ロックを待った秒）・retries（作り直した回数）・total。
     """
-    from .project.pitch import layered_segments
-    from .render.base import resolve_backend_name
-    from .render.region import dirty_windows, windows_for
     t_all = time.perf_counter()
     if channels not in ("all", "mono"):
         raise ProjectError("channels は all か mono")
+    stat = {"plan": 0.0, "prepare": 0.0, "render": 0.0, "commit": 0.0, "retries": 0}
+    for attempt in range(RENDER_RETRIES + 1):
+        with _srv._locked():
+            t = time.perf_counter()
+            plan = _dirty_plan(ara_id, since, backend, channels, max_sec)
+            stat["plan"] += time.perf_counter() - t
+            if not plan["todo"] or attempt == RENDER_RETRIES:
+                # 作る窓が無い・作り直しが続いた: ロックを握ったまま作って確定する
+                _render_plan(plan, stat)
+                return _commit_plan(plan, stat, t_all)
+        # ロックの外（このレンダラーのロックだけを握る）。確定までの間、描画データの組み立ては、もうすぐ終わるなら確定を先に通す
+        with _srv._render_flight(_render_eta(plan)):
+            _render_plan(plan, stat)
+            with _srv._locked():
+                t = time.perf_counter()
+                if _plan_current(plan):
+                    return _commit_plan(plan, stat, t_all, t)
+                stat["commit"] += time.perf_counter() - t
+        stat["retries"] += 1                    # 作っている間に版が変わった: 作った窓を捨てて今の版から作り直す
+
+
+def _dirty_plan(ara_id, since, backend, channels, max_sec):
+    """ara_render_dirty の前半（エンジンのロックの中）: 今の版と、作る窓・原音に戻す範囲を決める。"""
+    from .project.pitch import layered_segments
+    from .render.base import resolve_backend_name
+    from .render.region import _win_frames, plan_update, windows_for
     s = _session()
     t = _track(s, ara_id)
     name = resolve_backend_name(backend)
@@ -1014,43 +1066,99 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     reset = (st is None or since is None or since != st["rev"] or st["backend"] != name
              or st["channels"] != channels or st["asig"] != asig)
     if reset:
-        spans = [list(w) for w in wins]
-        restore_spans = []
+        todo = [w for w in _win_frames(wins, sr, n)]
+        restore = []
     else:
-        dirty = []
-        if st["segs"] or segs:
-            dirty = dirty_windows(p, st["segs"], segs, st["windows"], wins)
-        spans = _merge(dirty + st["pending"])
-        restore_spans = spans
-    todo = [w for w in wins if _inside(w, spans)]
-    restore = []
-    for a, b in restore_spans:
-        da, db = max(0, int(round(a * sr))), min(n, int(round(b * sr)))
-        if db > da:
-            restore.append([da, db - da])
+        # 変わった Segment の付近だけ（窓の中も区切れる点で切る。`plan_update`）。作り残し（pending）も足す
+        spans, todo, _dirty = plan_update(p, st["segs"], segs, st["windows"], wins, sr, n, extra=st["pending"])
+        restore = [[a, b - a] for a, b in spans]
+    ph = prep.playhead(s.dir)
+    if ph is not None and len(todo) > 1:
+        # 画面が再生位置を知らせた（prep_status）: 再生位置にかかる窓 → 後ろへ近い順 → 前へ近い順（2026-10-10 承認）。
+        # 窓は重ならないので、並べ替えても当てた結果は同じ。todo はフレーム
+        at = (ph - float(t["offset_sec"])) * sr
+        todo.sort(key=lambda w: (0, 0.0) if w[0] <= at <= w[1] else ((1, w[0] - at) if w[0] > at else (2, at - w[1])))
+    return {"ara_id": ara_id, "s": s, "t": t, "p": p, "pdir": _norm(p.dir) if p is not None else None,
+            "name": name, "channels": channels, "limit": limit, "pending_analysis": pending_analysis,
+            "rev": rev, "asig": asig, "rr": rr, "segs": segs, "wins": wins, "sr": sr, "n": n, "ch": ch,
+            "st": st, "reset": reset, "todo": todo, "restore": restore, "gen": _render_gen[0]}
+
+
+def _render_eta(plan):
+    """ロックの外の再合成が終わるまでの見込みの秒（同じ修飾の前の再合成の速さから。分からなければ None）。"""
+    rate = _render_rate.get(plan["ara_id"])
+    if rate is None:
+        return None
+    total = 0.0
+    for wa, wb in plan["todo"]:
+        if total and total + (wb - wa) / plan["sr"] > plan["limit"]:
+            break
+        total += (wb - wa) / plan["sr"]
+    return 1.5 * rate * total + 0.01
+
+
+def _render_plan(plan, stat):
+    """窓を max_sec まで再合成して plan に入れる（エンジンのロックを握らなくてよい。レンダラーのロックを握る）。"""
+    rr, sr, todo = plan["rr"], plan["sr"], plan["todo"]
     done, out_windows, chunks, total = [], [], [], 0.0
-    prep_sec = rr.prepare_sec if rr is not None else 0.0
     t_render = time.perf_counter()
+    prep_sec = 0.0
     if todo and os.environ.get(TEST_DELAY_ENV):
         time.sleep(float(os.environ[TEST_DELAY_ENV]))     # 試験用: 再合成が長いとき（plugin/tests/aratest の -changes）
     if todo:
-        with _srv._prep_yield():
+        with _srv._prep_yield(), renderer_lock(rr):
+            prep0 = rr.prepare_sec
             byte = 0
-            for w in todo:
-                wa, wb = max(0, int(round(w[0] * sr))), min(n, int(round(w[1] * sr)))
-                if done and total + (w[1] - w[0]) > limit:
+            for wa, wb in todo:
+                if done and total + (wb - wa) / sr > plan["limit"]:
                     break
-                done.append(w)
-                total += w[1] - w[0]
-                if wb - wa < 2:
-                    continue
-                yw, _meta = rr.render_frames(wa, wb, segs)
+                done.append([wa, wb])
+                total += (wb - wa) / sr
+                yw, _meta = rr.render_frames(wa, wb, plan["segs"])
                 buf = np.ascontiguousarray(yw, dtype="<f4")
                 chunks.append(buf)
                 out_windows.append({"start_frame": int(wa), "frames": int(wb - wa), "byte_offset": int(byte)})
                 byte += buf.nbytes
-    prep_sec = (rr.prepare_sec if rr is not None else 0.0) - prep_sec    # 下ごしらえ（初回だけ。窓の再合成の中で作る）
-    render_sec = time.perf_counter() - t_render - prep_sec
+            prep_sec = rr.prepare_sec - prep0      # 下ごしらえ（初回だけ。窓の再合成の中で作る）
+    took = time.perf_counter() - t_render - prep_sec
+    stat["prepare"] += prep_sec
+    stat["render"] += took
+    if total > 0 and not os.environ.get(TEST_DELAY_ENV):
+        _render_rate[plan["ara_id"]] = took / total
+    plan.update(done=done, out_windows=out_windows, chunks=chunks, rendered_sec=total)
+
+
+def _plan_current(plan):
+    """ロックの外で作っている間に、版・状態が変わっていないか（エンジンのロックの中で呼ぶ）。"""
+    ara_id = plan["ara_id"]
+    if _render_gen[0] != plan["gen"] or _render.get(ara_id) is not plan["st"]:
+        return False
+    try:
+        s = _session()
+    except ProjectError:
+        return False
+    if s is not plan["s"]:
+        return False
+    t = s.find_ara(ara_id)
+    if t is None:
+        return False
+    p, _is_cur = _mt._track_project(s, t)
+    if p is None or _norm(p.dir) != plan["pdir"]:
+        return False
+    hit = _renderers.get(ara_id)
+    if hit is None or hit[1] is not plan["rr"]:
+        return False
+    if bool(p.edits) and not _analysis_ready(p):
+        return False
+    return "%s:%s" % _rev_parts(p) == plan["rev"]
+
+
+def _commit_plan(plan, stat, t_all, t_commit=None):
+    """ara_render_dirty の後半（エンジンのロックの中）: 作った窓を .f32 に書き、手元の版を進めて返す。"""
+    t_commit = time.perf_counter() if t_commit is None else t_commit
+    ara_id, s, t, p = plan["ara_id"], plan["s"], plan["t"], plan["p"]
+    sr, n, ch, st, reset = plan["sr"], plan["n"], plan["ch"], plan["st"], plan["reset"]
+    chunks, out_windows, rr = plan["chunks"], plan["out_windows"], plan["rr"]
     path = None
     if chunks:
         path = _out_path(s.dir, ara_id)
@@ -1059,28 +1167,39 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
             for c in chunks:
                 f.write(c.tobytes())
         os.replace(tmp, path)
-    remaining = todo[len(done):]
-    token = rev
+    remaining = plan["todo"][len(plan["done"]):]
+    token = plan["rev"]
     if remaining:
         _out_seq[0] += 1
-        token = "%s~%d" % (rev, _out_seq[0])
+        token = "%s~%d" % (plan["rev"], _out_seq[0])
     # 試聴に使う PCM: 今回書いた窓と、書き直していない前の窓（版をまたいで残す。変わっていない窓は今も正しい）
     previous_pcm = st.get("audition_pcm") if st is not None and not reset else None
-    parts = ([{"path": path, "windows": out_windows}] if path else []) + _kept_parts(previous_pcm, restore, sr, ch, n)
+    parts = ([{"path": path, "windows": out_windows}] if path else []) + _kept_parts(previous_pcm, plan["restore"], sr, ch, n)
     current_pcm = ({"parts": parts[:KEEP_OUT - 1], "channels": int(ch), "sr": int(sr), "source_frames": int(n)}
                    if parts else None)
-    _render[ara_id] = {"rev": token, "segs": segs, "windows": [list(w) for w in wins],
-                       "pending": _merge([list(w) for w in remaining]), "backend": name,
-                       "channels": channels, "asig": asig,
-                       "project_dir": _norm(p.dir) if p is not None else None,
+    _render[ara_id] = {"rev": token, "segs": plan["segs"], "windows": [list(w) for w in plan["wins"]],
+                       "pending": [list(w) for w in remaining], "backend": plan["name"],     # フレーム
+                       "channels": plan["channels"], "asig": plan["asig"],
+                       "project_dir": plan["pdir"],
                        "audition_pcm": current_pcm}
+    stat["commit"] += time.perf_counter() - t_commit
+    total = time.perf_counter() - t_all
+    lock_wait = getattr(_srv._lock_stat, "wait", 0.0)
+    log.get("perf").info("render op=ara_render_dirty win=%.2fs windows=%d more=%d lock_wait=%.3f plan=%.3f prepare=%.3f "
+                         "render=%.3f commit=%.3f retries=%d total=%.3f", plan["rendered_sec"], len(out_windows),
+                         int(bool(remaining)), lock_wait, stat["plan"], stat["prepare"], stat["render"], stat["commit"],
+                         stat["retries"], total)
     return _ok(track=t["id"], ara_id=ara_id, rev=token, reset=reset, more=bool(remaining),
-               analysis_pending=pending_analysis, sr=int(sr),
-               channels=int(ch), source_frames=int(n), restore=restore, windows=out_windows, path=path,
-               rendered_sec=round(total, 4), backend=rr.actual_backend if rr is not None else name,
-               timing_sec={"prepare": round(prep_sec, 4),
-                           "render": round(render_sec, 4),
-                           "total": round(time.perf_counter() - t_all, 4)})
+               analysis_pending=plan["pending_analysis"], sr=int(sr),
+               channels=int(ch), source_frames=int(n), restore=plan["restore"], windows=out_windows, path=path,
+               rendered_sec=round(plan["rendered_sec"], 4), backend=rr.actual_backend if rr is not None else plan["name"],
+               timing_sec={"prepare": round(stat["prepare"], 4),
+                           "render": round(stat["render"], 4),
+                           "plan": round(stat["plan"], 4),
+                           "commit": round(stat["commit"], 4),
+                           "lock_wait": round(lock_wait, 4),
+                           "retries": stat["retries"],
+                           "total": round(total, 4)})
 
 
 @_tool(lock=False)
