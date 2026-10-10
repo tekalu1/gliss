@@ -1069,6 +1069,27 @@ export function render() {
   if (dr && dr.type === 'box' && dr.moved) {
     s += `<rect x="${f1(Math.min(dr.x0, dr.x1))}" y="${f1(Math.min(dr.y0, dr.y1))}" width="${f1(Math.abs(dr.x1 - dr.x0))}" height="${f1(Math.abs(dr.y1 - dr.y0))}" fill="${SEL}" fill-opacity=".06" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;
   }
+  // ---- 元に戻す線（ペンの右ドラッグ）: 戻す区間の薄い帯（外側の薄い帯 = 両端 40 ms のつなぎ）・戻す前の線（点線）・札
+  const rs = S.stroke?.restore && S.stroke.phase === 'drawing' && S.stroke.span ? S.stroke : null;
+  if (rs) {
+    const f0 = S.vd.f0; const R = 0.04;
+    const ex = (k) => X(warp(toEdited(f0.t0_sec + k * f0.hop_sec)));
+    const x0 = ex(rs.span[0]); const x1 = ex(rs.span[1]);
+    const e0 = X(warp(toEdited(f0.t0_sec + rs.span[0] * f0.hop_sec - R))); const e1 = X(warp(toEdited(f0.t0_sec + rs.span[1] * f0.hop_sec + R)));
+    s += `<g data-restore-band="1" pointer-events="none"><rect x="${f1(e0)}" y="${ROLL_T}" width="${f1(e1 - e0)}" height="${f1(ROLL_B - ROLL_T)}" fill="#fff" fill-opacity=".035"/>`
+      + `<rect x="${f1(x0)}" y="${ROLL_T}" width="${f1(Math.max(0, x1 - x0))}" height="${f1(ROLL_B - ROLL_T)}" fill="#fff" fill-opacity=".08"/>`
+      + `<line x1="${f1(x0)}" x2="${f1(x0)}" y1="${ROLL_T}" y2="${ROLL_B}" stroke="#fff" stroke-opacity=".55"/>`
+      + `<line x1="${f1(x1)}" x2="${f1(x1)}" y1="${ROLL_T}" y2="${ROLL_B}" stroke="#fff" stroke-opacity=".55"/></g>`;
+    const was = f0.take_edited_midi.map((m, i) => (rs.vals.has(i) && m != null && Math.abs(m - f0.take_midi[i]) > 0.03 ? m : null));
+    for (const [, d] of f0PathsColored(f0.take_edited_sec, was, () => '#fff')) {
+      s += `<path data-restore-was="1" d="${d}" fill="none" stroke="#fff" stroke-opacity=".6" stroke-dasharray="0.1 3" stroke-linecap="round" pointer-events="none"/>`;
+    }
+    const lab = `元のピッチに戻す ${(rs.vals.size * f0.hop_sec).toFixed(2)} s`;
+    const lw = [...lab].reduce((w, c) => w + (c.charCodeAt(0) > 255 ? 11.5 : 6.5), 14);
+    const cx = clamp((x0 + x1) / 2, KEYS_W + lw / 2 + 2, W - lw / 2 - 2);
+    s += `<g data-restore-label="1" pointer-events="none"><rect x="${f1(cx - lw / 2)}" y="${ROLL_T + 6}" width="${f1(lw)}" height="20" rx="3" fill="#232326" stroke="#56565c"/>`
+      + `<text x="${f1(cx)}" y="${ROLL_T + 20}" font-size="11.5" text-anchor="middle" fill="#f2f2f2">${lab}</text></g>`;
+  }
   // 鍵盤の上はどのツールでも矢印（鉛筆・はさみのカーソルにしない。issue #6）。帯・線の後に重ねる
   s += `<rect data-keys="1" x="0" y="${ROLL_T}" width="${KEYS_W}" height="${f1(ROLL_B - ROLL_T)}" fill="transparent" style="cursor:default"/>`;
   // タイムスケールは帯・線の後に描く（縦に拡大・スクロールして上にはみ出した帯を隠す）

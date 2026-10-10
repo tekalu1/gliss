@@ -422,6 +422,24 @@ export function strokeTo(tSrc, midi) {
   st.last = { f, m: midi };
 }
 
+/** 元に戻す線（ペンの右ドラッグ）: tSrc までなぞった範囲の有声のフレームに、録音のピッチを入れる。
+ *
+ *   前の点との間のフレームも全部通る（なぞった区間は途切れない）。戻す値 = 録音のピッチ（take_midi）。 */
+export function restoreTo(tSrc) {
+  const st = S.stroke;
+  if (!st) return;
+  const f0 = S.vd.f0;
+  const tm = f0.take_midi;
+  const f = (tSrc - f0.t0_sec) / f0.hop_sec;
+  const fa = st.last ? st.last.f : f;
+  const lo = Math.max(0, Math.ceil(Math.min(fa, f) - 1e-9));
+  const hi = Math.min(tm.length - 1, Math.floor(Math.max(fa, f) + 1e-9));
+  for (let k = lo; k <= hi; k++) if (tm[k] != null) st.vals.set(k, tm[k]);
+  st.last = { f, m: 0 };
+  const a = Math.round(Math.min(fa, f)); const b = Math.round(Math.max(fa, f));
+  st.span = st.span ? [Math.min(st.span[0], a), Math.max(st.span[1], b)] : [a, b];
+}
+
 export function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 
 /** ドラッグ中に来た move が、**左ボタンを離した後**のものか（離したことが届いていない）。

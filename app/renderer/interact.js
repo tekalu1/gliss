@@ -18,7 +18,7 @@
 //    ミュート（ノートをクリックで無音⇔戻す。なぞると、押したノートと同じ向きにそろえる。離したら 1 つの編集）。
 import {
   LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
-  setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited, toSource,
+  frameTime, restoreTo, setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited, toSource,
   totalSec, utteranceAt,
 } from './state.js';
 import {
@@ -148,6 +148,8 @@ const py = (e) => e.clientY - svg.getBoundingClientRect().top;
 
 // ---------------------------------------------------------------- ドラッグ
 function onDown(e) {
+  rightDown = null;
+  if (e.button === 2 && S.tool === 'draw' && inRoll(px(e), py(e))) rightDown = { x0: e.clientX, y0: e.clientY, began: false };
   if (e.button !== 0) return;
   e.preventDefault();
   S.near = null;             // 押したら、記号はドラッグ・選択の境目だけにする
@@ -332,6 +334,7 @@ function dragX(dr) {
 function onMove(e) {
   const dr = S.drag;
   G.shift = !!e.shiftKey;
+  if (rightDown) { rightMove(e); return; }
   if (!dr) {
     if (S.tool === 'cut') cutHover(e);
     else connHover(e);
@@ -453,6 +456,11 @@ function releaseLost() {
 
 function endDrag(e) {
   endAudition();
+  if (rightDown) {
+    if (e.button === 0) return;           // 右を押している間の左ボタンの離しは、右の線に関係しない
+    endRight(e);
+    return;
+  }
   const dr = S.drag;
   if (!dr) return;
   clearTimeout(dr.holdTimer);
@@ -637,9 +645,11 @@ function connHover(e) {
 
 // ---------------------------------------------------------------- 鉛筆
 /** ピアノロールの上でドラッグを始めたら線を描く（タイムスケール・歌詞レーンはふつうどおり）。 */
+const inRoll = (x, y) => x > KEYS_W && y > rollTop() && y < rollBottom() && !!S.vd;
+
 function startStroke(e) {
   const x = px(e); const y = py(e);
-  if (x <= KEYS_W || y <= rollTop() || y >= rollBottom() || !S.vd) return false;
+  if (!inRoll(x, y)) return false;
   if (S.stroke && S.strokePhase !== 'drawing') {
     status('前の描線を確定または取り消してから描いてください');
     return true;
@@ -688,6 +698,74 @@ function finishStroke() {
   st.phase = S.strokePhase = 'pending';
   enqueue(() => applyDraw(pts, st), {
     label: '鉛筆', cancel: () => { if (S.stroke === st) { S.stroke = null; S.strokePhase = 'idle'; } },
+  });
+  render();
+}
+
+// ---------------------------------------------------------------- 鉛筆: 右ドラッグで元のピッチに戻す
+//   右ボタンを押して RESTORE_PX 以上動かしたら「戻す線」（2026-10-10 承認）。なぞった区間の有声のフレームを
+//   録音のピッチに戻す（ノートの移動ごと）。動かさずに離したら、今までどおりメニュー。
+//   動かしたときは、離した直後に来る contextmenu を 1 回だけ捨てる（Windows は離したときに contextmenu が来る）。
+const RESTORE_PX = 4;
+const MENU_SUPPRESS_MS = 400;
+let rightDown = null;         // 右ボタンを押している間 { x0, y0, began }
+
+function rightMove(e) {
+  const rd = rightDown;
+  if (!(e.buttons & 2)) { endRight(e); return; }     // 離したことが届いていない
+  if (!rd.began) {
+    if (Math.hypot(e.clientX - rd.x0, e.clientY - rd.y0) < RESTORE_PX) return;
+    rd.began = true;
+    if (S.stroke && S.strokePhase !== 'drawing') {
+      status('前の描線を確定または取り消してから戻してください');
+      return;
+    }
+    S.stroke = { vals: new Map(), last: null, restore: true, trackId: S.session?.current, phase: 'drawing' };
+    S.strokePhase = 'drawing';
+    restoreTo(toSource(T(rd.x0 - svg.getBoundingClientRect().left)));
+    S.drag = { type: 'stroke', restore: true, moved: true };
+    svg.setPointerCapture(e.pointerId);
+  }
+  if (S.drag?.type !== 'stroke' || !S.drag.restore) return;       // Esc で取りやめた・始められなかった
+  const evs = e.getCoalescedEvents?.();
+  for (const c of evs?.length ? evs : [e]) restoreTo(toSource(T(px(c))));
+  render();
+}
+
+function endRight(e) {
+  const rd = rightDown;
+  rightDown = null;
+  if (!rd?.began) return;                                          // 動かしていない: メニューを出す
+  S.noMenuUntil = performance.now() + MENU_SUPPRESS_MS;
+  if (S.drag?.type !== 'stroke' || !S.drag.restore) return;
+  S.drag = null;
+  if (e.type === 'pointerup') restoreTo(toSource(T(px(e))));
+  finishRestore();
+}
+
+/** 離した: なぞった範囲を `set_pitch_curve(mode="restore")` で録音のピッチへ。戻すものが無ければ何もしない。 */
+function finishRestore() {
+  const st = S.stroke;
+  const sd = strokeData();
+  const cur = S.vd.f0.take_edited_midi;
+  const orig = S.vd.f0.take_midi;
+  let changed = false;
+  if (sd && sd.v0 >= 0) {
+    for (let i = sd.v0; i <= sd.v1 && !changed; i++) changed = cur[i] != null && orig[i] != null && Math.abs(cur[i] - orig[i]) > 0.005;
+  }
+  if (!sd || sd.v0 < 0 || !changed) {
+    S.stroke = null; S.strokePhase = 'idle';
+    status(!sd || sd.v0 < 0 ? '無声のところは録音のままなので、戻すものがありません' : 'そこは録音のピッチのままです（戻すものがありません）');
+    render();
+    return;
+  }
+  const [k0, k1] = st.span;
+  st.range = [+frameTime(Math.max(0, k0)).toFixed(6), +Math.max(frameTime(k1), frameTime(k0) + S.vd.f0.hop_sec).toFixed(6)];
+  st.projectDir = S.projectDir;
+  st.points = sd.pts.map(([t, m]) => [+t.toFixed(6), +m.toFixed(4)]);
+  st.phase = S.strokePhase = 'pending';
+  enqueue(() => applyDraw(st.points, st), {
+    label: '元に戻す', cancel: () => { if (S.stroke === st) { S.stroke = null; S.strokePhase = 'idle'; } },
   });
   render();
 }

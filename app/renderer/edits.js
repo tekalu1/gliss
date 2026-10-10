@@ -410,9 +410,12 @@ export async function applyDraw(points, stroke = S.stroke) {
   stroke.phase = S.strokePhase = 'pending';
   let failure = null;
   const r = await run(async () => {
-    const r = await call('set_pitch_curve', { points, mode: 'draw', author: AUTHOR });
+    // 元に戻す線（ペンの右ドラッグ）は points を持たず、範囲だけを渡す（エンジンが録音のピッチを入れる）
+    const r = await call('set_pitch_curve', stroke.restore
+      ? { mode: 'restore', start_sec: stroke.range[0], end_sec: stroke.range[1], author: AUTHOR }
+      : { points, mode: 'draw', author: AUTHOR });
     return r;
-  }, 'ピッチを描く', null, { failureBeforeRender: null, onError: (err) => { failure = err; } });
+  }, stroke.restore ? 'ピッチを元に戻す' : 'ピッチを描く', null, { failureBeforeRender: null, onError: (err) => { failure = err; } });
   if (r) {
     if (stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir) {
       if (S.stroke === stroke) { S.stroke = null; S.strokePhase = 'idle'; render(); }
@@ -457,6 +460,10 @@ function drawObserved(vd, stroke, points) {
   if (!vd) return false;
   if (stroke.trackId !== S.session?.current || stroke.projectDir !== S.projectDir) return false;
   const a = points[0][0]; const b = points[points.length - 1][0];
+  if (stroke.restore) {
+    return (vd.edits || []).some((e) => e.kind === 'pitch_draw' && e.params?.restore && !stroke.baselineIds.has(e.id)
+      && (!e.author || e.author === AUTHOR) && e.target?.start_sec <= b + 0.05 && e.target?.end_sec >= a - 0.05);
+  }
   const at = (t) => {
     let i = 0;
     while (i + 1 < points.length && points[i + 1][0] < t) i++;
