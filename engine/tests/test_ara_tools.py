@@ -400,6 +400,39 @@ def test_rewriting_the_same_analysis_keeps_the_windows(ara, tmp_path, monkeypatc
     assert a._rev_parts(p)[0] != old[0]
 
 
+def test_analysis_cache_without_summary_keeps_the_windows(ara, tmp_path):
+    """裏の準備がキャッシュを書いた後、要約（`analysis.take`）を書く前に止まった（同期で取り消された）。表がキャッシュを
+    読んで再合成したときに要約も書くので、後から準備が同じ解析を書いても版を変えず作り直さない（プラグインの段 13）。"""
+    m, a = ara
+    from vocal_engine import mcp_tracks as mt
+    from vocal_engine.project import store
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(100, note_id=notes[1]))
+    s = m._state["session"]
+    p, _ = mt._track_project(s, s.track(tid))
+    cache = p.analysis["take"]["cache"]
+    p.analysis.pop("take")
+    p.save()
+    p._forget_analysis()
+    a._reset_render()
+    assert os.path.exists(cache)
+    q = store.Project(p.dir).load()              # 裏の準備が拾った（要約の無い状態を読んだ）
+    q.background = True
+    c = Cache(src)
+    r = c.sync(a, "mod-A")
+    assert r["reset"] and len(r["windows"]) == 1
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == c.rev
+    q.analyze(force=True, commit=lambda _a: store.Project(q.dir).load().merge_background(q))
+    assert _ok(a.ara_revs())["revs"]["mod-A"] == c.rev
+    r = _ok(a.ara_render_dirty("mod-A", since=c.rev))
+    assert r["reset"] is False and r["windows"] == [] and r["rev"] == c.rev
+    _same(c, a, "mod-A")
+    assert "content" in store.Project(p.dir).load().analysis["take"]
+
+
 @needs_model
 def test_switching_the_estimator_rebuilds_the_windows(ara, tmp_path):
     """方式を替えると解析の中身が変わるので作り直す。戻したときも（方式ごとの保存から戻す）同じ音になる。"""

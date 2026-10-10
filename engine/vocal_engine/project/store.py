@@ -1416,15 +1416,7 @@ class Project:
         else:
             self.f0_model_version = None
 
-        self.analysis["take"] = {
-            "analyzed_at": t0, "estimator": self._take_f0.estimator,
-            "hop_s": self._take_f0.hop_s, "n_frames": int(self._take_f0.n_frames),
-            "n_notes": len(self._take_notes),
-            "voiced_ratio": round(float(np.mean(self._take_f0.voiced)), 4),
-            "cache": take_cache, "content": self._take_content_sig(),
-        }
-        if self._take_f0.meta.get("version") is not None:
-            self.analysis["take"]["estimator_version"] = self._take_f0.meta["version"]
+        self.analysis["take"] = self._take_summary(t0, take_cache)
         lap("take_f0")
         advance(0.45)
 
@@ -1786,6 +1778,17 @@ class Project:
             self._take_content = memo
         return memo[2]
 
+    def _take_summary(self, analyzed_at, cache):
+        """解析の要約（`analysis.take`）。メモリにあるテイクの F0・ノートから作る。"""
+        f0r, notes = self._take_f0, self._take_notes
+        s = {"analyzed_at": analyzed_at, "estimator": f0r.estimator,
+             "hop_s": f0r.hop_s, "n_frames": int(f0r.n_frames), "n_notes": len(notes),
+             "voiced_ratio": round(float(np.mean(f0r.voiced)), 4),
+             "cache": cache, "content": self._take_content_sig()}
+        if f0r.meta.get("version") is not None:
+            s["estimator_version"] = f0r.meta["version"]
+        return s
+
     def _load_take_analysis(self, path):
         sig = _src_sig(path)                    # 読む前に（読んでいる間に置き換わったら、次に読み直す）
         self._take_f0, self._take_notes = self._read_analysis(path)
@@ -1881,6 +1884,12 @@ class Project:
                         return self._ensure_analyzed()
             if os.path.exists(cache):
                 self._load_take_analysis(cache)
+                if "take" not in self.analysis and not self.background:
+                    # 裏の準備がキャッシュを書いた後、要約を書く前に止まった（同期で取り消されたなど）。
+                    # 要約をここで書く。書かないと、後で準備が同じ解析の要約を書いたときに DAW の再合成の版
+                    # （`mcp_ara._rev_parts`）が変わり、同じ音を作り直してホストへ「変わった」と知らせてしまう
+                    self.analysis["take"] = self._take_summary(now_iso(), cache)
+                    self._save_analysis()
                 g = self._cache_path("guide-analysis.json")
                 if self.guide and os.path.exists(g):
                     self._load_guide_analysis(g)
