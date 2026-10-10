@@ -97,7 +97,7 @@ test('(1) 起動して描画される', async () => {
   });
   expect(look.blobs).toBe(look.pitched);
   expect(look.guides.length).toBeGreaterThan(0);
-  expect(new Set(look.guides)).toEqual(new Set(['#4e4e54']));
+  expect(new Set(look.guides)).toEqual(new Set(['#5aa2ff']));
   for (const [fill, stroke] of look.noteRects) { expect(fill).toBe('transparent'); expect(stroke).toBeNull(); }
   expect(look.hatch).toBe(0);
   // 無音（C の中央 1.6〜2.2 秒は −52〜−56 dBFS）には何も描かない。息・子音など音のあるところだけ

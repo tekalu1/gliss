@@ -2,20 +2,17 @@
 //
 //   タイミング = ノートの帯、ピッチ = 線。補正なし = テイクの黄。
 //   自動補正（ガイドに合わせる）は度合い 0〜1 に応じて 黄 → 橙 → 赤 へ連続的に（明るさも下がる。色覚への配慮）。
-//   手動補正は白。自動と手動の両方がかかったときは最後にかけた方（エンジンが changeset の印から決める）。
+//   手動補正は白（塗りは濃く・白の縁を付けて、暗い背景で灰に見えないように）。自動と手動の両方がかかったときは最後にかけた方（エンジンが changeset の印から決める）。
 //
 // 度合い = 元からどれだけ動いたか ÷ 基準（エンジンの `project/correction.py`。基準は view data の
 // `correction_ref`）。**ドラッグ中・「ガイドに合わせる」のスライダー中も同じ式で**今の見かけから測るので、
 // ドラッグ中の色 = 離した後の色になる（端・移動のドラッグ・鉛筆・ピッチのドラッグ = 手動、ガイドに合わせる = 自動）。
+// 色の定義は palette.js（黄 → 橙 → 赤の列・手動の白・無音の線）
+import { MANUAL, MUTED_LINE, RAMP } from './palette.js';
 import {
   COLORS, S, editedCurve, frameNoteIds, isMuted, noteFrames, pitchDelta, strokeData, warp,
 } from './state.js';
 
-// 黄（テイク）→ 橙 → 赤。段ごとに暗くなる（相対輝度 0.63 → 0.45 → 0.28 → 0.16）
-export const RAMP = ['#e6d24a', '#eaa73c', '#e3702e', '#d23a2a'];
-export const MANUAL = '#ffffff';
-// 無音のノートのピッチの線（補正の色にしない。index.html の --fg3）
-const MUTED_LINE = '#5c5c62';
 const EPS_SEC = 1e-4;
 const EPS_CENTS = 0.1;
 

@@ -7,7 +7,7 @@
 // キーとメニューバーからは ctx 無し（選択・再生位置が対象）。
 // スナップ（時間 N・音程 Shift+N）と表示の設定は grid.js（issue #18）。
 // ホイールの操作（縦・横のズームとスクロール。issue #27）も WHEEL の表に持ち、キーと同じ設定画面で変える。
-import { S, histLabel, isSel, spanOf, targets, toSource, totalSec, unwarp } from './state.js';
+import { BLOCK_KINDS, S, histLabel, isSel, spanOf, targets, toSource, totalSec, unwarp } from './state.js';
 import { askAi, canAskAi } from './askai.js';
 import { render, renderToolbar } from './draw.js';
 import {
@@ -19,8 +19,9 @@ import { beginSelectedAudition, closePop, closeTr, endAudition, openPop, openTr,
 import { play, previewEnabled, setPreviewEnabled, stop } from './audio.js';
 import { ARA, araCompare, araEditorHead, araEditorRegion, araFeatures, araTransport } from './ara.js';
 import { status } from './engine.js';
-import { startRename } from './tracks.js';
+import { setTvOpen, startRename, tvIsOpen } from './tracks.js';
 import { guideShown, guideWhy } from './session.js';
+import { L as LEGEND, setLegend } from './legend.js';
 import { asrRangeAt, asrReady, asrWhy, defaultAsrTime, transcribeAt } from './asr.js';
 import { chooseF0, f0State } from './f0.js';
 import {
@@ -47,16 +48,24 @@ const pos = (ctx) => (ctx && ctx.x != null ? { x: ctx.x, y: ctx.y } : center());
 export function selectedNotes() {
   return S.pitched.filter((n) => isSel(n.id));
 }
-/** 選んだノートが隣どうし接して並んでいる（結合できる）。 */
-export function contiguous(ns = selectedNotes()) {
+/** 選択中の区間（音程ノート・子音・息）。無音にする・戻すは、子音・息にも同じに効く。 */
+const selectedBlocks = () => S.blocks.filter((n) => isSel(n.id));
+/** 選んだ区間が隣どうし接して並び、どれも同じ種類（結合できる。音程ノートどうし・子音どうし・息どうし）。 */
+export function contiguous(ns = selectedBlocks()) {
   if (ns.length < 2) return false;
-  const idx = new Map(S.pitched.map((n, i) => [n.id, i]));
+  const idx = new Map(S.notes.map((n, i) => [n.id, i]));
   for (let k = 1; k < ns.length; k++) {
     const a = ns[k - 1]; const b = ns[k];
-    if (idx.get(b.id) !== idx.get(a.id) + 1 || b.kind !== 'note' || a.kind !== 'note') return false;
+    if (idx.get(b.id) !== idx.get(a.id) + 1 || b.kind !== a.kind) return false;
     if (Math.abs(b.start_sec - a.end_sec) > TOUCH_SEC) return false;
   }
   return true;
+}
+/** 選んだ区間が結合できない理由（結合できるときは null）。 */
+export function mergeWhy(ns = selectedBlocks()) {
+  if (ns.length < 2) return null;
+  if (new Set(ns.map((n) => n.kind)).size > 1) return '結合できるのは同じ種類の区間どうしだけ（音程ノートと子音・息は結合できない）';
+  return contiguous(ns) ? null : '隣り合って接している区間だけ結合できる';
 }
 /** 境目 a｜b が接している（結合できる）。 */
 export function touching(a, b) {
@@ -80,11 +89,11 @@ function splitAt(ctx) {
     status('このトラックのイベントの外では分割できない'); return null;
   }
   const n = ctx?.noteId ? S.byId.get(ctx.noteId)
-    : S.pitched.find((x) => {
+    : S.blocks.find((x) => {                // 音程ノート・子音・息（エンジンの split はどれも受ける）
       const [a, b] = spanOf(x);
       return t > a && t < b && (!S.sel.length || isSel(x.id));
     });
-  if (!n || n.kind !== 'note') { status('分けるノートが無い（再生位置を選んだノートの上に置く）'); return null; }
+  if (!n || !BLOCK_KINDS.has(n.kind)) { status('分ける区間が無い（再生位置を選んだ区間の上に置く）'); return null; }
   if (!idle()) { status('前の編集を当てている間は分割しない。当て終わってからもう一度'); return null; }
   const src = toSource(edited);
   if (src < n.start_sec + CUT_MIN_SEC || src > n.end_sec - CUT_MIN_SEC) {
@@ -95,8 +104,8 @@ function splitAt(ctx) {
 }
 
 function mergeSelected() {
-  const ns = selectedNotes();
-  if (!contiguous(ns)) { status('隣り合って接しているノートだけ結合できる'); return null; }
+  const ns = selectedBlocks();
+  if (!contiguous(ns)) { status(mergeWhy(ns) || '隣り合って接している区間を 2 つ以上選んでから結合する'); return null; }
   if (!idle()) { status('前の編集を当てている間は結合しない。当て終わってからもう一度'); return null; }
   return mergeMany(ns.map((n) => n.id));
 }
@@ -128,7 +137,8 @@ function toggleFollow() {
   saveGrid();
   render();
 }
-const hasFades = () => selectedNotes().some((n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0);
+const hasFade = (n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0;
+const hasFades = () => selectedBlocks().some(hasFade);          // 音程ノート・子音・息
 
 // ---------------------------------------------------------------- 表
 // [id, 名前, グループ, 既定のキー, 実行, 有効の条件, チェック]
@@ -148,14 +158,14 @@ export const COMMANDS = [
   ['preview-notes', 'つかんだノートを鳴らす', GR.play, [], () => setPreviewEnabled(!previewEnabled()), null,
     () => previewEnabled()],
   ['audition-selected', '選択ノートを試聴', GR.play, ['P'], (ctx) => beginSelectedAudition({ once: ctx?.source !== 'keyboard' }),
-    () => selectedNotes().some((n) => n.kind === 'note')],
+    () => selectedBlocks().length > 0],
   // 原音と比べる（プラグインだけ。Melodyne の比較と同じ）: キャッシュを読まずに原音を返す
   ...(ARA ? [['ara-compare', '原音と比べる', GR.play, [], () => araCompare(!araFeatures().compare), null,
     () => araFeatures().compare]] : []),
 
   ['undo', '元に戻す', GR.edit, ['Ctrl+Z'], () => { closePop(); closeTr(); return undo(); }],
   ['redo', 'やり直す', GR.edit, ['Ctrl+Shift+Z', 'Ctrl+Y'], () => { closePop(); closeTr(); return redo(); }],
-  ['select-all', 'すべて選択', GR.edit, ['Ctrl+A'], () => { S.sel = S.pitched.map((n) => n.id); render(); }, hasNotes],
+  ['select-all', 'すべて選択', GR.edit, ['Ctrl+A'], () => { S.sel = S.blocks.map((n) => n.id); render(); }, hasNotes],
   ['tempo', 'テンポを入力', GR.edit, [], () => openTempoInput('bpm'), () => S.tracks.length > 0],
   ['keys', 'ショートカット（キー・ホイール）…', GR.edit, ['Ctrl+,'], () => host.openKeys()],
   // ピッチ（F0）検出の方式（ユーザー設定。替えたら開いているトラックを解析し直す。f0.js）。
@@ -171,12 +181,11 @@ export const COMMANDS = [
   ['merge', '結合', GR.note, ['Ctrl+J'], mergeSelected, () => contiguous()],
   ['transition', 'なだらかさ…', GR.note, ['T'], (ctx) => { const p = pos(ctx); openTr(p.x, p.y, ctx?.pair ? { pair: ctx.pair } : {}); }, hasTransitions],
   ['reset-original', 'オリジナルに戻す', GR.note, [], () => resetOriginal(targets()), hasNotes],
-  ['mute', '無音にする', GR.note, ['Delete'], () => muteNotes(selectedNotes().map((n) => n.id)),
-    () => selectedNotes().some((n) => !n.muted)],
-  ['unmute', '無音を戻す', GR.note, [], () => unmuteNotes(selectedNotes().filter((n) => n.muted).map((n) => n.id)),
-    () => selectedNotes().some((n) => n.muted)],
-  ['clear-fade', 'フェードを消す', GR.note, [], () => clearFades(selectedNotes()
-    .filter((n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0).map((n) => n.id)), hasFades],
+  ['mute', '無音にする', GR.note, ['Delete'], () => muteNotes(selectedBlocks().filter((n) => !n.muted).map((n) => n.id)),
+    () => selectedBlocks().some((n) => !n.muted)],
+  ['unmute', '無音を戻す', GR.note, [], () => unmuteNotes(selectedBlocks().filter((n) => n.muted).map((n) => n.id)),
+    () => selectedBlocks().some((n) => n.muted)],
+  ['clear-fade', 'フェードを消す', GR.note, [], () => clearFades(selectedBlocks().filter(hasFade).map((n) => n.id)), hasFades],
   // 選んだノート・範囲を AI に頼む文をクリップボードへ（askai.js）
   ['ask-ai', 'AI に頼む', GR.note, [], askAi, canAskAi],
 
@@ -192,8 +201,11 @@ export const COMMANDS = [
   ['guide-view', 'ガイドを重ねて表示', GR.view, [], toggleGuide, guideShown, () => S.showGuide],
   ['phoneme-bounds', '音素境界を全高に表示', GR.view, [], () => { S.showAllBounds = !S.showAllBounds; render(); },
     null, () => S.showAllBounds],
+  ['legend-view', '色の凡例を表示', GR.view, [], () => { setLegend(!LEGEND.show); renderToolbar(); }, null, () => LEGEND.show],
   ['show-all', '全体を表示', GR.view, [], showAll, hasNotes],
   ['zoom-reset', 'ズームを戻す', GR.view, [], () => host.zoomReset(), () => hasNotes() || S.tracks.length > 0],
+  // トラック一覧を畳む／開く（畳むと高さ 24 px の帯だけ。プラグインは既定で畳む。docs/track-view.md §10）
+  ['track-list', 'トラック一覧を表示', GR.view, ['L'], () => { setTvOpen(!tvIsOpen()); syncAppMenu(); }, () => S.tracks.length > 0, () => tvIsOpen()],
 
   ['rename', 'トラックの名前を変える', GR.track, ['F2'], renameCurrent, () => S.tracks.length > 0],
 
@@ -272,12 +284,15 @@ function typing(el) {
 }
 
 const NEEDS = {
-  semitone: 'ノートを選んでから', mute: 'ノートを選んでから（もう無音のノートは除く）',
+  semitone: () => (selectedBlocks().length && !selectedNotes().length ? '子音・息には音程がありません' : 'ノートを選んでから'), mute: 'ノートを選んでから（もう無音のノートは除く）',
   unmute: '無音のノートを選んでから',
-  merge: '隣り合って接しているノートを 2 つ以上選んでから', 'guide-match': guideWhy,
+  merge: () => mergeWhy() || '隣り合って接している区間を 2 つ以上選んでから', 'guide-match': guideWhy,
   'guide-view': guideWhy, transition: '接続された境目が無い', rename: 'トラックが無い',
-  'clear-fade': 'フェードのあるノートを選んでから', tempo: 'トラックが無い',
+  'clear-fade': 'フェードのある区間を選んでから', tempo: 'トラックが無い',
   save: 'プロジェクトが無い', 'save-as': 'プロジェクトが無い',
+  split: '分ける区間が無い（再生位置を選んだ区間の上に置く）', 'select-all': 'ノートが無い',
+  'show-all': 'ノートが無い', 'reset-original': 'ノートが無い', 'ask-ai': 'ノートを選ぶか、ループの範囲を決めてから',
+  'audition-selected': 'ノートを選んでから',
   transcribe: () => (asrReady() ? '発声のある所で（ノートを選ぶか、再生位置を発声の上に置く）' : asrWhy()),
 };
 /** コマンドが使えない理由（ガイドは重ならない理由をその場で。issue #32）。 */
@@ -324,7 +339,7 @@ const MENUBAR = [
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }, 'keys']],
   ['ノート', ['guide-match', 'semitone', 'split', 'merge', 'transition', SEP, 'clear-fade', 'reset-original', 'mute', 'unmute',
     SEP, 'ask-ai']],
-  ['表示', ['guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['guide-view', 'phoneme-bounds', 'legend-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset', SEP, 'track-list']],
   // 名前・版・アイコン（main の app.setAboutPanelOptions。issue #29）
   ['ヘルプ', ['ai-connect', 'addons', SEP, 'check-updates', { role: 'about', label: 'Gliss について' }]],
 ];
@@ -335,7 +350,7 @@ const MENUBAR_ARA = [
   ['編集', ['undo', 'redo', SEP, 'select-all', 'tempo', SEP, 'preview-notes', 'audition-selected',
     { label: 'ピッチ検出の方式', submenu: ['f0-rmvpe', 'f0-gliss', 'f0-praat'] }]],
   MENUBAR[2],
-  ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset']],
+  ['表示', ['ara-compare', SEP, 'guide-view', 'phoneme-bounds', 'legend-view', SEP, 'follow', 'snap-time', 'snap-pitch', SEP, 'show-all', 'zoom-reset', SEP, 'track-list']],
   ['ヘルプ', ['keys']],
 ];
 

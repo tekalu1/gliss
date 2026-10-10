@@ -329,7 +329,7 @@ test('(C6) Q・Del・Alt+X・Ctrl+J・Ctrl+A、どれも 1 回で戻せる', asy
     .find((x) => x.label === '半音に合わせる').enabled).toBe(true);
   // Ctrl+A: すべて選択
   await win.keyboard.press('Control+a');
-  expect((await win.evaluate(() => window.__app.S.sel)).length).toBe((await win.evaluate(() => window.__app.S.pitched.length)));
+  expect((await win.evaluate(() => window.__app.S.sel)).length).toBe((await win.evaluate(() => window.__app.S.blocks.length)));   // 音程ノートも子音・息も
   await win.keyboard.press('Escape');
 });
 

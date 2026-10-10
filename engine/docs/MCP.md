@@ -28,11 +28,11 @@ open_project(take_path, guide_path?, lyrics?, guide_lyrics?)   ← テイクの 
      ├ list_notes() / get_pitch(range)    ← 測る
      ├ get_phonemes(range?)               ← 音素と境界（歌詞があるときだけ）
      ├ list_deviations()                  ← ガイドとのずれ（ガイドがあるときだけ）
-     ├ shift_pitch / set_pitch_curve(mode=offset|draw)      ← 直す（ピッチ。draw = 鉛筆）
+     ├ shift_pitch / set_pitch_curve(mode=offset|draw|restore) ← 直す（ピッチ。draw = 鉛筆、restore = 元に戻す線）
      ├ set_transition                                       ← ノートの変わり目のなだらかさ
      ├ split_note / merge_notes                             ← ノートを分ける / つなぐ
      ├ mute_notes / unmute_notes                            ← ノートを無音にする（長さは変えない）/ 無音だけを戻す
-     ├ set_fade                                             ← ノートのフェードイン／アウト（音量だけ）
+     ├ set_fade                                             ← ノート・子音・息のフェードイン／アウト（音量だけ）
      ├ move_boundary / stretch / move_note                  ← 直す（タイミング。後ろはずらさない）
      ├ list_connections / set_connection                    ← 隣との接続 / 切り離し（となだらかさ）
      ├ correct_to_guide(pitch_strength, timing_strength, pitch_mode) ← ガイドへ寄せる（pitch_mode="contour" = 区間カーブ）
@@ -475,7 +475,7 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 | ツール | 引数 | 意味 |
 |---|---|---|
 | `shift_pitch` | `cents`（+100 = 1 半音上）、`note_id` / 範囲 | 音程をずらす |
-| `set_pitch_curve` | `points = [[区間頭からの秒, セント], ...]` | ピッチ曲線を与える（2 点以上）。`mode="draw"` は鉛筆（§2-1） |
+| `set_pitch_curve` | `points = [[区間頭からの秒, セント], ...]` | ピッチ曲線を与える（2 点以上）。`mode="draw"` は鉛筆（§2-1）、`mode="restore"` は points 無しで範囲を録音のピッチに戻す |
 | `move_note` | `ms`（+ が遅く）、`note_id` / **`note_ids`** / 範囲 | 横に動かす。接続側の隣が伸び縮み、切り離し側は隙間が吸収。子音・息・無音の区間も可（範囲で選ぶときは音程のあるノートだけ） |
 | `stretch` | `ratio`（0.25〜4.0）、`note_id` / 範囲 / **`phoneme_id`** | `note_id`: ノートの**尻**を動かす（画面の右端ドラッグと同じ）。`phoneme_id`: その音素の後ろの境界を動かす（`move_boundary` と同じ）。範囲: 1 つのノートの中だけ（同じノートの残りが吸収） |
 | **`move_boundary`** | `boundary_id`、`ms`（+ が遅く） | **音素の境目を動かす**（段階2）。2 音素の和を保つ局所編集 |
@@ -538,6 +538,21 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
 // set_pitch_curve(points=[[149.30, 64.0], [149.45, 65.2]], mode="draw")
 {"ok": true, "changeset": "c005", "start_sec": 149.3, "end_sec": 149.45, "points": 2,
  "replaced": 0, "clipped": false, "total_edits": 4}
+```
+
+#### `set_pitch_curve(mode="restore", start_sec, end_sec | note_id)` — 元に戻す線
+
+画面のペンを右ボタンでなぞる操作（2026-10-10 承認）。points は要らない。`start_sec`〜`end_sec`（素材の秒・編集前）の
+**有声のフレームのピッチを、録音のピッチに戻す**（`note_id` ならそのノートの範囲）。ノートを動かして付けた量も、
+その範囲では消える。仕組みは鉛筆の変種で、録音のピッチを焼き込んだ線（`pitch_draw` の `params.restore = true`）を
+入れる。両端は鉛筆と同じく `ramp_ms`（40 ms）でなだらかにつなぐ。範囲は有声に切り詰め、有声が無ければ `ok: false`
+（無声は元から録音のまま）。1 回の呼び出しが 1 つの changeset で、履歴の名前は「…のピッチを元に戻した」。
+戻した後に動かしたノートのピッチは、戻した線にも足される。`apply_edits` からは使えない（このツールだけ）。
+
+```json
+// set_pitch_curve(mode="restore", start_sec=149.3, end_sec=149.6)
+{"ok": true, "changeset": "c006", "start_sec": 149.3, "end_sec": 149.6, "points": 31,
+ "replaced": 1, "clipped": false, "total_edits": 4}
 ```
 
 #### `split_note(sec, note_id?, snap_ms?)` / `merge_notes(note_a, note_b, group?)`
@@ -720,8 +735,12 @@ abs_cents_median_before}`。
 
 #### `set_fade(note_ids, fade_in_sec?, fade_out_sec?, author?)`（issue #20）
 
-ノートの**フェードイン／アウト**（画面の帯の上の角のつまみ。DAW のクリップフェードと同じ）。1 つの changeset（「フェード」。
+ノート・子音・息の**フェードイン／アウト**（画面の帯の上の角のつまみ。DAW のクリップフェードと同じ）。1 つの changeset（「フェード」。
 両方 0 で消すと「フェードを消す」）。
+
+- **対象は音程のあるノート（`kind=note`）・子音（`unvoiced`）・息（`breath`）**（承認済み（2026-10-10）。子音・息の操作を音程のあるノートと揃える）。
+  無音（`silence`）は区間ではないので付けられない（`ProjectError`）。子音・息のフェードも書き出し・再生・試聴で音量が変わり、
+  `export_view_data` の `notes[]`（`kind` が `unvoiced` / `breath` の行も）に音程のあるノートと**同じキー**（`fade_in_sec` / `fade_out_sec`）で載る。
 
 - **音量だけ**を変える（ピッチ・なだらかさは変えない）。形は等パワー（イン sin・アウト cos）。
 - `fade_in_sec`: ノートの頭から 0 → 元の音量まで、`fade_out_sec`: ノートの尻の手前から 0 まで（**編集後の秒**。
@@ -731,13 +750,14 @@ abs_cents_median_before}`。
   両方渡してノートより長いときは比を保って縮める。後でノートを短くしたときも比を保って縮めて当てる）。
 - 編集リストには `fade`（範囲 = ノートの頭〜尻、`side` = in / out、`sec`）が入る。錨はノートの端の時刻なので、
   分割するとインは左の片、アウトは右の片に残る。結合で消えた境目のフェードは効かない（結合を取り消すと戻る）。
-- `list_notes` / `export_view_data` の `fade_in_sec` / `fade_out_sec` に今の値（ノートに収めたもの）が出る。
-  `reset_to_original` でそのノートのフェードも外れる。
+- `list_notes`（子音・息は `kind="all"` か `"unvoiced"` / `"breath"`。フェードがあるものだけ）/ `export_view_data` の
+  `fade_in_sec` / `fade_out_sec` に今の値（ノートに収めたもの。無ければ 0）が出る。`reset_to_original` でそのノートのフェードも外れる。
 
 ### `reset_to_original(note_ids?, start_sec?, end_sec?, boundary_ids?, whole_track?)`
 
 `reset_to_original` はピッチの編集を外し（範囲のピッチ編集と鉛筆は、そのノートにかかる部分だけ外す）、タイミングは頭・尻を元の位置へ戻す計画で組み直す
-（接続された隣は伸び縮みで合わせる。後ろはずれない）。戻したノートは原音のサンプルそのもの。
+（接続された隣は伸び縮みで合わせる。後ろはずれない）。**`note_ids` に子音（`unvoiced`）・息（`breath`）を渡しても、音程のあるノートと同じくタイミングが戻る**
+（承認済み（2026-10-10）。以前は音程のあるノートだけで、動かした子音・息のタイミングが戻らなかった。ピッチの編集は音程のあるノートにしか無い）。戻したノートは原音のサンプルそのもの。
 無音にした（`mute_notes`）ノートは音が戻る。フェード（`set_fade`）も外れる（そのノートの頭のイン・尻のアウト）。
 `boundary_ids`（`get_phonemes` の `boundaries[].id`）を渡すと、その音素の境目を動かした編集（`move_boundary`）を外す
 （画面の音素の右クリック「子音｜母音の境目を元に戻す」。`export_view_data` の `phonemes.boundaries[].moved`）。

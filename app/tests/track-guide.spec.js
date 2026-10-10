@@ -101,12 +101,12 @@ const heads = (win) => win.evaluate(() => window.__app.tracksState().heads);
 const ids = (win) => win.evaluate(() => window.__app.S.tracks.map((t) => t.id));
 const trackOf = (win, id) => win.evaluate((i) => ({ ...window.__app.S.tracks.find((t) => t.id === i) }), id);
 const guideShownPath = (win) => win.evaluate(() => (window.__app.S.vd?.guide_basis ? window.__app.S.guide?.path || null : null));
-/** レーンで灰色（エディターのガイドと同じ色）に描いているトラック。 */
-const grayRows = (win) => win.evaluate(() => {
+/** レーンでガイドの色（青。エディターのガイドと同じ色）に描いているトラック。 */
+const guideRows = (win) => win.evaluate(() => {
   const rows = window.__app.tracksState().order;
   const th = window.__app.tracksState().trackH;
   const ys = new Set([...document.querySelectorAll('#lanes path')]
-    .filter((p) => (p.getAttribute('fill') || '').toLowerCase() === '#4e4e54')
+    .filter((p) => (p.getAttribute('fill') || '').toLowerCase() === '#5aa2ff')
     .map((p) => Math.floor((+(p.getAttribute('transform') || '').match(/,([-\d.]+)\)/)?.[1] || 0) / th)));
   return [...ys].map((r) => rows[r]);
 });
@@ -124,6 +124,9 @@ test.describe('プラグイン', () => {
     await ctx.idle();
     await ctx.win.evaluate((id) => window.__app.selectTrack(id), low);
     await ctx.idle();
+    // ARA のトラック一覧は初期で畳まれている。見出しのガイドの試験なので開いておく
+    await ctx.win.evaluate(() => { if (!window.__app.tracksState().open) window.__app.runCommand('track-list'); });
+    await ctx.idle();
   });
   test.afterAll(async () => { await close(ctx?.app, ROOT); });
 
@@ -135,7 +138,7 @@ test.describe('プラグイン', () => {
     expect(h[2].guideLabel).toBe('vo-hamo-3 のガイド: 共通のガイド（vo-main）');
     expect(h.map((x) => x.guide)).toEqual([true, false, false, false]);
     expect(await tags(win)).toEqual([main]);
-    expect(await grayRows(win)).toEqual([main]);
+    expect(await guideRows(win)).toEqual([main]);
     expect(await guideShownPath(win)).toBe(files[0]);
     const btn = win.locator(`#heads .th[data-id="${low}"] button.g.wide`);
     await expect(btn).toBeVisible();
@@ -182,7 +185,7 @@ test.describe('プラグイン', () => {
     expect(h[2].guideLabel).toBe('vo-hamo-3 のガイド: vo-hamo+3');
     expect(await win.evaluate(() => window.__app.status())).toContain('vo-hamo-3 のガイド: vo-hamo+3');
     expect(await guideShownPath(win)).toBe(files[1]);       // エディターに重なるガイドが替わった
-    expect(await grayRows(win)).toEqual([hi]);
+    expect(await guideRows(win)).toEqual([hi]);
     expect(await tags(win)).toEqual([main, hi]);
     expect(await win.evaluate(() => window.__app.S.session.current)).toBe(low);
     // フォーカスはボタンに戻っている（描き直しても）。もう一度開いて Esc → ボタン
@@ -351,7 +354,7 @@ test.describe('単体', () => {
     await idle();
     await expect(btn).toHaveAttribute('aria-label', 'vo-hamo-3-2 のガイド: vo-hamo+3-1');
     expect(await guideShownPath(win)).toBe(files[1]);
-    expect(await grayRows(win)).toEqual([hi]);
+    expect(await guideRows(win)).toEqual([hi]);
     // 単体の保存（session.json）にも残る
     const s = await win.evaluate(() => window.api.call('list_tracks', {}));
     expect(s.tracks.find((t) => t.id === low).guide_id).toBe(hi);

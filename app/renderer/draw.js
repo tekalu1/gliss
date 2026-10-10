@@ -11,11 +11,14 @@ import { asrCandidate, asrRunning } from './asr.js';
 import { syncAppMenu, undoLabels } from './commands.js';
 import { guideShown } from './session.js';
 import {
-  G, GRID_BARS, GRID_SEC, barsMode, currentDiv, pitchSnapOn, snapStep, ticks,
+  G, GRID_BARS, GRID_SEC, barsMode, currentDiv, penSnapOn, pitchSnapOn, snapStep, ticks,
 } from './grid.js';
 import { renderTempo } from './tempo.js';
 import { bandColor, desat, lineColorer } from './corr.js';
+import { GUIDE_LOOK as GL, MANUAL } from './palette.js';
+import { guideDiffText, guidePairOf } from './guidepair.js';
 import { createFollower } from './follow.js';
+import { syncLegend } from './legend.js';
 import { ARA, araEditorHead, araEditorRegion, araEditorTrack, araRegions, araScale } from './ara.js';
 
 const { KEYS_W, SCALE_H, LANE_H, EDGE } = LAYOUT;
@@ -59,7 +62,7 @@ function editorLoopSegments() {
   }
   return out;
 }
-const { TAKE, GUIDE, SEL, WAS, AI: AI_EDGE } = COLORS;
+const { TAKE, GUIDE, GUIDE_HI, SEL, WAS, AI: AI_EDGE } = COLORS;
 
 let svg = null;
 let W = 1200;
@@ -290,7 +293,7 @@ function takeBlobs(n, hmax, ctx) {
       const mid = (run[0] + run[run.length - 1]) / 2;
       const head = mid - r[0] < r[1] - mid;
       const m = (head ? lv.pa ?? lv.pb : lv.pb ?? lv.pa) ?? lv.median;
-      out.push(thin(pinchEnds(run.map((i) => pt(i, Y(m))))));
+      out.push(thin(pinchEnds(applyFadeShape(n, run.map((i) => pt(i, Y(m))), [s0, s1]))));
     }
     run = [];
   };
@@ -397,7 +400,9 @@ function noPitchHit(n, segs, conn) {
     }
   }
   if (!Number.isFinite(lo)) return '';
+  if (S.tool === 'main' && n.kind !== 'silence') lo = Math.min(lo, noPitchFadeY(segs) - 5);       // フェードのつまみまで当たりを広げる（音程ノートと同じ）
   if (S.tool === 'cut' || S.tool === 'mute') return `<rect data-note="${n.id}" x="${f1(xa)}" y="${f1(lo)}" width="${f1(Math.max(2, xb - xa))}" height="${f1(hi - lo)}" fill="transparent"/>`;
+  if (S.tool === 'draw') return `<rect data-nop-menu="${n.id}" x="${f1(bx0)}" y="${f1(lo)}" width="${f1(Math.max(2, bx1 - bx0))}" height="${f1(hi - lo)}" fill="transparent"/>`;   // ペン: 右クリックのメニューの当たりだけ（つかめない）
   let out = `<rect data-nop="${n.id}" x="${f1(bx0)}" y="${f1(lo)}" width="${f1(Math.max(2, bx1 - bx0))}" height="${f1(hi - lo)}" fill="transparent" style="cursor:move"/>`;
   const inner = Math.min(EDGE_IN, Math.max(0, xb - xa) / 3);
   for (const [which, x, pts] of [['start', xa, segs[0]], ['end', xb, segs[segs.length - 1]]]) {
@@ -412,6 +417,29 @@ function noPitchHit(n, segs, conn) {
     npEdgeXs.push({ x, y: yc, ceded });
   }
   return out;
+}
+
+/** 子音・息のフェードのつまみの高さ（帯のいちばん上の縁から 7 px 上。音程ノートと同じ）。 */
+function noPitchFadeY(segs) {
+  return Math.min(...segs.flat().map((p) => p.y - p.h)) - 7;
+}
+
+/** フェードのつまみ（v3 §5）: 帯の上の両端に小さな四角（DAW のクリップフェードと同じ位置と形）。フェードがあれば端からつまみまで細い線。
+ * 音程ノート・子音・息で同じ。{ svg, tips }（つまみは全部のノートの上に重ねて描く）。 */
+function fadeHandles(n, yf, dr) {
+  const fd = dr?.type === 'fade' && dr.id === n.id;
+  let svg = ''; let tips = '';
+  const [fs0, fs1] = spanOf(n);
+  const { fi, fo } = fadeOf(n);
+  for (const [side, len] of [['in', fi], ['out', fo]]) {
+    const ex = X(side === 'in' ? fs0 : fs1);
+    const hx = X(side === 'in' ? fs0 + len : fs1 - len);
+    const hot = (fd && dr.side === side) || (!dr && S.fadeHover === `${n.id}|${side}`);
+    if (len > 0) svg += `<line x1="${f1(ex)}" y1="${f1(yf)}" x2="${f1(hx)}" y2="${f1(yf)}" stroke="#d6d6d6" stroke-opacity=".35" pointer-events="none"/>`;
+    svg += `<rect data-note="${n.id}" data-fade="${side}" x="${f1(hx - 3.5)}" y="${f1(yf - 3.5)}" width="7" height="7" fill="${hot ? '#ffffff' : '#bdbdc2'}" style="cursor:ew-resize"/>`;
+    if (fd && dr.side === side && dr.moved) tips += tip(hx, yf - 14, `${Math.round(len * 1000)} ms`, 'middle');
+  }
+  return { svg, tips };
 }
 
 /** 子音・息の端が隣と接続しているか（カーソルの形だけに使う。エンジンの接続 = 音程ノートと同じ規則。view data の connected_prev / next）。 */
@@ -502,6 +530,18 @@ function connFocus() {
 }
 /** 記号をいま描いているか（Alt でメニューバーを止めるのはこのときだけ。選択ノートが画面の外なら描かない）。 */
 export function hasConnFocus() { return connGlyphs() !== ''; }
+
+/** 子音・息が画面に描いている帯の上下（px）。範囲選択の当たり判定に使う（画面の外は入らない）。 */
+export function blockYSpans() {
+  const out = new Map();
+  const hmax = blobHMax(); const npc = noPitchCtx();
+  for (const n of S.notes) {
+    if (n.kind !== 'unvoiced' && n.kind !== 'breath') continue;
+    const ps = takeBlobs(n, hmax, npc).flat();
+    if (ps.length) out.set(n.id, [Math.min(...ps.map((p) => p.y - p.h)), Math.max(...ps.map((p) => p.y + p.h))]);
+  }
+  return out;
+}
 
 /** ポインタ（px）に近い境目の 'a|b'（無ければ null）。隙間の真ん中など、どちらの端からも遠いところは出さない。 */
 export function nearPair(x, y) {
@@ -727,6 +767,27 @@ export function corrText(id) {
   return lines;
 }
 
+/** ホバー・選択している 1 つのノート id（対のガイドを明るくする。ドラッグ中はドラッグ前の選択のまま）。 */
+function pairFocus() {
+  return (!S.drag && S.noteHover) || (S.sel.length === 1 ? S.sel[0] : null);
+}
+
+/** ホバーしたノートの「ガイドより +32 cent・40 ms 遅い」の札（ホバーのときだけ。ガイドに合わせるを開いている間は corrTip が出す）。 */
+function guideDiffTip() {
+  if (corrPlan() || !S.noteHover || S.drag || !S.showGuide || !S.vd?.guide) return '';
+  const text = guideDiffText(S.noteHover);
+  const n = S.byId.get(S.noteHover);
+  if (!text || !n) return '';
+  const [a, b] = spanOf(n);
+  const w = textW(text) + 14;
+  const h = 18;
+  const x = clamp(X((a + b) / 2) - w / 2, KEYS_W + 2, W - w - 2);
+  let y = Y(bandOf(n)) - blobHMax() - 34;
+  if (y < rollTop() + 4) y = Y(bandOf(n)) + blobHMax() + 12;
+  return `<g data-guide-diff="${n.id}" pointer-events="none"><rect x="${f1(x)}" y="${f1(y)}" width="${f1(w)}" height="${h}" rx="3" fill="#232326" stroke="${GUIDE_HI}" stroke-opacity=".7"/>`
+    + `<text x="${f1(x + w / 2)}" y="${f1(y + 12.5)}" font-size="11" text-anchor="middle" fill="${SEL}">${esc(text)}</text></g>`;
+}
+
 function corrTip() {
   if (!corrPlan() || !S.noteHover || S.drag) return '';
   const lines = corrText(S.noteHover);
@@ -771,7 +832,11 @@ export function render() {
   W = r.width || 1200;
   H = r.height || 396;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-  svg.setAttribute('class', `tool-${S.tool}`);
+  // 鉛筆の半音（音程スナップ XOR Shift）: 先端の目印を出し、OS のカーソルは隠す（鉛筆を目印のほうで描く）
+  const penHere = S.tool === 'draw' && !!S.penHud && !S.stroke?.restore && !!S.vd;
+  const penHud = penHere && penSnapOn();
+  const penLab = penHere ? (penHud ? (G.shift ? 'Shift: 半音に沿う' : '音程スナップ: オン') : (G.snapP && G.shift ? 'Shift: 半音に沿わない' : '')) : '';
+  svg.setAttribute('class', `tool-${S.tool}${penHud ? ' pen-snap' : ''}`);
   if (!S.vd) { svg.innerHTML = ''; renderToolbar(); return; }
 
   const ROLL_T = rollTop(); const ROLL_B = rollBottom(); const ROLL_H = rollHeight();
@@ -811,11 +876,13 @@ export function render() {
     s += `<rect x="${f1(lx0)}" y="${ROLL_T}" width="${f1(lx1 - lx0)}" height="${ROLL_B - ROLL_T}" fill="${SEL}" opacity=".07" pointer-events="none"/>`;
   }
 
-  // ---- ガイド（濃いグレーの小さな波形＋線。テイクと同じ形式で、色だけ違う。issue #37: 線は 1.4 px で不透明、帯は薄く）
+  // ---- ガイド（青の薄い塗り＋1 px の青の縁の小さな波形＋青の線。2026-10-10 承認: 塗り・縁・線の別でもテイク（塗りだけ）と見分ける）
+  // ホバー・選択したノート（1 つ）と対のガイドは、塗りを濃く・縁を明るく太く（guidepair.js）
   // 「ガイドに合わせる」を開いている間だけ、**対応付けたガイドノートだけ通常の濃さ**で、
   // 他は薄くする（何がどこへ動くかを読めるように。要素は足さず濃さだけ変える）。
   const hmax = blobHMax();
   if (S.showGuide && S.vd.guide) {
+    const pairId = guidePairOf(pairFocus())?.id;
     const focus = S.plan?.data?.kind === 'guide' ? S.plan.guides : null;
     const spans = [];
     for (const g of S.vd.guide_notes || []) {
@@ -824,18 +891,20 @@ export function render() {
       if (focus && on) spans.push([g.start_sec, g.end_sec]);
       const d = blobD(guideBlobPts(g, hmax));
       if (!d) continue;
-      s += `<path data-guide="${g.id}" d="${d}" fill="${GUIDE}" opacity="${on ? '.55' : '.08'}" pointer-events="none"/>`;
+      const hi = pairId === g.id;
+      s += `<path data-guide="${g.id}"${hi ? ' data-pair="1"' : ''} d="${d}" fill="${GUIDE}" fill-opacity="${hi ? GL.fillPair : on ? GL.fill : GL.fillDim}"`
+        + ` stroke="${hi ? GUIDE_HI : GUIDE}" stroke-width="${hi ? GL.edgePairWidth : GL.edgeWidth}" stroke-opacity="${hi ? 1 : on ? GL.edge : GL.edgeDim}" pointer-events="none"/>`;
     }
     const gs = S.vd.f0.guide_sec || []; const gm = S.vd.f0.guide_midi || [];
     if (focus) {
       const inside = (t) => spans.some(([a, b]) => t >= a && t <= b);
       const dim = f0Path(gs, gm, { keep: (t) => !inside(t) });
       const lit = f0Path(gs, gm, { keep: inside });
-      if (dim) s += `<path data-guide-line="dim" d="${dim}" stroke="${GUIDE}" stroke-width="1.4" fill="none" opacity=".25" pointer-events="none"/>`;
-      if (lit) s += `<path data-guide-line="1" d="${lit}" stroke="${GUIDE}" stroke-width="1.4" fill="none" pointer-events="none"/>`;
+      if (dim) s += `<path data-guide-line="dim" d="${dim}" stroke="${GUIDE}" stroke-width="${GL.lineWidth}" fill="none" opacity=".25" pointer-events="none"/>`;
+      if (lit) s += `<path data-guide-line="1" d="${lit}" stroke="${GUIDE}" stroke-width="${GL.lineWidth}" fill="none" pointer-events="none"/>`;
     } else {
       const gd = f0Path(gs, gm);
-      if (gd) s += `<path data-guide-line="1" d="${gd}" stroke="${GUIDE}" stroke-width="1.4" fill="none" pointer-events="none"/>`;
+      if (gd) s += `<path data-guide-line="1" d="${gd}" stroke="${GUIDE}" stroke-width="${GL.lineWidth}" fill="none" pointer-events="none"/>`;
     }
   }
 
@@ -861,6 +930,7 @@ export function render() {
   const npc = noPitchCtx();
   const cxs = consonantXs();
   npEdgeXs = [];
+  let fadeSvg = '';            // フェードのつまみは全部のノートの上に重ねる（接した隣のノートの当たりに隠れない）
   const ehNp = main && dr?.type === 'edge' && dr.nop ? { id: dr.id, which: dr.which }
     : main && !dr ? S.edgeHover : null;
   for (const n of S.notes) {
@@ -874,12 +944,16 @@ export function render() {
     const opacity = bc === TAKE ? '.14' : '.45';
     if (d.main) s += `<path data-nopitch="${n.id}" d="${d.main}" fill="${bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
     if (d.cons) s += `<path data-nopitch="${n.id}" data-cons="${n.id}" d="${d.cons}" fill="${bc === TAKE ? desat(bc) : bc}" fill-opacity="${opacity}" pointer-events="none"/>`;
-    if (main || S.tool === 'cut' || S.tool === 'mute') s += noPitchHit(n, segs, noPitchConn(n));
+    if (main || S.tool === 'cut' || S.tool === 'mute' || S.tool === 'draw') s += noPitchHit(n, segs, noPitchConn(n));
     const [s0, s1] = spanOf(n);
     const first = segs[0][0]; const last = segs[segs.length - 1][segs[segs.length - 1].length - 1];
     if (isSel(n.id) && (Math.abs(n.start_sec - s0) > 0.0005 || Math.abs(n.end_sec - s1) > 0.0005)) {
       const oy = Math.min(...segs.flat().map((p) => p.y - p.h)) - 2;
       s += `<path data-orig="${n.id}" d="M${f1(X(n.start_sec))} ${f1(oy + 5)}V${f1(oy)}H${f1(X(n.end_sec))}V${f1(oy + 5)}" fill="none" stroke="${WAS}" stroke-width="1" pointer-events="none"/>`;
+    }
+    if (main && n.kind !== 'silence' && ((dr?.type === 'fade' && dr.id === n.id) || (!dr && S.noteHover === n.id))) {
+      const h = fadeHandles(n, noPitchFadeY(segs), dr);
+      fadeSvg += h.svg; tipStr += h.tips;
     }
     if (ehNp && ehNp.id === n.id) {
       // 端に乗っている・ドラッグ中: 明るい縦線（ノートの区切り = つかんでいる所）
@@ -903,7 +977,6 @@ export function render() {
   // 当たり判定は今までどおり透明な矩形（中央＝ノート、両端＝端のつまみ）。見た目は波形だけ。
   const eh = main && dr?.type === 'edge' ? { id: dr.id, which: dr.which }
     : main && !dr ? S.edgeHover : null;
-  let fadeSvg = '';            // フェードのつまみは全部のノートの上に重ねる（接した隣のノートの当たりに隠れない）
   for (let k = 0; k < S.pitched.length; k++) {
     const n = S.pitched[k];
     const b = boxOf(n);
@@ -923,7 +996,8 @@ export function render() {
     // 帯の色 = タイミングの補正（自動 = 黄 → 赤、手動 = 白。issue #37。corr.js）
     const bc = bandColor(n);
     const bd0 = blobsSplit(takeBlobs(n, hmax, npc), cxs);
-    if (bd0.main) s += `<path class="blob" data-blob="${n.id}" d="${bd0.main}" fill="${bc}" pointer-events="none"/>`;
+    // 手動 = 白の帯は塗りを濃くして白の縁を付ける（index.html の [data-man]。暗い背景で灰に見えないように）
+    if (bd0.main) s += `<path class="blob" data-blob="${n.id}"${bc === MANUAL ? ' data-man="1"' : ''} d="${bd0.main}" fill="${bc}" pointer-events="none"/>`;
     // AI（Claude Code など）の編集が最後に当たっているノートは、帯の縁を AI の色に（state.js の aiNotesOf）
     if (bd0.main && S.aiNotes.has(n.id)) s += `<path data-ai="${n.id}" d="${bd0.main}" fill="none" stroke="${AI_EDGE}" stroke-width="1.2" stroke-opacity=".9" pointer-events="none"/>`;
     if (bd0.cons) s += `<path class="blob" data-cons="${n.id}" d="${bd0.cons}" fill="${desat(bc)}" pointer-events="none"/>`;
@@ -945,18 +1019,9 @@ export function render() {
     }
     // フェードのつまみ（v3 §5）: ホバー中のノート・フェードをドラッグ中のノートの帯の上の両端に小さな四角
     // （DAW のクリップフェードと同じ位置と形）。フェードがあれば端からつまみまで細い線
-    const fd = dr?.type === 'fade' && dr.id === n.id;
-    if (main && (fd || (!dr && S.noteHover === n.id))) {
-      const [fs0, fs1] = spanOf(n);
-      const { fi, fo } = fadeOf(n);
-      for (const [side, len] of [['in', fi], ['out', fo]]) {
-        const ex = X(side === 'in' ? fs0 : fs1);
-        const hx = X(side === 'in' ? fs0 + len : fs1 - len);
-        const hot = (fd && dr.side === side) || (!dr && S.fadeHover === `${n.id}|${side}`);
-        if (len > 0) fadeSvg += `<line x1="${f1(ex)}" y1="${f1(yf)}" x2="${f1(hx)}" y2="${f1(yf)}" stroke="#d6d6d6" stroke-opacity=".35" pointer-events="none"/>`;
-        fadeSvg += `<rect data-note="${n.id}" data-fade="${side}" x="${f1(hx - 3.5)}" y="${f1(yf - 3.5)}" width="7" height="7" fill="${hot ? '#ffffff' : '#bdbdc2'}" style="cursor:ew-resize"/>`;
-        if (fd && dr.side === side && dr.moved) tipStr += tip(hx, yf - 14, `${Math.round(len * 1000)} ms`, 'middle');
-      }
+    if (main && ((dr?.type === 'fade' && dr.id === n.id) || (!dr && S.noteHover === n.id))) {
+      const h = fadeHandles(n, yf, dr);
+      fadeSvg += h.svg; tipStr += h.tips;
     }
     // 端にポインタが乗っている・端をドラッグ中: 端に明るい縦線（つかめる所・動かしている所）
     if (eh && eh.id === n.id) {
@@ -1069,11 +1134,55 @@ export function render() {
   if (dr && dr.type === 'box' && dr.moved) {
     s += `<rect x="${f1(Math.min(dr.x0, dr.x1))}" y="${f1(Math.min(dr.y0, dr.y1))}" width="${f1(Math.abs(dr.x1 - dr.x0))}" height="${f1(Math.abs(dr.y1 - dr.y0))}" fill="${SEL}" fill-opacity=".06" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;
   }
+  // ---- 元に戻す線（ペンの右ドラッグ）: 戻す区間の薄い帯（外側の薄い帯 = 両端 40 ms のつなぎ）・戻す前の線（点線）・札
+  const rs = S.stroke?.restore && S.stroke.phase === 'drawing' && S.stroke.span ? S.stroke : null;
+  if (rs) {
+    const f0 = S.vd.f0; const R = 0.04;
+    const ex = (k) => X(warp(toEdited(f0.t0_sec + k * f0.hop_sec)));
+    const x0 = ex(rs.span[0]); const x1 = ex(rs.span[1]);
+    const e0 = X(warp(toEdited(f0.t0_sec + rs.span[0] * f0.hop_sec - R))); const e1 = X(warp(toEdited(f0.t0_sec + rs.span[1] * f0.hop_sec + R)));
+    s += `<g data-restore-band="1" pointer-events="none"><rect x="${f1(e0)}" y="${ROLL_T}" width="${f1(e1 - e0)}" height="${f1(ROLL_B - ROLL_T)}" fill="#fff" fill-opacity=".035"/>`
+      + `<rect x="${f1(x0)}" y="${ROLL_T}" width="${f1(Math.max(0, x1 - x0))}" height="${f1(ROLL_B - ROLL_T)}" fill="#fff" fill-opacity=".08"/>`
+      + `<line x1="${f1(x0)}" x2="${f1(x0)}" y1="${ROLL_T}" y2="${ROLL_B}" stroke="#fff" stroke-opacity=".55"/>`
+      + `<line x1="${f1(x1)}" x2="${f1(x1)}" y1="${ROLL_T}" y2="${ROLL_B}" stroke="#fff" stroke-opacity=".55"/></g>`;
+    const was = f0.take_edited_midi.map((m, i) => (rs.vals.has(i) && m != null && Math.abs(m - f0.take_midi[i]) > 0.03 ? m : null));
+    for (const [, d] of f0PathsColored(f0.take_edited_sec, was, () => '#fff')) {
+      s += `<path data-restore-was="1" d="${d}" fill="none" stroke="#fff" stroke-opacity=".6" stroke-dasharray="0.1 3" stroke-linecap="round" pointer-events="none"/>`;
+    }
+    const lab = `元のピッチに戻す ${(rs.vals.size * f0.hop_sec).toFixed(2)} s`;
+    const lw = [...lab].reduce((w, c) => w + (c.charCodeAt(0) > 255 ? 11.5 : 6.5), 14);
+    const cx = clamp((x0 + x1) / 2, KEYS_W + lw / 2 + 2, W - lw / 2 - 2);
+    s += `<g data-restore-label="1" pointer-events="none"><rect x="${f1(cx - lw / 2)}" y="${ROLL_T + 6}" width="${f1(lw)}" height="20" rx="3" fill="#232326" stroke="#56565c"/>`
+      + `<text x="${f1(cx)}" y="${ROLL_T + 20}" font-size="11.5" text-anchor="middle" fill="#f2f2f2">${lab}</text></g>`;
+  }
+  // ---- 鉛筆が半音に沿うとき（音程スナップ XOR Shift。2026-10-10）: 行の中心の線・鍵盤の行・音名・鉛筆（OS のカーソルは隠す）
+  if (penHud) {
+    const hud = S.penHud;
+    const sem = S.drag?.type === 'stroke' && S.stroke?.sn ? S.stroke.sn.cur : Math.round(hud.m);
+    const ys = Y(sem); const rh = rowH();
+    const ya = Math.max(ROLL_T, ys - rh / 2); const yb = Math.min(ROLL_B, ys + rh / 2);
+    if (yb > ya) {
+      s += `<g data-pen-hud="${sem}" pointer-events="none"><rect x="0" y="${f1(ya)}" width="${KEYS_W}" height="${f1(yb - ya)}" fill="#f2f2f2" fill-opacity=".6"/>`
+        + `<rect x="${KEYS_W}" y="${f1(ya)}" width="${W - KEYS_W}" height="${f1(yb - ya)}" fill="#fff" fill-opacity=".07"/>`;
+      if (ys > ROLL_T && ys < ROLL_B) s += `<line x1="${KEYS_W}" x2="${W}" y1="${f1(ys)}" y2="${f1(ys)}" stroke="#fff" stroke-opacity=".6" stroke-dasharray="5 3"/>`;
+      const hx = clamp(hud.x, KEYS_W, W);
+      const nm = noteName(sem); const lw = nm.length * 6.6 + 12;
+      let lx = hx + 26; if (lx + lw > W - 4) lx = hx - 26 - lw;
+      s += `<g data-pen-name="1"><rect x="${f1(lx)}" y="${f1(ys - 22)}" width="${f1(lw)}" height="16" rx="3" fill="#232326" stroke="#56565c"/>`
+        + `<text x="${f1(lx + lw / 2)}" y="${f1(ys - 10)}" font-size="11" text-anchor="middle" fill="#f2f2f2">${nm}</text></g>`
+        + `<g data-pen-glyph="1" transform="translate(${f1(hx - 3)},${f1(ys - 21)})"><path d="M3 21 L4.5 15.5 L16 4 a2.1 2.1 0 0 1 3 0 l1 1 a2.1 2.1 0 0 1 0 3 L8.5 19.5 Z" fill="#fff" stroke="#000" stroke-width="1.2" stroke-linejoin="round"/></g></g>`;
+    }
+  }
+  if (penLab) {
+    const lw = [...penLab].reduce((w, c) => w + (c.charCodeAt(0) > 255 ? 11.5 : 6.5), 18);
+    s += `<g data-pen-label="1" pointer-events="none"><rect x="${f1(W - lw - 8)}" y="${ROLL_T + 6}" width="${f1(lw)}" height="20" rx="3" fill="#232326" stroke="#56565c"/>`
+      + `<text x="${f1(W - lw / 2 - 8)}" y="${ROLL_T + 20}" font-size="11.5" text-anchor="middle" fill="#f2f2f2">${penLab}</text></g>`;
+  }
   // 鍵盤の上はどのツールでも矢印（鉛筆・はさみのカーソルにしない。issue #6）。帯・線の後に重ねる
   s += `<rect data-keys="1" x="0" y="${ROLL_T}" width="${KEYS_W}" height="${f1(ROLL_B - ROLL_T)}" fill="transparent" style="cursor:default"/>`;
   // タイムスケールは帯・線の後に描く（縦に拡大・スクロールして上にはみ出した帯を隠す）
   s += scaleSvg();
-  s += tipStr + corrTip();
+  s += tipStr + corrTip() + guideDiffTip();
 
   // ---- 歌詞・音素レーン（かな 1 段＋音素 1 段。子音は暗く、母音は明るく）
   s += `<rect data-lane="1" x="0" y="${ROLL_B}" width="${W}" height="${LANE_H}" fill="#121214" style="cursor:text"/>`
@@ -1246,6 +1355,7 @@ export function renderToolbar() {
   tip(br, withKey(rd ? `やり直す: ${rd}` : 'やり直す', 'redo'));
   const historyLabel = q('#undoLabel');
   if (historyLabel) historyLabel.textContent = u ? `元に戻す: ${u}` : '元に戻す: なし';
+  syncLegend();
   const strokeActions = q('#strokeActions');
   if (strokeActions) {
     const phase = S.strokePhase;
@@ -1267,7 +1377,7 @@ export function renderToolbar() {
   tip(q('#bSnapT'), `${withKey('時間スナップ', 'snap-time')}。ドラッグ中 Shift で解除`);
   q('#bFollow').setAttribute('aria-pressed', G.follow ? 'true' : 'false');
   tip(q('#bFollow'), withKey('再生位置に追従', 'follow'));
-  tip(q('#bSnapP'), `${withKey('音程スナップ: 平均の音程を半音に', 'snap-pitch')}。ドラッグ中 Shift で解除`);
+  tip(q('#bSnapP'), `${withKey('音程スナップ: 平均の音程を半音に', 'snap-pitch')}。ドラッグ中 Shift で解除（鉛筆は Shift を押している間だけ反転）`);
   const sel = q('#gridDiv');
   const mode = barsMode() ? 'bars' : 'sec';
   if (sel && sel.dataset.mode !== mode) {

@@ -65,11 +65,12 @@ export const HEAD_W = { MIN: 140, MAX: 360, DEF: 160, NARROW: 150, RATIO: 0.4 };
 let HW = HEAD_W.DEF;
 const SHORT_H = 40;         // これ未満の高さでは 2 段目（音量・パン）を畳む
 const MIX_DBL_MS = 400;     // 音量・パンの 2 回押し（既定値に戻す）の間隔
-const RH = 20;              // ルーラーの高さ
+const RH = 24;              // ルーラーの高さ（一覧を畳んだときに残る帯の高さ）
+const TV_ANIM_MS = 180;     // 一覧を開閉する動き（reduced-motion では動かさない）
 const CLIP_T = 4;           // クリップの上端（行の中）
 const clipH = () => TH - 7;
 const { SCALE_H, LANE_H } = LAYOUT;
-const { TAKE, GUIDE, SEL, INST, VOCAL } = COLORS;
+const { TAKE, GUIDE, GUIDE_HI, SEL, INST, VOCAL } = COLORS;
 const ICON_MUTE = '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>';
 const ICON_GUIDE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg>';
 const ICON_CARET = '<svg class="cv" viewBox="0 0 10 10" aria-hidden="true"><path d="m2.5 4 2.5 2.5L7.5 4"/></svg>';
@@ -97,7 +98,12 @@ let autoRange = [0, 1];     // 全体表示のときの範囲（タイムライ�
 let rangeKey = '';
 let dr = null;              // 上でのドラッグ
 let userH = null;           // 境界をドラッグした高さ（null = 自動）
-let collapsed = false;
+let tvOpen = !ARA;          // 一覧を開いている（プラグインは畳んだ帯が既定。保存した状態が先にあればそちら。main.js）
+let animTimer = 0;
+let strip = null;
+let toggleBtn = null;
+let rowsEl = null;
+let lastStrip = '';
 let lastSig = '';
 let lastHeads = '';
 let renaming = null;        // 名前を入力しているトラックの id（右クリックの「名前を変える」）
@@ -144,7 +150,7 @@ const pps = () => laneW / (range[1] - range[0]);
 function avail() {
   const tb = root.querySelector('.tb')?.getBoundingClientRect().height || 36;
   const st = $('#status')?.getBoundingClientRect().height || 18;
-  return Math.max(root.getBoundingClientRect().height, 480) - tb - st - split.getBoundingClientRect().height;
+  return root.getBoundingClientRect().height - tb - st - split.getBoundingClientRect().height;
 }
 function fitH() { return RH + S.tracks.length * TH + 1; }
 function minH() { return RH + TH; }
@@ -157,9 +163,40 @@ export function layout() {
   tv.hidden = !show;
   split.hidden = !show;
   if (!show) return;
-  let h = collapsed ? minH() : (userH ?? Math.min(fitH(), avail() * 0.4));
-  h = clamp(Math.round(h), minH(), maxH());
+  const h = tvOpen ? clamp(Math.round(userH ?? Math.min(fitH(), avail() * 0.4)), minH(), maxH()) : RH;
   if (tv.style.height !== `${h}px`) tv.style.height = `${h}px`;
+  tv.classList.toggle('closed', !tvOpen);
+  rowsEl.inert = !tvOpen;
+  toggleBtn.setAttribute('aria-expanded', String(tvOpen));
+}
+
+/** 一覧を開いているか（畳んでいると高さ 24 px の帯だけ）。 */
+export function tvIsOpen() { return tvOpen; }
+
+/** 一覧を開く／畳む（トラックの数・窓の高さによらず、畳むと帯だけ）。
+ * animate: 約 180 ms の ease-out で伸縮する（reduced-motion の設定では動かさない）。開くときは編集中の行まで送る。
+ * save: 表示の設定として覚える（PC 全体で 1 つ）。 */
+export function setTvOpen(open, { animate = true, save = true } = {}) {
+  open = !!open;
+  if (open === tvOpen) return tvOpen;
+  tvOpen = open;
+  if (!tv) return tvOpen;
+  clearTimeout(animTimer);
+  const move = animate && !tv.hidden && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  tv.classList.toggle('anim', move);
+  if (move) animTimer = setTimeout(() => tv.classList.remove('anim'), TV_ANIM_MS + 40);
+  renderTracks();
+  if (open) scrollToCurrent();
+  if (save) { saveView(); renderToolbar(); }      // 表示メニューのチェックも合わせる
+  return tvOpen;
+}
+
+/** 編集中の行がちょうど真ん中あたりに見えるように送る（開くとき。行が全部入るなら何もしない）。 */
+function scrollToCurrent() {
+  const i = rows().findIndex((t) => t.id === S.session?.current);
+  if (i < 0 || !tvBody) return;
+  const visible = (parseFloat(tv.style.height) || tvHeight()) - RH;
+  tvBody.scrollTop = Math.max(0, i * TH - (visible - TH) / 2);
 }
 export function tvHeight() { return tv?.getBoundingClientRect().height || 0; }
 
@@ -390,6 +427,20 @@ function headsHtml() {
   }).join('');
 }
 
+/** 畳んだ帯（#tvStrip）: 編集中のトラックの名前（プラグインは DAW のトラック名を添える）とガイドのプルダウンだけ。
+ * トラックの数・準備の失敗や読み込み中の印は出さない（docs/track-view.md §10）。 */
+function stripHtml() {
+  const t = S.tracks.find((x) => x.id === S.session?.current);
+  if (!t) return '';
+  const nm = esc(t.name);
+  const daw = ARA && t.group && t.group !== t.name ? `<i>（DAW: ${esc(t.group)}）</i>` : '';
+  const gt = t.kind === 'vocal' ? guideText(t) : null;
+  const g = gt ? `<button type="button" class="g wide${gt.none ? ' none' : ''}" data-id="${esc(t.id)}" aria-haspopup="menu" aria-expanded="false"`
+    + ` aria-label="${nm} のガイド: ${esc(gt.long)}" title="ガイド: ${esc(gt.long)}（クリックで選ぶ）">${ICON_GUIDE}`
+    + `<span class="gt">${esc(gt.short)}</span>${ICON_CARET}</button>` : '';
+  return `<span class="st">編集: <b>${nm}</b> ${daw}</span>${g}`;
+}
+
 // ---------------------------------------------------------------- 見出しの幅
 /** 見出しの幅の上限（360 px と、トラックビューの幅の 40% の小さいほう。下限の 140 px は割らない）。 */
 function maxHeadW() {
@@ -462,6 +513,13 @@ export function renderTracks() {
     if (keepG) guideButton(keepG)?.focus({ preventScroll: true });
   }
   heads.style.setProperty('--th', `${TH}px`);
+  const sh = stripHtml();
+  if (sh !== lastStrip) {
+    const keepG = strip.contains(document.activeElement) && document.activeElement.classList.contains('g');
+    strip.innerHTML = sh;
+    lastStrip = sh;
+    if (keepG) strip.querySelector('button.g')?.focus({ preventScroll: true });
+  }
   const vr = viewRange();
   const sig = JSON.stringify([laneW, TH, range, vr, S.loop, S.session?.current, S.session?.guide,
     S.tracks.map((t) => effectiveGuideOf(t)),
@@ -509,7 +567,7 @@ function drawLanes(vr) {
       + `<line x1="0" y1="${y + 0.5}" x2="${laneW}" y2="${y + 0.5}" stroke="#232326"/>`;
     const off = offsetOf(t);
     const x0 = tvX(off); const x1 = tvX(off + (t.duration_sec || 0));
-    // 色相 = トラックの種類（issue #37。モック v4）: 編集中 = 黄、ガイド = エディターと同じ濃いグレー、
+    // 色相 = トラックの種類（issue #37。モック v4）: 編集中 = 黄、ガイド = エディターと同じ青、
     // ほかのボーカル = 暗い黄、伴奏 = 背景に近い薄いグレー。聞こえないトラックは薄く
     const col = cur ? TAKE : isG ? GUIDE : t.kind === 'vocal' ? VOCAL : INST;
     const op = (cur ? 0.75 : 1) * (audible(t) ? 1 : 0.35);
@@ -572,8 +630,8 @@ function drawLanes(vr) {
     const w = 38;
     const tx = clamp(Math.max(x0, 0) + 4, 0, Math.max(0, laneW - w));
     const ty = i * TH + CLIP_T + 2;
-    s += `<g data-gtag="${esc(t.id)}" pointer-events="none"><rect x="${f1(tx)}" y="${ty}" width="${w}" height="14" rx="7" fill="#1c1c1f" fill-opacity=".9" stroke="#4a4a50"/>`
-      + `<text x="${f1(tx + w / 2)}" y="${ty + 10.5}" font-size="10" text-anchor="middle" fill="#b4b4ba">ガイド</text></g>`;
+    s += `<g data-gtag="${esc(t.id)}" pointer-events="none"><rect x="${f1(tx)}" y="${ty}" width="${w}" height="14" rx="7" fill="#1c1c1f" fill-opacity=".9" stroke="${GUIDE}" stroke-opacity=".7"/>`
+      + `<text x="${f1(tx + w / 2)}" y="${ty + 10.5}" font-size="10" text-anchor="middle" fill="${GUIDE_HI}">ガイド</text></g>`;
   });
   // 下で表示している範囲（レーンをドラッグ中はその範囲）
   const ci = R.findIndex((t) => t.id === curId);
@@ -635,7 +693,7 @@ function drawRuler() {
     if (g.l === 2 || (!g.lab && g.l !== 0)) continue;
     const x = tvX(g.t);
     s += `<line x1="${f1(x)}" y1="${RH - (g.lab ? 8 : 4)}" x2="${f1(x)}" y2="${RH}" stroke="#3a3a3e"/>`;
-    if (g.lab) s += `<text data-rlab="1" x="${f1(x + 3)}" y="12" font-size="10" fill="#8f8f94">${g.lab}</text>`;
+    if (g.lab) s += `<text data-rlab="1" x="${f1(x + 3)}" y="${RH - 9}" font-size="10" fill="#8f8f94">${g.lab}</text>`;
   }
   if (S.loop) {
     s += `<rect x="${f1(tvX(S.loop[0]))}" y="${RH - 3}" width="${f1(tvX(S.loop[1]) - tvX(S.loop[0]))}" height="3" fill="${SEL}" opacity=".5"/>`;
@@ -1291,6 +1349,8 @@ export function setTrackGuide(trackId, guideId) {
 
 /** 見出しのガイドのボタン（見えているほう。プラグインは 2 段目の名前つき、高さが小さいときは 1 段目のアイコン）。 */
 function guideButton(id) {
+  // 畳んでいる間は帯のボタン（編集中のトラックのもの）
+  if (!tvOpen) return strip?.querySelector(`button.g[data-id="${CSS.escape(id)}"]`) || null;
   const th = heads?.querySelector(`.th[data-id="${CSS.escape(id)}"]`);
   if (!th) return null;
   return [...th.querySelectorAll('button.g')].find((b) => b.offsetParent !== null) || null;
@@ -1306,6 +1366,7 @@ function focusedGuide() {
 export function openGuidePicker(id) {
   const t = S.tracks.find((x) => x.id === id);
   if (!t || t.kind !== 'vocal') return;
+  if (!tvOpen && !guideButton(id)) return;       // 畳んでいる間、帯に出ているのは編集中のトラックだけ
   if (!guideButton(id)) heads?.querySelector(`.th[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
   openGuideMenu(t, () => guideButton(id));
 }
@@ -2158,7 +2219,8 @@ function installSplit() {
     const y0 = e.clientY; const h0 = tvHeight();
     const mv = (ev) => {
       if (buttonReleased(ev)) { up(); return; }          // 離したことが届いていない（state.js）
-      collapsed = false;
+      if (!tvOpen && Math.abs(ev.clientY - y0) < 3) return;
+      if (!tvOpen) setTvOpen(true, { animate: false });  // 畳んだ帯から引いたら、その場で開く（動きは付けない）
       userH = clamp(h0 + ev.clientY - y0, minH(), maxH());
       layout();
     };
@@ -2174,10 +2236,11 @@ function installSplit() {
     split.addEventListener('pointercancel', up);
     split.addEventListener('lostpointercapture', up);
   });
-  // ダブルクリックで上を 1 トラック分に畳む／戻す
+  // ダブルクリックで一覧を畳む（帯だけにする）／開く。開くときは引いて決めた高さを捨てて自動（全トラックが入る高さ）に戻す
+  // （ボタン・L キーで開くときは引いた高さのまま）
   split.addEventListener('dblclick', () => {
-    if (collapsed || tvHeight() <= minH() + 4) { collapsed = false; userH = null; } else collapsed = true;
-    layout();
+    if (!tvOpen) userH = null;
+    setTvOpen(!tvOpen);
   });
 }
 
@@ -2190,6 +2253,9 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   ruler = $('#tvRuler');
   split = $('#split');
   tvBody = $('#tvBody');
+  strip = $('#tvStrip');
+  toggleBtn = $('#tvToggle');
+  rowsEl = $('#tvRows');
   hsz = $('#hsz');
   bub = $('#tvBub');
   saveView = onViewChanged || (() => {});
@@ -2210,6 +2276,20 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
     e.preventDefault();
     e.stopPropagation();
     openGuidePicker(b.closest('.th').dataset.id);
+  });
+  toggleBtn.addEventListener('click', () => { setTvOpen(!tvOpen); });
+  strip.addEventListener('click', (e) => {            // 畳んだ帯のガイドのプルダウン（見出しのボタンと同じ動き）
+    const b = e.target.closest('button.g');
+    if (!b) return;
+    if (menuOpen()) closeMenu();
+    else if (!justClosed(b)) openGuidePicker(b.dataset.id);
+  });
+  strip.addEventListener('keydown', (e) => {
+    const b = e.target.closest?.('button.g');
+    if (!b || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openGuidePicker(b.dataset.id);
   });
   heads.addEventListener('pointerdown', onHeadsDown);
   heads.addEventListener('pointermove', onHeadsMove);
@@ -2241,7 +2321,7 @@ export function tracksState() {
     row: Math.floor(+frame.getAttribute('y') / TH),
   } : null;
   return {
-    range: [...range], laneW, height: tvHeight(), collapsed, fit: fitH(), frame: fr, trackH: TH,
+    range: [...range], laneW, height: tvHeight(), open: tvOpen, fit: fitH(), frame: fr, trackH: TH,
     view: tracksView(), headW: headWidth(), savedHeadW: savedHeadWidth(), order: rows().map((t) => t.id), pendingOrder: pendingOrder ? [...pendingOrder] : null,
     scrollTop: tvBody?.scrollTop || 0,
     clips: rows().map((t, i) => {
