@@ -895,6 +895,63 @@ def test_edit_during_render_does_not_wait_and_the_stale_windows_are_rebuilt(ara,
         _same(c, a, "mod-A")
 
 
+def test_view_data_lets_a_render_about_to_finish_commit_first(ara, tmp_path, monkeypatch):
+    """描画データの組み立ては、もうすぐ終わるロックの外の再合成の確定を先に通す（組み立てが先にロックを取ると、
+    作り終えた窓の確定がその後ろで待ち、編集した音が遅れる）。終わる見込みが遠い再合成は待たない。"""
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice())
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    c = Cache(src)
+    c.sync(a, "mod-A")
+    m.export_view_data()
+    order = []
+    orig_commit, orig_view = a._commit_plan, m._export_view_data
+    monkeypatch.setattr(a, "_commit_plan", lambda *x, **k: (order.append("commit"), orig_commit(*x, **k))[1])
+    monkeypatch.setattr(m, "_export_view_data", lambda *x, **k: (order.append("view"), orig_view(*x, **k))[1])
+    entered, go = threading.Event(), threading.Event()
+
+    def during(k):
+        entered.set()
+        assert go.wait(10)
+
+    _hold_render(monkeypatch, a, during)
+
+    def run(rate, cents, hold_sec):
+        """再合成の速さの見込みを rate にして、作っている最中に描画データを頼む。
+        再合成を hold_sec 止めている間（描画データが組み立てに入ればそこで止めるのをやめる）の順を返す。"""
+        a._render_rate["mod-A"] = rate
+        _ok(m.shift_pitch(cents, note_id=notes[1]))
+        entered.clear()
+        go.clear()
+        del order[:]
+        th = threading.Thread(target=lambda: c.sync(a, "mod-A"), daemon=True)
+        th.start()
+        assert entered.wait(10)
+        view = {}
+        tv = threading.Thread(target=lambda: view.setdefault("r", m.export_view_data()), daemon=True)
+        tv.start()
+        t0 = time.perf_counter()
+        while not order and time.perf_counter() - t0 < hold_sec:
+            time.sleep(0.01)
+        seen = list(order)
+        go.set()
+        th.join(30)
+        tv.join(30)
+        assert not th.is_alive() and not tv.is_alive()
+        _ok(view["r"])
+        return seen
+
+    # 見込みがすぐ（窓 1 秒を 1 ms）: 描画データは確定を待つ（再合成を止めている間は組み立てに入らない）
+    monkeypatch.setattr(m, "RENDER_YIELD_SEC", 10.0)
+    assert run(0.001, 80, hold_sec=0.5) == [] and order == ["commit", "view"]
+    _same(c, a, "mod-A")
+    # 見込みが遠い（窓 1 秒を 100 秒）: 待たずに組み立てる。確定はその後
+    assert run(100.0, 80, hold_sec=10.0) == ["view"] and order == ["view", "commit"]
+    _same(c, a, "mod-A")
+
+
 def test_render_under_the_lock_after_repeated_edits(ara, tmp_path, monkeypatch):
     """作っている間に毎回編集が入る: RENDER_RETRIES 回作り直した後は、ロックを握ったまま作って必ず返す。"""
     m, a = ara

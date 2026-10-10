@@ -75,6 +75,7 @@ _renderers = collections.OrderedDict()      # ara_id → (鍵, RegionRenderer)
 _out_seq = [0]
 _render_gen = [0]               # _render・_renderers を捨てた回数（ロックの外で作った窓を、捨てた後の状態に書かない）
 RENDER_RETRIES = 2              # ロックの外で作っている間に版が変わったら、捨てて作り直す回数（超えたらロックを握って作る）
+_render_rate = {}               # ara_id → 前の再合成の速さ（窓 1 秒を作る秒。描画データが確定を待つかの見込みに使う）
 
 
 # ---------------------------------------------------------------- 共通
@@ -1016,12 +1017,14 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
                 # 作る窓が無い・作り直しが続いた: ロックを握ったまま作って確定する
                 _render_plan(plan, stat)
                 return _commit_plan(plan, stat, t_all)
-        _render_plan(plan, stat)                # ロックの外（このレンダラーのロックだけを握る）
-        with _srv._locked():
-            t = time.perf_counter()
-            if _plan_current(plan):
-                return _commit_plan(plan, stat, t_all, t)
-            stat["commit"] += time.perf_counter() - t
+        # ロックの外（このレンダラーのロックだけを握る）。確定までの間、描画データの組み立ては、もうすぐ終わるなら確定を先に通す
+        with _srv._render_flight(_render_eta(plan)):
+            _render_plan(plan, stat)
+            with _srv._locked():
+                t = time.perf_counter()
+                if _plan_current(plan):
+                    return _commit_plan(plan, stat, t_all, t)
+                stat["commit"] += time.perf_counter() - t
         stat["retries"] += 1                    # 作っている間に版が変わった: 作った窓を捨てて今の版から作り直す
 
 
@@ -1081,6 +1084,19 @@ def _dirty_plan(ara_id, since, backend, channels, max_sec):
             "st": st, "reset": reset, "todo": todo, "restore": restore, "gen": _render_gen[0]}
 
 
+def _render_eta(plan):
+    """ロックの外の再合成が終わるまでの見込みの秒（同じ修飾の前の再合成の速さから。分からなければ None）。"""
+    rate = _render_rate.get(plan["ara_id"])
+    if rate is None:
+        return None
+    total = 0.0
+    for wa, wb in plan["todo"]:
+        if total and total + (wb - wa) / plan["sr"] > plan["limit"]:
+            break
+        total += (wb - wa) / plan["sr"]
+    return 1.5 * rate * total + 0.01
+
+
 def _render_plan(plan, stat):
     """窓を max_sec まで再合成して plan に入れる（エンジンのロックを握らなくてよい。レンダラーのロックを握る）。"""
     rr, sr, todo = plan["rr"], plan["sr"], plan["todo"]
@@ -1104,8 +1120,11 @@ def _render_plan(plan, stat):
                 out_windows.append({"start_frame": int(wa), "frames": int(wb - wa), "byte_offset": int(byte)})
                 byte += buf.nbytes
             prep_sec = rr.prepare_sec - prep0      # 下ごしらえ（初回だけ。窓の再合成の中で作る）
+    took = time.perf_counter() - t_render - prep_sec
     stat["prepare"] += prep_sec
-    stat["render"] += time.perf_counter() - t_render - prep_sec
+    stat["render"] += took
+    if total > 0 and not os.environ.get(TEST_DELAY_ENV):
+        _render_rate[plan["ara_id"]] = took / total
     plan.update(done=done, out_windows=out_windows, chunks=chunks, rendered_sec=total)
 
 
