@@ -397,24 +397,29 @@ function interpStroke(sd, i) {
   return a[1] + (b[1] - a[1]) * (i - a[0]) / (b[0] - a[0]);
 }
 
-/** 鉛筆: (tSrc, midi) まで線を引く（前の点との間のフレームを埋める。戻って描いたら上書き）。 */
+/** 鉛筆: (tSrc, midi) まで線を引く（前の点との間のフレームを埋める。戻って描いたら上書き）。
+ *
+ *   前の点とこの点を結ぶ線分を、**各フレームの正確な時刻**で読む（フレームに丸めて後勝ちにすると、
+ *   描いた向きと逆へ最大で半フレームずれる）。同じフレームをまたがない短い動きは、次の点で線分が
+ *   そのフレームを越えるまで値を持たない（先端は画面の strokeTip が生の位置で見せる）。 */
 export function strokeTo(tSrc, midi) {
   const st = S.stroke;
   if (!st) return;
-  const i = frameIndex(tSrc);
-  const n = S.vd.f0.take_midi.length;
+  const f0 = S.vd.f0;
+  const f = (tSrc - f0.t0_sec) / f0.hop_sec;          // 小数のフレーム位置
+  const n = f0.take_midi.length;
   if (st.last) {
-    const { i: i0, m: m0 } = st.last;
-    const step = i >= i0 ? 1 : -1;
-    for (let k = i0; k !== i + step; k += step) {
-      if (k < 0 || k >= n) continue;
-      const u = i === i0 ? 1 : (k - i0) / (i - i0);
-      st.vals.set(k, m0 + (midi - m0) * u);
+    const { f: fa, m: ma } = st.last;
+    if (f !== fa) {
+      const lo = Math.ceil(Math.min(fa, f) - 1e-9);
+      const hi = Math.floor(Math.max(fa, f) + 1e-9);
+      for (let k = Math.max(0, lo); k <= Math.min(n - 1, hi); k++) st.vals.set(k, ma + (midi - ma) * (k - fa) / (f - fa));
     }
-  } else if (i >= 0 && i < n) {
-    st.vals.set(i, midi);
+  } else {
+    const k = Math.round(f);
+    if (k >= 0 && k < n) st.vals.set(k, midi);
   }
-  st.last = { i, m: midi };
+  st.last = { f, m: midi };
 }
 
 export function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }

@@ -354,7 +354,9 @@ function onMove(e) {
     return;
   }
   if (dr.type === 'stroke') {
-    strokeTo(toSource(T(px(e))), clamp(M(py(e)), ...pitchWorld()));
+    // 1 フレームの間に来た中間の点も全部使う（速く動かすと pointermove は間引かれる）
+    const evs = e.getCoalescedEvents?.();
+    for (const c of evs?.length ? evs : [e]) strokeTo(toSource(T(px(c))), clamp(M(py(c)), ...pitchWorld()));
     dr.moved = true;
     render();
     return;
@@ -457,7 +459,12 @@ function endDrag(e) {
   S.drag = null;
   dr.releasedAt = performance.now();
   if (dr.moved && (dr.type === 'note' || dr.type === 'edge')) markNoteEdited(dr.type === 'note' ? dr.ids : [dr.id]);   // 試聴は編集したノートだけ厳密に
-  if (dr.type === 'stroke') { finishStroke(); return; }
+  if (dr.type === 'stroke') {
+    // 離した位置も線の終わりに入れる（最後の pointermove の後に動いた分）
+    if (e.type === 'pointerup') strokeTo(toSource(T(px(e))), clamp(M(py(e)), ...pitchWorld()));
+    finishStroke();
+    return;
+  }
   if (dr.type === 'fade') { finishFade(dr); return; }
   if (dr.type === 'mute') { finishMute(dr); return; }
   if (dr.type === 'note' && dr.moved && dr.axis === 'pitch') {
