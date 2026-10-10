@@ -1,0 +1,144 @@
+// 子音・息（音程の無い区間）の操作を、音程ノートと揃える（2026-10-10 承認。docs/user-guide.md）。第 2 段。
+//
+//   (A7) 選んである子音を押しても選択を保つ。複数を選んで動かすと、選んだ区間（音程ノートも子音も）がまとめて横に動く。
+//        音高のドラッグは音程ノートだけ
+import { test, expect, _electron as electron } from '@playwright/test';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import * as M from './materials.js';
+
+M.skipUnlessReady(test, 'A');
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const APP = path.dirname(HERE);
+const REPO = path.dirname(APP);
+const TAKE = M.clip('A');          // 音程ノートに挟まれた無声（子音）と、息がある
+const PROJECT = path.join(REPO, 'projects', '_test-consonant-align');
+const USERDATA = `${PROJECT}-userdata`;
+
+let app;
+let win;
+const errors = [];
+let U = null;               // 子音 { id, prev, next, start, end }（前後が接した音程ノート）
+
+test.describe.configure({ mode: 'serial' });
+
+test.beforeAll(async () => {
+  const env = { ...process.env, ELECTRON_DISABLE_SECURITY_WARNINGS: '1' };
+  delete env.ELECTRON_RUN_AS_NODE;
+  fs.rmSync(PROJECT, { recursive: true, force: true });
+  fs.rmSync(USERDATA, { recursive: true, force: true });
+  app = await electron.launch({
+    args: [APP, '--take', TAKE, '--project-dir', PROJECT, '--user-data-dir', USERDATA, '--mute'], env,
+  });
+  win = await app.firstWindow();
+  win.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
+  win.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
+  await win.waitForFunction(() => window.__app?.ready(), null, { timeout: 240000 });
+  U = await win.evaluate(() => {
+    const ns = window.__app.S.notes;
+    for (let i = 1; i < ns.length - 1; i++) {
+      const [a, u, b] = [ns[i - 1], ns[i], ns[i + 1]];
+      if (u.kind === 'unvoiced' && a.kind === 'note' && b.kind === 'note' && u.end_sec - u.start_sec > 0.08
+        && Math.abs(u.start_sec - a.end_sec) < 1e-6 && Math.abs(b.start_sec - u.end_sec) < 1e-6) {
+        return { id: u.id, prev: a.id, next: b.id, start: u.start_sec, end: u.end_sec };
+      }
+    }
+    return null;
+  });
+});
+
+test.afterAll(async () => {
+  await app?.close();
+});
+
+async function settle() {
+  await win.waitForFunction(() => window.__app.idle(), null, { timeout: 120000 });
+}
+const body = (id) => win.locator(`#roll rect[data-nop="${id}"]:not([data-nop-edge])`).first();
+const vowel = (id) => win.locator(`#roll rect[data-note="${id}"]`).first();
+const sel = () => win.evaluate(() => window.__app.S.sel.slice());
+const startOf = (id) => win.evaluate((i) => window.__app.S.byId.get(i).edited_start_sec, id);
+const pitchOf = (id) => win.evaluate((i) => {
+  const n = window.__app.S.byId.get(i);
+  return n.edited_pitch_midi ?? n.pitch_midi;
+}, id);
+async function view(r) {
+  await win.evaluate((x) => {
+    window.__app.S.view = { t0: Math.max(0, x.start - 0.5), span: (x.end - x.start) + 1.0 };
+    window.__app.render();
+  }, r);
+}
+async function select(ids) {
+  await win.evaluate((s) => { window.__app.S.sel = s; window.__app.render(); }, ids);
+}
+async function drag(loc, dx, dy = 0) {
+  const b = await loc.boundingBox();
+  const x = b.x + b.width / 2; const y = b.y + b.height / 2;
+  await win.mouse.move(x, y);
+  await win.mouse.down();
+  await win.mouse.move(x + dx, y + dy, { steps: 10 });
+  await win.mouse.up();
+  await settle();
+}
+
+test('(A7) 選んである子音を押しても選択を保つ。まとめて横に動く（母音も子音も）。Ctrl+Z で戻る', async () => {
+  expect(U).not.toBeNull();
+  await view(U);
+  await select([U.id, U.prev]);
+  const [u0, p0, n0] = [await startOf(U.id), await startOf(U.prev), await startOf(U.next)];
+  // 押しただけ（動かさない）: 選択は 2 つのまま
+  const b = await body(U.id).boundingBox();
+  await win.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await win.mouse.down();
+  expect(await sel()).toEqual([U.id, U.prev]);
+  await win.mouse.up();
+  await settle();
+  expect(await sel()).toEqual([U.id, U.prev]);
+  await drag(body(U.id), 30);
+  const [u1, p1, n1] = [await startOf(U.id), await startOf(U.prev), await startOf(U.next)];
+  expect(u1 - u0).toBeGreaterThan(0.01);
+  expect(Math.abs((p1 - p0) - (u1 - u0))).toBeLessThan(0.002);   // 選んだ母音も同じだけ動く
+  expect(Math.abs(n1 - n0)).toBeLessThan(0.1);                  // 選んでいない隣は、境目の分だけ（縮む側）
+  expect(await sel()).toEqual([U.id, U.prev]);
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect(Math.abs((await startOf(U.id)) - u0)).toBeLessThan(1e-6);
+  expect(Math.abs((await startOf(U.prev)) - p0)).toBeLessThan(1e-6);
+});
+
+test('(A7) 選んでいない子音を押すと、そのひとつだけを選び直す。Shift で足す・外す', async () => {
+  await select([U.prev]);
+  await body(U.id).click();
+  expect(await sel()).toEqual([U.id]);
+  await select([U.prev]);
+  await body(U.id).click({ modifiers: ['Shift'] });
+  expect(await sel()).toEqual([U.prev, U.id]);
+  await body(U.id).click({ modifiers: ['Shift'] });
+  expect(await sel()).toEqual([U.prev]);
+});
+
+test('(A7) 母音を縦にドラッグすると、一緒に選んだ子音は動かない（音高は母音だけ）', async () => {
+  await select([U.id, U.prev]);
+  const [u0, p0, pitch0] = [await startOf(U.id), await startOf(U.prev), await pitchOf(U.prev)];
+  await drag(vowel(U.prev), 0, -24);
+  expect(Math.abs((await pitchOf(U.prev)) - pitch0)).toBeGreaterThan(0.3);
+  expect(Math.abs((await startOf(U.id)) - u0)).toBeLessThan(1e-6);
+  expect(Math.abs((await startOf(U.prev)) - p0)).toBeLessThan(1e-6);
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect(Math.abs((await pitchOf(U.prev)) - pitch0)).toBeLessThan(1e-6);
+});
+
+test('(A7) 子音を縦にドラッグしても動かない。理由を出す', async () => {
+  await select([U.id]);
+  const u0 = await startOf(U.id);
+  await drag(body(U.id), 0, -30);
+  expect(Math.abs((await startOf(U.id)) - u0)).toBeLessThan(1e-6);
+  await expect(win.locator('#status')).toContainText('子音・息は音程が無いので');
+});
+
+test('エラーなし', () => {
+  expect(errors).toEqual([]);
+});

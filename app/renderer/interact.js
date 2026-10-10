@@ -17,7 +17,7 @@
 //    はさみ（ノートをクリックで分割、境目をダブルクリックで結合。音素境界の近くは吸着、Alt で吸着なし）、
 //    ミュート（ノートをクリックで無音⇔戻す。なぞると、押したノートと同じ向きにそろえる。離したら 1 つの編集）。
 import {
-  LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
+  BLOCK_KINDS, LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
   setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited, toSource,
   totalSec, utteranceAt,
 } from './state.js';
@@ -86,6 +86,12 @@ function beginAudition(id) {
 /** 押した瞬間から試聴を始める（長押しの判定を待たない）。離すのが早くても、最短（releasePreview）は鳴る。 */
 function scheduleNoteHold(dr, id) {
   if (dr.trackId === S.session?.current) beginAudition(id);
+}
+
+/** つかんだ区間と一緒に動かす区間（選んである音程ノート・子音・息。つかんだものが選んであるなら、その全部）。 */
+function dragBlocks(id) {
+  const ids = S.sel.filter((x) => BLOCK_KINDS.has(S.byId.get(x)?.kind));
+  return ids.length ? ids : [id];
 }
 
 export function beginSelectedAudition({ once = false } = {}) {
@@ -193,7 +199,7 @@ function onDown(e) {
     const n = S.byId.get(d.nop);
     if (!n) return;
     if (e.shiftKey) S.sel = isSel(n.id) ? S.sel.filter((id) => id !== n.id) : [...S.sel, n.id];
-    else S.sel = [n.id];
+    else if (!isSel(n.id)) S.sel = [n.id];     // 選んである区間を押しても選択を保つ（まとめて動かせる）
     if (d.nopEdge !== undefined) {
       const dr = { type: 'edge', id: n.id, which: d.nopEdge, x0: e.clientX, moved: false, alt: e.altKey, want: 0, nop: true,
         trackId: S.session?.current, startedAt: performance.now() };
@@ -201,7 +207,7 @@ function onDown(e) {
       planFor(dr, { op: 'edge', note_id: n.id, side: d.nopEdge, detach: e.altKey });
       S.drag = dr;
     } else {
-      S.drag = { type: 'note', ids: [n.id], x0: e.clientX, y0: e.clientY, moved: false, anchor: n, axis: null,
+      S.drag = { type: 'note', ids: dragBlocks(n.id), x0: e.clientX, y0: e.clientY, moved: false, anchor: n, axis: null,
         want: 0, nop: true, shift0: e.shiftKey, trackId: S.session?.current };
     }
     svg.setPointerCapture(e.pointerId);
@@ -230,9 +236,8 @@ function onDown(e) {
     } else if (!isSel(id)) {
       S.sel = [id];
     }
-    let ids = S.sel.slice();
-    if (!ids.length) ids = [id];
-    ids = ids.filter((x) => S.byId.get(x)?.pitch_editable);
+    // 横に動かすときは選んだ区間（子音・息も）をまとめて。音高のときは音程ノートだけ（onMove で dr.pids に絞る）
+    const ids = dragBlocks(id);
     S.drag = { type: 'note', ids, x0: e.clientX, y0: e.clientY, moved: false, anchor: n,
       axis: null, want: 0, trackId: S.session?.current };
     svg.setPointerCapture(e.pointerId);
@@ -366,6 +371,8 @@ function onMove(e) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_PX) return;
       // 子音・息は横だけ（音程が無い。issue #35）
       dr.axis = dr.nop || Math.abs(dx) > Math.abs(dy) ? 'time' : 'pitch';
+      if (dr.nop && Math.abs(dy) > Math.abs(dx)) status('子音・息は音程が無いので、横にだけ動かせます');
+      if (dr.axis === 'pitch') dr.pids = dr.ids.filter((x) => S.byId.get(x)?.pitch_editable);
       clearTimeout(dr.holdTimer);
       if (dr.axis === 'time') { if (!ARA) stopPreview(); planFor(dr, { op: 'move', note_ids: dr.ids }); }   // ARA は鳴らし続ける（cents 0）
       else if (ARA) beginAudition(dr.anchor?.id);
@@ -384,7 +391,7 @@ function onMove(e) {
     // （shift_pitch は相対なので、足さないと見た目より前の分だけ高く／低く当たる）
     dr.deltas = new Map();
     const snapP = pitchSnapOn(e);
-    for (const id of dr.ids) {
+    for (const id of dr.pids) {
       const n = S.byId.get(id);
       if (!n) continue;
       const q = queuedPitch.get(id) || 0;
@@ -456,7 +463,7 @@ function endDrag(e) {
   clearTimeout(dr.holdTimer);
   S.drag = null;
   dr.releasedAt = performance.now();
-  if (dr.moved && (dr.type === 'note' || dr.type === 'edge')) markNoteEdited(dr.type === 'note' ? dr.ids : [dr.id]);   // 試聴は編集したノートだけ厳密に
+  if (dr.moved && (dr.type === 'note' || dr.type === 'edge')) markNoteEdited(dr.type === 'note' ? (dr.pids || dr.ids) : [dr.id]);   // 試聴は編集したノートだけ厳密に
   if (dr.type === 'stroke') { finishStroke(); return; }
   if (dr.type === 'fade') { finishFade(dr); return; }
   if (dr.type === 'mute') { finishMute(dr); return; }
