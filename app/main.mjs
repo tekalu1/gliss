@@ -816,6 +816,7 @@ ipcMain.handle('app.bootstrap', () => {
     view: s.view || null,
     keys: s.keys || {},               // キーボードショートカットの設定（既定と違うものだけ。issue #22）
     grid: s.grid || null,             // スナップのオン・オフとグリッドの細かさ（issue #18）
+    legend: s.legend !== false,       // 色の凡例（既定は出す。閉じたら覚える）
     preview: s.preview !== false,     // ノートをつかんでいる間に鳴らす（issue #27。既定は鳴らす）
     muted: MUTED,                     // 音を出さない起動（テスト）
     modelSizes: Object.fromEntries(sourcesFromEnvironment().map((s) => [s.id, s.size])),

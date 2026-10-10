@@ -69,7 +69,7 @@ const RH = 20;              // ルーラーの高さ
 const CLIP_T = 4;           // クリップの上端（行の中）
 const clipH = () => TH - 7;
 const { SCALE_H, LANE_H } = LAYOUT;
-const { TAKE, GUIDE, SEL, INST, VOCAL } = COLORS;
+const { TAKE, GUIDE, GUIDE_HI, SEL, INST, VOCAL } = COLORS;
 const ICON_MUTE = '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>';
 const ICON_GUIDE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg>';
 const ICON_CARET = '<svg class="cv" viewBox="0 0 10 10" aria-hidden="true"><path d="m2.5 4 2.5 2.5L7.5 4"/></svg>';
@@ -509,7 +509,7 @@ function drawLanes(vr) {
       + `<line x1="0" y1="${y + 0.5}" x2="${laneW}" y2="${y + 0.5}" stroke="#232326"/>`;
     const off = offsetOf(t);
     const x0 = tvX(off); const x1 = tvX(off + (t.duration_sec || 0));
-    // 色相 = トラックの種類（issue #37。モック v4）: 編集中 = 黄、ガイド = エディターと同じ濃いグレー、
+    // 色相 = トラックの種類（issue #37。モック v4）: 編集中 = 黄、ガイド = エディターと同じ青、
     // ほかのボーカル = 暗い黄、伴奏 = 背景に近い薄いグレー。聞こえないトラックは薄く
     const col = cur ? TAKE : isG ? GUIDE : t.kind === 'vocal' ? VOCAL : INST;
     const op = (cur ? 0.75 : 1) * (audible(t) ? 1 : 0.35);
@@ -572,8 +572,8 @@ function drawLanes(vr) {
     const w = 38;
     const tx = clamp(Math.max(x0, 0) + 4, 0, Math.max(0, laneW - w));
     const ty = i * TH + CLIP_T + 2;
-    s += `<g data-gtag="${esc(t.id)}" pointer-events="none"><rect x="${f1(tx)}" y="${ty}" width="${w}" height="14" rx="7" fill="#1c1c1f" fill-opacity=".9" stroke="#4a4a50"/>`
-      + `<text x="${f1(tx + w / 2)}" y="${ty + 10.5}" font-size="10" text-anchor="middle" fill="#b4b4ba">ガイド</text></g>`;
+    s += `<g data-gtag="${esc(t.id)}" pointer-events="none"><rect x="${f1(tx)}" y="${ty}" width="${w}" height="14" rx="7" fill="#1c1c1f" fill-opacity=".9" stroke="${GUIDE}" stroke-opacity=".7"/>`
+      + `<text x="${f1(tx + w / 2)}" y="${ty + 10.5}" font-size="10" text-anchor="middle" fill="${GUIDE_HI}">ガイド</text></g>`;
   });
   // 下で表示している範囲（レーンをドラッグ中はその範囲）
   const ci = R.findIndex((t) => t.id === curId);

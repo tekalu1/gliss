@@ -16,6 +16,7 @@ import {
 import {
   G as GRID, barsMode, loadGrid, snapTime, tempo as curTempo, ticks,
 } from './grid.js';
+import { loadLegend } from './legend.js';
 import { closeTempoPop, installTempo, openTempoPop, tempoEditing } from './tempo.js';
 import { install, jumpToUtterance, openLyrics, openTr, setTool } from './interact.js';
 import {
@@ -696,6 +697,7 @@ async function boot() {
   if (!ARA) setModelSizes(b.modelSizes);
   loadOverrides(b.keys);          // キーボードショートカットの設定（ユーザー設定。issue #22）
   loadGrid(b.grid);               // スナップのオン・オフとグリッドの細かさ（ユーザー設定。issue #18）
+  loadLegend(b.legend);           // 色の凡例を出すか（閉じたら覚える）
   // つかんだノートを鳴らす（ユーザー設定。issue #27）。プラグインは EditorRenderer が音を出せるようになるまで既定でオフ
   setPreviewEnabled(ARA ? b.preview === true : b.preview !== false, { save: false });
   renderToolbar();                // ツールチップとメニューバーの表記を設定に合わせる
