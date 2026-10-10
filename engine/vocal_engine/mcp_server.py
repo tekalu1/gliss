@@ -14,6 +14,7 @@ MCP クライアント側の制約に合わせてある:
 起動: `python -m vocal_engine.mcp`
 """
 import contextlib
+import copy
 import functools
 import inspect
 import os
@@ -32,6 +33,7 @@ from .analysis.phonemes import get_phonemes as _get_phonemes
 from .audio import write_wav
 from .project import Project, ProjectError, ProjectConflict
 from .project.model import Target
+from .project.store import recorded_estimator
 from .render.base import resolve_backend_name
 from .render.pipeline import Renderer, segments_for
 from .view import render_view as _render_view
@@ -68,10 +70,15 @@ def _invalidate_renderer():
     _state["region"] = {}
 
 
-def _renderer(backend="praat"):
+def _renderer(backend="praat", p=None):
     # キーは実際に使うバックエンド名（praat が使えず psola に落ちたとき、"praat" と "psola" を
     # 交互に頼まれても同じレンダラを使い回し、prepare をやり直さない）
+    # p: 再合成するプロジェクト（ジョブが呼ぶとき）。編集対象でなければ使い回さずに作る（`_region_renderer`）
     name = resolve_backend_name(backend)
+    if p is not None and _state.get("project") is not p:
+        x, sr = p.audio("take")
+        f0r = p.take_f0
+        return Renderer(x, sr, f0r.f0, f0r.voiced, f0r.hop_s, backend=name)
     p = _project()
     if isinstance(p, Project):
         p._check_audio_versions()
@@ -86,6 +93,23 @@ def _renderer(backend="praat"):
         _state["renderer_backend"] = name
         _state["renderer_audio_sig"] = audio_sig
     return _state["renderer"]
+
+
+def _region_renderer(p, backend="praat", channels="mono"):
+    """p の区間の再合成器（`RegionRenderer`）。p が編集対象なら `_state["region"]` のものを使い回す。
+
+    ジョブはツールを呼んだ時の p を持って後で走る。中継（`ara_relay.execute`）は修飾を切り替えてツールを呼び、
+    すぐ画面の編集対象に戻すので、ジョブが走る時の `_state` は別の修飾のものになっている。そのときは使い回しを
+    見ずに作り、`_state` にも入れない（別の修飾の音と F0 で再合成して測らない）。"""
+    from .render.region import RegionRenderer
+    key = (resolve_backend_name(backend), channels)
+    mine = _state.get("project") is p
+    rr = _state["region"].get(key) if mine else None
+    if rr is None:
+        rr = RegionRenderer.for_project(p, backend=backend, channels=channels)
+        if mine:
+            _state["region"] = {key: rr}
+    return rr
 
 
 def _range(start_sec=None, end_sec=None):
@@ -193,7 +217,8 @@ HISTORY_TOOLS = {
     "set_lyrics", "import_lyrics", "shift_pitch", "set_pitch_curve", "set_transition", "split_note", "merge_notes",
     "move_note", "stretch", "move_boundary", "correct_to_guide", "apply_plan", "set_connection",
     "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
-    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "make_score_guide",
+    "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "set_track_guide",
+    "make_score_guide",
     "split_track", "join_track",
     "mute_track_range", "open_project",
     "new_project", "load_project", "save_project", "apply_edits",
@@ -687,6 +712,16 @@ def analyze_take(force: bool = False, estimator: str = None,
     p = _project()
     p.reload_if_changed()
     est = p.f0_estimator(estimator)
+    # Gliss の第 2 版で解析した曲を最新版で解析し直すのは、force と estimator を両方明示したときだけ
+    # （force だけでは版を保つ。ノートの区切りと ID が変わり、ノート対象の編集の当たり方が変わるため）
+    latest = bool(force and estimator is not None)
+    # 方式・版が替わる（ノートの区切りと ID が変わる）: 解析し直す前に、ノート対象の編集を今の解析の区間の
+    # 範囲対象へ付け替える（音は変わらない。替えた後に同じ番号の別のノートへ当たらないように）
+    retarget = None
+    ta = (p.analysis or {}).get("take") or {}
+    if ta and not p._same_take_estimator(recorded_estimator(p.analysis), ta.get("estimator_version"),
+                                         est, latest):
+        retarget = p.retarget_note_targets()
     est_sec = p.duration_sec * (0.45 * (13 if confidence_sweep else 1))
     if p.guide:
         est_sec += p.duration_sec * 1.2      # DTW の分
@@ -699,6 +734,10 @@ def analyze_take(force: bool = False, estimator: str = None,
     # （issue #63。画面は常に background で呼ぶので、準備済みのトラックでも 200 ms の確認を待っていた）
     cached = default and p.analysis_cached()
     tgt = mcp_tracks.prep_target(p)         # (セッション, トラック)。セッションのトラックでなければ None
+    # 頼まれたときのトラック。中継（ara_relay）は選んだ修飾へ編集対象を一時的に切り替えて呼び、すぐ戻すので、
+    # ジョブが終わるときには編集対象からこのトラックを引けない（方式を覚える先を、ここで決めておく）
+    own_s, own_tid = mcp_tracks._session_of(p)
+    owner = (own_s, own_s.track(own_tid)) if own_s is not None else None
     if cached and tgt is not None:
         sig = prep.track_sig(*tgt)
         pdir = tgt[0].project_dir_of(tgt[1])
@@ -732,9 +771,12 @@ def analyze_take(force: bool = False, estimator: str = None,
                     ctx = prep.exclusive(q.dir) if tgt is not None else contextlib.nullcontext()
                     with ctx:
                         q.analyze(force=force, estimator=est, sweep=confidence_sweep,
-                                  cancel=cancel, progress=report, commit=commit)
+                                  cancel=cancel, progress=report, commit=commit, latest=latest)
                         # 明示した方式をそのトラックの方式にする（準備が譲っている間に。ここを出たら準備が再開する）
-                        mcp_tracks.remember_estimator(q, est)
+                        mcp_tracks.remember_estimator(q, est, target=owner)
+                if default and estimator is not None:
+                    # 今の方式と同じ方式の明示: 方式はそのまま、利用者が明示した印だけ付ける（方式探しで戻さない）
+                    mcp_tracks.mark_explicit(q, target=owner)
                 break
             except CacheBroken:
                 # 壊れたファイルは外し、印も取り消した（`Project._cache_broken`）。1 回ごとに 1 つ外れる
@@ -742,9 +784,19 @@ def analyze_take(force: bool = False, estimator: str = None,
                     raise
         _invalidate_renderer()
         t2 = mcp_tracks.prep_target(q)
+        if t2 is None and tgt is not None and os.path.normcase(q.dir) == os.path.normcase(p.dir):
+            t2 = tgt                         # 中継のジョブ: 編集対象が戻った後でも、頼まれたトラックに印を付ける
         if default and t2 is not None:
             prep.mark_ready(t2[0], t2[1], q)
-        return _summary_of_analysis(q)
+        out = _summary_of_analysis(q)
+        if retarget is not None:
+            ids = sorted({nid for _e, nid in q._missing_note_targets()})
+            # 作った解析を確かめられずに番号のまま残した編集（unverified）も、当たらない恐れのある編集として返す
+            out.update(retargeted=retarget["retargeted"], retarget=retarget,
+                       missing_note_targets={"count": len(ids), "ids": ids[:20],
+                                             "unverified": len(retarget["unverified"]),
+                                             "unverified_edits": retarget["unverified"][:20]})
+        return out
 
     def joined(cancel, report, commit):
         for attempt in range(4):
@@ -1542,10 +1594,10 @@ def _replan(p, plan):
 
 @_tool
 def list_connections(start_sec: float = None, end_sec: float = None) -> dict:
-    """隣り合う音程ノートの**接続 / 切り離し**と、**つなぎのなだらかさ**の一覧。
+    """隣り合う区間（音程ノート・子音・息。種類によらない）の**接続 / 切り離し**と、**つなぎのなだらかさ**の一覧。
 
     接続 = 境目を共有（片方を縮めると隣が伸びる）。切り離し = 隙間が増減する。
-    既定: 間に何も無い／無声（子音）だけで 0.30 秒未満なら接続、息・無音を挟めば切り離し。
+    既定: 接している（隙間 1e-6 秒以下）ときだけ接続、離れていれば切り離し。種類によらず同じ規則。
     `default` と違うものは `set_connection` か画面（Alt+ドラッグ・吸着）で変えたもの。
     """
     from .project import pitch as PI
@@ -1555,12 +1607,12 @@ def list_connections(start_sec: float = None, end_sec: float = None) -> dict:
     all_trs = PI.transitions(p)
     trs = {(t.a, t.b): t for t in all_trs if t.kind == "boundary"}
     rows = []
-    for a, b, c, dflt in TM.connections(p):
+    for a, b, c, dflt in TM.block_connections(p):
         if start_sec is not None and b.start_sec < float(start_sec):
             continue
         if end_sec is not None and a.end_sec > float(end_sec):
             continue
-        row = {"a": a.id, "b": b.id, "connected": c, "default": dflt,
+        row = {"a": a.id, "b": b.id, "a_kind": a.kind, "b_kind": b.kind, "connected": c, "default": dflt,
                "gap_ms": round((b.start_sec - a.end_sec) * 1000, 1),
                "at_sec": round(a.end_sec, 4)}
         t = trs.get((a.id, b.id))
@@ -1593,14 +1645,14 @@ def _tr_row(t):
 
 @_tool
 def set_connection(note_a: str, note_b: str, connected: bool, author: str = "ai") -> dict:
-    """隣り合う 2 つのノート（a の次が b）の接続を変える。**音は変わらない**（次の編集の動き方が変わる）。"""
+    """隣り合う 2 つの区間（音程ノート・子音・息。a の次が b）の接続を変える。**音は変わらない**（次の編集の動き方が変わる）。"""
     from .project import timing as TM
     p = _project()
     p.reload_if_changed()
-    ns = TM.pitched_notes(p)
+    ns = TM.blocks(p)
     ix = {n.id: i for i, n in enumerate(ns)}
     if note_a not in ix or note_b not in ix or ix[note_b] != ix[note_a] + 1:
-        raise ProjectError("%s の次の音程ノートが %s ではない（list_connections で確認）"
+        raise ProjectError("%s の次の区間が %s ではない（list_connections で確認）"
                            % (note_a, note_b))
     rm, add = TM.connection_specs(p, [(note_a, note_b, bool(connected))])
     cs = p.apply_changes(rm, add, author=author, label="%s｜%s を%s" % (
@@ -1908,7 +1960,7 @@ def render_preview(start_sec: float = None, end_sec: float = None, backend: str 
 
 def _preview(p, backend, t0, t1, name):
     """render_preview の中身。"""
-    r = _renderer(backend)
+    r = _renderer(backend, p)
     segs = segments_for(p)
     y, info = r.render_range(t0, t1, segs)
     out = os.path.join(p.sub("renders"),
@@ -1938,12 +1990,8 @@ def render_region(start_sec: float = None, end_sec: float = None, backend: str =
     p = _project()
     p.reload_if_changed()                   # 画面など外で足された編集も当てる
     t0, t1 = _range(start_sec, end_sec)
-    from .render.region import RegionRenderer, render_region as _rr
-    key = (resolve_backend_name(backend), channels)
-    rr = _state["region"].get(key)
-    if rr is None:
-        rr = RegionRenderer.for_project(p, backend=backend, channels=channels)
-        _state["region"] = {key: rr}
+    from .render.region import render_region as _rr
+    rr = _region_renderer(p, backend, channels)
     with _prep_yield():
         y, info = _rr(p, t0, t1, renderer=rr)
     out = path or os.path.join(p.sub("renders"), "region-%s-%s.wav"
@@ -1955,36 +2003,122 @@ def render_region(start_sec: float = None, end_sec: float = None, backend: str =
     return _ok(path=out, **info)
 
 
+_AUDITION_KEEP_SEC = 30
+_AUDITION_MAX_FILES = 1024
+_AUDITION_MAX_BYTES = 512 * 1024 * 1024
+
+
+def _audition_output_path(project, frames):
+    """返却済みの試聴WAVを上書きせず、未読の可能性がある間は消さない。"""
+    directory = project.sub("renders")
+    now = time.time()
+    files = []
+    for entry in os.scandir(directory):
+        if not (entry.name.startswith("audition-") and entry.name.endswith(".wav")):
+            continue
+        try:
+            st = entry.stat()
+            if now - st.st_mtime >= _AUDITION_KEEP_SEC:
+                try:
+                    os.unlink(entry.path)
+                    continue
+                except OSError:
+                    pass  # native が開いているファイルは保持し、容量に数える
+            files.append(st.st_size)
+        except FileNotFoundError:
+            continue
+    needed = 44 + int(frames) * 4
+    if (len(files) >= _AUDITION_MAX_FILES
+            or sum(files) + needed > _AUDITION_MAX_BYTES):
+        raise ProjectError("試聴の一時WAVが上限に達した。古いファイルの保持期限後に再試行する")
+    return os.path.abspath(os.path.join(directory, "audition-%s.wav" % uuid.uuid4().hex))
+
+
 @_tool
 def render_audition(note_id: str, cents: float = 0.0, start_sec: float = None,
                     end_sec: float = None, backend: str = "praat") -> dict:
     """**画面向け**: つかんだノートのプレビュー音（ノートをドラッグしている間に鳴らす。issue #27）。
 
     ノートを `cents` だけ動かした**つもり**で [start_sec, end_sec)（既定はノートの範囲）を再合成し、
-    モノラル 32 bit float の WAV（プロジェクトの renders/audition.wav。毎回上書き）のパスを返す。
-    **プロジェクトは書き換えない**（編集も取り消しの履歴も増えない）。中身は、確定した編集に
-    `shift_pitch(cents, note_id)` を足したときの `render_region` と同じ。LLM が聴くなら render_preview を使う。
+    モノラル 32 bit float の WAV（プロジェクトの renders/audition-*.wav。要求ごとに一意）のパスを返す。
+    **プロジェクトは書き換えない**（編集も取り消しの履歴も増えない）。ARAの同版PCMがあればその
+    範囲を厳密に返す。長いpitch編集の局所再合成は全長窓と位相が違う場合がある。
+    LLM が聴くなら render_preview を使う。
     """
     p = _project()
-    p.reload_if_changed()
+    if p.reload_if_changed():
+        _invalidate_renderer()
     from .render.region import RegionRenderer, audition as _aud
+    from .mcp_ara import _rev_parts, audition_pcm, audition_region, audition_renderer, audition_segs
     name = resolve_backend_name(backend)
-    # 再生（render_tracks）が作った下ごしらえがあれば使い回す（チャンネルは問わない）。無ければモノラルで作る
-    rr = _state["region"].get((name, "mono")) or _state["region"].get((name, "all"))
-    if rr is None:
-        rr = RegionRenderer.for_project(p, backend=backend, channels="mono")
-        _state["region"][(name, "mono")] = rr
     with _prep_yield():
-        y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr)
+        p.ensure_analyzed()
+        view_rev = p.view_key()
+        asig, erev = _rev_parts(p)
+        rev = "%s:%s" % (asig, erev)
+        track_id = _state.get("track")
+        session = _state.get("session")
+        ara_id = None
+        if session is not None and track_id is not None:
+            ara_id = session.track(track_id).get("ara_id")
+        cached = None
+        segs = None
+        cache_t0 = time.perf_counter()
+        if ara_id and abs(float(cents)) < 1e-6:
+            note = p.note(note_id)
+            sr = int(p.take["sr"])
+            ia = max(0, int(round((note.start_sec if start_sec is None else float(start_sec)) * sr)))
+            ib = min(int(p.take["frames"]), int(round(
+                (note.end_sec if end_sec is None else float(end_sec)) * sr)))
+            if ib <= ia:
+                raise ValueError("範囲が不正（start >= end）")
+            cached = audition_pcm(ara_id, p, name, asig, rev, ia, ib)
+            if cached is None:
+                segs = audition_segs(ara_id, p, name, asig, rev)      # 窓の外・端にかかる範囲: 層は作り直さない
+        if cached is not None:
+            y, (wa, wb) = cached
+            cache_sec = round(time.perf_counter() - cache_t0, 4)
+            info = {"sr": sr, "frames": ib - ia, "start_sec": round(ia / sr, 6),
+                    "cents": 0.0, "backend": name,
+                    "rendered_windows_sec": [[round(wa / sr, 4), round(wb / sr, 4)]],
+                    "timing_sec": {"segments": 0.0, "prepare": 0.0, "render": cache_sec,
+                                   "total": cache_sec, "ara_pcm_reused": True}}
+        else:
+            # ARAの再生用レンダラが同じ解析版なら共有する。無ければ単体アプリのキャッシュを使う。
+            rr = audition_renderer(ara_id, p, name, asig) if ara_id else None
+            if rr is None:
+                rr = (_state["region"].get((name, "mono", "audition"))
+                      or _state["region"].get((name, "mono"))
+                      or _state["region"].get((name, "all")))
+                if rr is not None and (rr.f0r is not p.take_f0 or rr.n_frames != int(p.take["frames"])):
+                    rr = None
+            if rr is None:
+                rr = RegionRenderer.for_project(p, backend=backend, channels="mono",
+                                                audition_local=True)
+                _state["region"][(name, "mono", "audition")] = rr
+            region = None
+            if ara_id and abs(float(cents)) >= 1e-6:     # ピッチをドラッグしている間: 曲全体の層を当てない（音は同じ）
+                n = p.note(note_id)
+                region = audition_region(ara_id, p, n.start_sec if start_sec is None else float(start_sec),
+                                         n.end_sec if end_sec is None else float(end_sec))
+            y, info = _aud(p, note_id, cents, start_sec, end_sec, renderer=rr, segs=segs, region=region)
+        if p.view_key() != view_rev or _rev_parts(p) != (asig, erev):
+            raise ProjectConflict("試聴中に解析または編集の版が変わった。結果を破棄した")
     if y.ndim == 2 and y.shape[1] > 1:
         y = y.mean(axis=1)
-    out = os.path.abspath(os.path.join(p.sub("renders"), "audition.wav"))
+    out = _audition_output_path(p, len(y))
     import soundfile as sf
     tmp = out + ".tmp.wav"
-    sf.write(tmp, np.asarray(y, dtype="float32").reshape(-1), info["sr"], subtype="FLOAT")
-    os.replace(tmp, out)
+    try:
+        sf.write(tmp, np.asarray(y, dtype="float32").reshape(-1), info["sr"], subtype="FLOAT")
+        os.replace(tmp, out)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     return _ok(path=out, sr=info["sr"], frames=info["frames"], start_sec=info["start_sec"],
                note_id=note_id, cents=info["cents"], backend=info["backend"],
+               rev=rev, view_rev=view_rev, track_id=track_id, ara_id=ara_id,
+               source_id=(p.take or {}).get("source_id"),
                rendered_windows_sec=info["rendered_windows_sec"], timing_sec=info["timing_sec"])
 
 
@@ -2072,7 +2206,8 @@ def export_view_data(start_sec: float = None, end_sec: float = None,
     """
     p = _project()
     p.reload_if_changed()
-    return _ok(**_export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path))
+    out = _export_view_data(p, start_sec, end_sec, peak_ms=peak_ms, path=path)
+    return _ok(**out, view_rev=p.view_key())
 
 
 @_tool
@@ -2086,7 +2221,7 @@ def remeasure(start_sec: float = None, end_sec: float = None, backend: str = "pr
 
     def work():
         from .analysis.notes import segment_notes
-        r = _renderer(backend)
+        r = _renderer(backend, p)
         segs = segments_for(p)
         y, info = r.render_range(t0, t1, segs)
         sr = p.take["sr"]
@@ -2307,11 +2442,44 @@ def engine_info(reload_addons: bool = False) -> dict:
 
 
 @_tool
+def set_render_version(version: int = None, apply: bool = False) -> dict:
+    """選んでいる曲（トラック。ARA では選んでいる修飾）の**描画の版**（保存した編集から音を作る仕組みの版）を見る・替える。
+
+    曲は作ったときの描画の版のまま鳴る（0.1.0-beta.6 までに作った曲・その版のアーカイブは版 1。利用者が聴いて了承した音を、
+    Gliss の版を上げただけで変えない）。新しく作る曲・音の編集の無い曲（歌詞だけの曲も）に最初の編集を足したときは最新の版。編集のある曲に
+    編集を足しても版は変わらない（同じトラックの中で古い描画と新しい描画を混ぜない）。最新の版に上げるのはこのツールで明示したときだけ。
+    版 2: ピッチ曲線を重ねたときのつなぎ目で、隣のノートのずらし量が漏れない（版 1 は漏れることがある）。
+    version: 替える先（1 か 2。省くと最新）。apply: false（既定）は替えずに、替えたら音が変わる所だけを返す。true で替える
+      （project.json・ARA のアーカイブに残る。取り消しの履歴には入れない。戻すには version を明示して呼ぶ）。
+    返り値: render_version（今の版。apply したら替えた後）・latest・target・changes（[{start_sec, end_sec, max_cents}]。
+    ずらし量が 1 セント以上変わる区間。素材の秒。最大 50 件）・changed_sec（その合計）・applied。
+    """
+    from .project.model import RENDER_VERSION
+    from .project.pitch import render_version_changes
+    p = _project()
+    p.reload_if_changed()
+    target = RENDER_VERSION if version is None else int(version)
+    if not 1 <= target <= RENDER_VERSION:
+        raise ProjectError("version は 1〜%d" % RENDER_VERSION)
+    changes = render_version_changes(p, target)
+    applied = False
+    if apply and target != p.render_version:
+        log.get().info("描画の版を %d → %d（明示。音が変わる区間 %d）", p.render_version, target, len(changes))
+        p.render_version = target
+        p.save()
+        _invalidate_renderer()
+        applied = True
+    return _ok(render_version=p.render_version, latest=RENDER_VERSION, target=target, changes=changes[:50],
+               changed_sec=round(sum(c["end_sec"] - c["start_sec"] for c in changes), 3), applied=applied)
+
+
+@_tool
 def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict:
-    """ピッチ（F0）検出の方式を選ぶ（このエンジン全体。画面の「ピッチ検出の方式」）。曲は変えない。
+    """ピッチ（F0）検出の方式を選ぶ。変更範囲は scope で指定する。
 
     estimator: "rmvpe"（既定。重みは別に取得）/ "gliss"（Gliss の F0 モデル。同梱）/ "praat"。
-    scope: "all"（画面のエンジンの既定）= この後の analyze_take・裏の準備がこの方式で解析する
+    scope: "current" = 選択中のトラック（ARA では現在の修飾）だけに方式を明示する。履歴で戻せる。
+      "all"（画面のエンジンの既定）= この後の analyze_take・裏の準備がこの方式で解析する
       （前に別の方式で解析した曲も、トラックで明示した方式も、この方式で解析し直す）。選ぶまでは、曲ごとに前に解析した
       方式（まだ解析していない曲は既定の "rmvpe"）で解析する。
       "default"（DAW のプラグインのエンジンの既定）= 方式の決まっていない新しい修飾だけの既定にする。前に解析した方式・
@@ -2321,26 +2489,76 @@ def set_f0_estimator(estimator: str = "rmvpe", scope: str | None = None) -> dict
     """
     p = _project(required=False)
     scope = scope or ("default" if bridge.is_ara() else "all")
-    if scope not in ("all", "default"):
-        raise ProjectError("scope は all か default（%r は知らない）" % scope)
+    if scope not in ("all", "default", "current"):
+        raise ProjectError("scope は all、default、current のいずれか（%r は知らない）" % scope)
 
     def now():
         return p.f0_estimator() if p is not None else f0mod.resolve_estimator()
 
-    before, chosen = now(), f0mod.chosen_estimator()
-    if scope == "default":
-        f0mod.set_default_estimator(estimator)
-        cleared = False
-    else:
-        f0mod.set_preferred_estimator(estimator)
-        cleared = _mcp_tracks.forget_track_estimators()  # analyze_take(estimator=…) で明示した方式は、選び直しで全体の方式に戻る
-    effective = now()
-    if effective != before or f0mod.chosen_estimator() != chosen or cleared:
-        _mcp_tracks.reschedule_prep()            # 裏の準備の組み合わせ（方式を含む）を入れ直す
+    s = _mcp_tracks._session(required=scope == "current") if scope != "default" else None
+    tid = _mcp_tracks.current_track_id() if scope == "current" else None
+    track_ids = {tid} if tid else None
+    guard = (_mcp_tracks._estimator_exclusive(s, track_ids) if s is not None
+             else contextlib.nullcontext())
+    with guard:
+        # 実行中だった旧方式の準備が離れてから、解析・方式の snapshot を読む。
+        if p is not None:
+            p.reload_if_changed()
+        if scope == "current" and (tid is None or s.track(tid)["kind"] != "vocal"):
+            raise ProjectError("方式を変更するボーカルトラックが選ばれていない")
+        before, chosen = now(), f0mod.chosen_estimator()
+        # 実効の方式が替わるトラックは、次の解析でノートの ID が振り直される。替える前の解析を覚えておき、
+        # 替えた後にノート対象の編集をその区間の範囲対象へ付け替える（音は変わらない）
+        eff_before = (_mcp_tracks.estimators_now(s, p, track_ids) if scope != "default" else {})
+        retarget = {}
+        history_before = (_mcp_tracks.estimator_snapshot(s, track_ids) if s is not None and
+                          (scope == "current" or not s.ara) else None)
+        old_tracks = copy.deepcopy(s.tracks) if history_before is not None else None
+        old_history = copy.deepcopy(s.history) if history_before is not None else None
+        old_marks = dict(s.history_marks) if history_before is not None else None
+        try:
+            if scope == "default":
+                f0mod.set_default_estimator(estimator)
+                cleared = False
+            elif scope == "all":
+                f0mod.set_preferred_estimator(estimator)
+                cleared = _mcp_tracks.forget_track_estimators()  # 明示した方式は全体の方式に戻る
+            else:
+                if estimator not in f0mod.ESTIMATORS:
+                    raise ProjectError("estimator は %s のどれか（%r は知らない）" %
+                                       (" / ".join(f0mod.ESTIMATORS), estimator))
+                t = s.track(tid)
+                t["estimator"] = estimator
+                t[_mcp_tracks.EXPLICIT_KEY] = True  # 利用者が明示した（ara_render_dirty の方式探しで戻さない）
+                if p is not None:
+                    p.estimator_pref = estimator
+                cleared = old_tracks != s.tracks
+            effective = now()
+            if eff_before:
+                retarget = _mcp_tracks.retarget_switched(s, p, eff_before, track_ids)
+            if effective != before or f0mod.chosen_estimator() != chosen or cleared:
+                if history_before is not None:
+                    history_after = _mcp_tracks.estimator_snapshot(s, track_ids)
+                    _, dropped = s.record_estimator(_mcp_tracks.current_track_id(),
+                                                    history_before, history_after)
+                    _mcp_tracks._discard_dropped(s, dropped)
+                    s.save()
+                # 裏の準備は session.json を読み直す。保存した方式で入れ直す。
+                _mcp_tracks.reschedule_prep()
+        except BaseException:
+            if history_before is not None:
+                f0mod.set_preferred_estimator(chosen)
+                s.tracks, s.history, s.history_marks = old_tracks, old_history, old_marks
+                if p is not None:
+                    tid = _mcp_tracks.current_track_id()
+                    p.estimator_pref = s.track(tid).get("estimator") if tid else None
+                s.save()
+            raise
     return _ok(estimator=f0mod.preferred_estimator(), effective=effective,
                estimators=list(f0mod.ESTIMATORS),
                rmvpe_model_found=f0mod.rmvpe_available(),
-               changed=effective != before)
+               changed=effective != before,
+               retargeted=sum(r["retargeted"] for r in retarget.values()), retarget=retarget or None)
 
 TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllable,
          inspect_lyrics_score, import_lyrics, analyze_take, get_pitch, list_notes, list_deviations,
@@ -2352,7 +2570,8 @@ TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllabl
          render_preview, render_region, render_audition, render_view, export_wav,
          export_view_data, remeasure,
          list_changes,
-         get_job, cancel_job, prep_status, pause_prep, engine_info, set_f0_estimator]
+         get_job, cancel_job, prep_status, pause_prep, engine_info, set_f0_estimator,
+         set_render_version]
 
 # トラック（セッション。issue #7）。mcp_tracks はこのモジュールの _tool などを使うので最後に読む
 from . import mcp_tracks as _mcp_tracks   # noqa: E402

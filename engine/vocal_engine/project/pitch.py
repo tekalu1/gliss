@@ -58,7 +58,7 @@ import numpy as np
 
 from .. import log
 from ..analysis.f0 import hz_to_midi
-from .model import Target
+from .model import RENDER_VERSION, Target
 
 DEFAULT_VALUE = 0.5            # なだらかさの既定（自動）
 DEFAULT_AUTO_SEC = 0.08        # 原音に段差が無い境目の自動の幅
@@ -72,6 +72,7 @@ EPS_CENTS = 0.1               # これより小さい差は段差として扱わ
 MATCH_TOL_SEC = 5e-4          # なだらかさの値を段差の時刻に引くときの許容
 AUTO_CACHE_MAX = 4096         # 自動の幅のキャッシュの件数の上限（最近使ったもの優先）
 PITCH_KINDS = ("pitch_shift", "pitch_curve")
+CLIP_TOL_SEC = 1e-6           # 層の Segment をつなぐとき、曲線の点をつなぎ目で切る許容（`_clip_curve`）
 
 
 class PitchError(RuntimeError):
@@ -316,7 +317,9 @@ def transitions(project, overrides=None, base=None):
         return tr
 
     out = []
-    for a, b, conn, _ in connections(project, overrides):
+    # つなぎの相手は、これまでの曲の音を変えないよう beta.10 までの既定（子音をはさんだ短い隙間も）で決める。
+    # タイミング編集の接続（既定は接しているときだけ）とは別
+    for a, b, conn, _ in connections(project, overrides, legacy=True):
         if not conn:
             continue
         d = sum(j for _, j in base.jumps(a.end_sec, b.start_sec))
@@ -678,8 +681,10 @@ def _slice(seg, a, b):
                    silence_sec=0.0, gain=seg.gain)
 
 
-def apply_layers(segs, lay):
-    """Segment 列に層を当てる。窓の中の Segment はずらし量を点列（curve_points）にする。"""
+def apply_layers(segs, lay, render_version=RENDER_VERSION, region=None):
+    """Segment 列に層を当てる。窓の中の Segment はずらし量を点列（curve_points）にする。
+    render_version: 描画の版（`model.RENDER_VERSION`。1 なら層の Segment のつなぎ目で曲線の点を切らない = 0.1.0-beta.6 までの音）。
+    region: (頭, 尻)。範囲に掛からない Segment は層を当てずに返す（範囲の中は省かないときと同じ。`layered_segments`）。"""
     from ..render.pipeline import Segment
     wins = lay.windows()
     if not wins:
@@ -726,7 +731,7 @@ def apply_layers(segs, lay):
 
     res = []
     for s in out:
-        if s.silence_sec > 0 or not inside(s):
+        if s.silence_sec > 0 or not inside(s) or (region is not None and (s.end_sec < region[0] or s.start_sec > region[1])):
             res.append(s)
             continue
         a, b = s.start_sec, s.end_sec
@@ -741,7 +746,7 @@ def apply_layers(segs, lay):
         s.cents = 0.0
         s._layer = True
         res.append(s)
-    return _join_layer_pieces(res)
+    return _join_layer_pieces(res, clip=render_version >= 2)
 
 
 def _as_curve(s):
@@ -751,14 +756,41 @@ def _as_curve(s):
     return [[0.0, float(s.cents)], [d, float(s.cents)]]
 
 
-def _join_layer_pieces(segs):
+def _clip_curve(pts, lo=None, hi=None):
+    """曲線の点列（相対秒の昇順）を [lo, hi] に切る（端は補間した値の点にする）。lo / hi が None ならその側は切らない。
+
+    `pitch_curve` の編集を切った Segment は、編集全体の点（Segment の外の点も）を持ったまま原点だけずらしている
+    （`render/pipeline.py: _apply_to_segment`・`_slice`）。そのまま次の Segment の点列とつなぐと時刻が戻り、
+    np.interp（再合成の曲線の引き方）の結果が崩れて、隣のずらし量が漏れる（0 の曲線を足すだけで前のノートの
+    +282 セントが次のノートに掛かった）。つなぐ側だけ切れば、同じ Segment の中の値は変わらない。"""
+    # 点の時刻は丸めてある（`apply_layers` の round(…, 9)）ので、端から CLIP_TOL_SEC を超えて外にはみ出す点が
+    # 無ければ切らない（切ると値は同じでも点列が変わり、つなぎ目の外れていない曲線の再合成まで変わる）
+    tt = [p[0] for p in pts]
+    cc = [p[1] for p in pts]
+    if lo is not None and tt[0] >= lo - CLIP_TOL_SEC:
+        lo = None
+    if hi is not None and tt[-1] <= hi + CLIP_TOL_SEC:
+        hi = None
+    out = []
+    if lo is not None and tt[0] < lo:
+        out.append([lo, float(np.interp(lo, tt, cc))])
+    for t, c in pts:
+        if (lo is None or t >= lo) and (hi is None or t <= hi):
+            out.append([t, c])
+    if hi is not None and tt[-1] > hi:
+        out.append([hi, float(np.interp(hi, tt, cc))])
+    return out
+
+
+def _join_layer_pieces(segs, clip=True):
     """窓で切った Segment のうち、途切れずに続く（同じ伸縮・移動の）ものを 1 つにまとめる。
 
     窓の端で切ったまま渡すと、ノート 1 つのピッチ移動でも「窓の手前｜窓の中｜ノートの残り｜
     次の窓」と別々に再合成して 20 ms のクロスフェードでつなぐことになり、つなぎ目が増える
     （別々に合成した音どうしの重ねで、エンベロープに −1.5 dB ほどのくぼみが出た）。
     ずらし量は点列（curve_points）でそのまま持てるので、1 つの区間として合成する。
-    窓に触れていない Segment 同士は今までどおり（まとめない）。"""
+    窓に触れていない Segment 同士は今までどおり（まとめない）。
+    clip: つなぎ目で曲線の点を切る（描画の版 2。False = 版 1 の曲は、切らずにつないだ 0.1.0-beta.6 までの音のまま）。"""
     out = []
     for s in segs:
         p = out[-1] if out else None
@@ -769,7 +801,12 @@ def _join_layer_pieces(segs):
                 and abs(p.gain - s.gain) < 1e-12
                 and abs(p.move_ms - s.move_ms) < 1e-12):
             sh = s.start_sec - p.start_sec
-            p.curve_points = _as_curve(p) + [[t + sh, c] for t, c in _as_curve(s)]
+            if clip:
+                # つなぎ目より後ろの p の点・前の s の点は落とす（点列の時刻を昇順に保つ）
+                p.curve_points = (_clip_curve(_as_curve(p), hi=sh)
+                                  + [[t + sh, c] for t, c in _clip_curve(_as_curve(s), lo=0.0)])
+            else:
+                p.curve_points = _as_curve(p) + [[t + sh, c] for t, c in _as_curve(s)]
             p.cents = 0.0
             p.end_sec = s.end_sec
             p.edit_ids = list(p.edit_ids) + [i for i in s.edit_ids if i not in p.edit_ids]
@@ -779,8 +816,11 @@ def _join_layer_pieces(segs):
     return out
 
 
-def layered_segments(project, edits=None):
-    """再合成・書き出し・画面の曲線に使う Segment 列（層を当てたもの）。"""
+def layered_segments(project, edits=None, render_version=None, region=None):
+    """再合成・書き出し・画面の曲線に使う Segment 列（層を当てたもの）。render_version を省くと曲の描画の版。
+
+    region: (頭, 尻)（素材の秒）。指定すると、この範囲に掛からない Segment には層を当てない（原音の基本の段のまま。その外は使わない
+    呼び出し専用: ピッチをドラッグしている間の試聴。範囲の外を当てる時間を省く）。範囲に掛かる Segment は省かないときと同じ。"""
     from ..render.pipeline import edits_to_segments
     edits = project.edits if edits is None else edits
     segs = edits_to_segments(edits, project.edit_span)
@@ -791,8 +831,56 @@ def layered_segments(project, edits=None):
         fs = fade_segments(project, segs)
     trs, drs, base = build_layers(project, segs, edits)
     lay = Layered(base, trs, drs)
-    out = apply_layers(segs, lay)
+    out = apply_layers(segs, lay, render_version_of(project) if render_version is None else render_version, region=region)
     return list(out) + fs if fs else out
+
+
+def render_version_of(project):
+    """曲の描画の版（`Project.render_version`。持たないもの = 曲でない呼び出しは最新）。"""
+    return int(getattr(project, "render_version", None) or RENDER_VERSION)
+
+
+def _shift_cents_at(segs, t):
+    """層を当てた Segment 列の、素材の時刻 t（配列）でのずらし量（セント）。再合成と同じ引き方（倍率を np.interp。
+    `render/praat.py`）。Segment の無い所は 0。"""
+    out = np.zeros(len(t))
+    for sg in segs:
+        if sg.silence_sec > 0 or sg.end_sec <= sg.start_sec:
+            continue
+        m = (t >= sg.start_sec) & (t < sg.end_sec)
+        if not m.any():
+            continue
+        if sg.curve_points:
+            ct = np.array([sg.start_sec + float(a) for a, _c in sg.curve_points], dtype="float64")
+            cf = np.array([2.0 ** (float(c) / 1200.0) for _a, c in sg.curve_points], dtype="float64")
+            out[m] = 1200.0 * np.log2(np.interp(t[m], ct, cf))
+        else:
+            out[m] = float(sg.cents)
+    return out
+
+
+def render_version_changes(project, version, step_sec=0.005, tol_cents=1.0):
+    """曲を描画の版 version で鳴らしたら、今の版と比べてずらし量が tol_cents 以上違う区間
+    [{start_sec, end_sec, max_cents}]（素材の秒。差の大きさは最大の差）。`set_render_version` が替える前に返す。"""
+    cur = render_version_of(project)
+    if int(version) == cur or not project.edits:
+        return []
+    a = layered_segments(project, render_version=cur)
+    b = layered_segments(project, render_version=int(version))
+    t = np.arange(0.0, float(project.duration_sec), step_sec)
+    d = np.abs(_shift_cents_at(a, t) - _shift_cents_at(b, t))
+    out, i = [], 0
+    while i < len(t):
+        if d[i] < tol_cents:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(t) and d[j + 1] >= tol_cents:
+            j += 1
+        out.append({"start_sec": round(float(t[i]), 3), "end_sec": round(float(t[j]) + step_sec, 3),
+                    "max_cents": round(float(d[i:j + 1].max()), 1)})
+        i = j + 1
+    return out
 
 
 def edits_base_index(project):
@@ -850,7 +938,7 @@ def pitch_model(project):
     segs = edits_to_segments(project.edits, project.edit_span)
     trs, drs, base = build_layers(project, segs)
     lay = Layered(base, trs, drs)
-    out = apply_layers(list(segs), lay)
+    out = apply_layers(list(segs), lay, render_version_of(project))
     return segs, out, lay, trs
 
 

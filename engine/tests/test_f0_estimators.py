@@ -6,6 +6,7 @@
 - 曲ごとの方式（選んでいなければ、前に解析した方式のまま。RMVPE の重みを後から取っても解析し直さない）
 - 解析のキャッシュが方式で分かれる（方式を替えたら解析し直し、同じ方式なら読むだけ）
 """
+import hashlib
 import os
 
 import numpy as np
@@ -15,6 +16,7 @@ import soundfile as sf
 from vocal_engine.analysis import f0 as F
 
 from conftest import needs_model
+from conftest import needs_material
 
 SR = 44100
 
@@ -144,6 +146,87 @@ def test_default_estimator_is_weaker_than_the_chosen_and_the_recorded(monkeypatc
 def test_bundled_model_exists():
     assert os.path.exists(F.GLISS_F0_PATH)
     assert os.path.getsize(F.GLISS_F0_PATH) < 1 << 20
+    assert os.path.exists(F.GLISS_F0_V2_PATH)
+    with open(F.GLISS_F0_PATH, "rb") as f:
+        assert hashlib.sha256(f.read()).hexdigest() == "f7e90f3dbbb41543dff2481d4a49b3fe23bed3deef0617e1844285ec66210ba0"
+    with open(F.GLISS_F0_V2_PATH, "rb") as f:
+        assert hashlib.sha256(f.read()).hexdigest().startswith(F.GLISS_F0_V2_VERSION[2:])
+    assert F.estimator_version("gliss") != F.GLISS_F0_V2_VERSION
+    assert not F.same_estimator("gliss", F.GLISS_F0_V2_VERSION, "gliss")
+
+
+def test_v2_project_keeps_note_targets_until_explicit_reanalysis(tmp_path, monkeypatch):
+    from vocal_engine.project import Project
+    from vocal_engine.project.model import Target
+
+    monkeypatch.setenv("VOCAL_ENGINE_AUTO_LYRICS", "0")
+    take = str(tmp_path / "synthetic.wav")
+    sf.write(take, _tone(), SR)
+    directory = str(tmp_path / "project")
+    p = Project.open(take, project_dir=directory)
+    p.f0_model_version = F.GLISS_F0_V2_VERSION
+    p.analyze(estimator="gliss", auto_lyrics=False)
+    note = next(n for n in p.take_notes if n.kind == "note")
+    p.apply_edits([{"kind": "pitch_shift", "target": Target.note(note.id), "params": {"cents": 90}}])
+    before = p.take_f0.f0.copy()
+    p = Project.open(take, project_dir=directory)
+    assert p.analysis_cached("gliss")
+    assert p.take_f0.meta["version"] == F.GLISS_F0_V2_VERSION
+    assert np.array_equal(p.take_f0.f0, before)
+    assert p._missing_note_targets() == []
+    os.remove(os.path.join(directory, "cache", "take-analysis.json"))
+    p._forget_analysis()
+    p.ensure_analyzed()
+    assert p.take_f0.meta["version"] == F.GLISS_F0_V2_VERSION
+    assert p._missing_note_targets() == []
+    p.analyze(force=True, estimator="gliss", auto_lyrics=False)
+    assert p.take_f0.meta["version"] == F.estimator_version("gliss")
+    assert p.analysis["take"]["estimator_version"] == F.estimator_version("gliss")
+
+
+@needs_material("C", "C2")
+def test_gliss_v3_material_split_guide_and_psola(tmp_path, monkeypatch):
+    """素材は読み取るだけ。新モデルの分割・ガイド対応・再合成を一つの編集で通す。"""
+    import materials
+    from vocal_engine import mcp_server as m
+    from vocal_engine.project import Project, timing as TM
+    from vocal_engine.render.region import render_region
+
+    monkeypatch.setenv("VOCAL_ENGINE_AUTO_LYRICS", "0")
+    m._state.update(project=None, session=None, track=None)
+    take, guide = materials.clip("C"), materials.clip("C2")
+    try:
+        opened = m.open_project(take, guide, project_dir=str(tmp_path / "project"))
+        assert opened["ok"], opened
+        analyzed = m.analyze_take(estimator="gliss", background=False)
+        assert analyzed["ok"], analyzed
+        p = m._state["project"]
+        assert p.take_f0.meta["version"] == F.estimator_version("gliss")
+        pairs, _, _ = TM.note_correspondence(p)
+        assert pairs
+        note = max((n for n in p.take_notes if n.kind == "note"),
+                   key=lambda n: n.end_sec - n.start_sec)
+        assert note.end_sec - note.start_sec > 0.08
+        split = m.split_note((note.start_sec + note.end_sec) / 2, note_id=note.id)
+        assert split["ok"], split
+        shifted = m.shift_pitch(100, note_id=split["right"])
+        assert shifted["ok"], shifted
+        y, info = render_region(p, backend="psola")
+        assert len(y) > 0 and np.isfinite(y).all() and info["rendered_windows_sec"]
+        original, _ = p.audio("take")
+        assert np.max(np.abs(y[:, 0] - original)) > 1e-3
+        archive = p.to_archive()
+        assert archive["f0_estimator_version"] == F.estimator_version("gliss")
+        q = Project.from_archive(archive, take=take, guide=guide,
+                                 project_dir=str(tmp_path / "reopened"))
+        q.ensure_analyzed()
+        assert q.take_f0.meta["version"] == F.estimator_version("gliss")
+        assert q._missing_note_targets() == []
+        assert any(n.id == split["right"] for n in q.take_notes)
+        restored, _ = render_region(q, backend="psola")
+        assert np.array_equal(restored, y)
+    finally:
+        m._state.update(project=None, session=None, track=None)
 
 
 def test_take_cache_is_split_by_estimator(tmp_path, monkeypatch):

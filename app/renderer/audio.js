@@ -18,8 +18,8 @@
 //  - **プラグイン（ARA。ara.js）では Web Audio で鳴らさない**。再生・停止は DAW（ホストの再生の制御）へ、再生位置は DAW から来る
 //    （S.head・S.playing は ara.js が入れる）。つかんだノートのプレビュー音は C++ の EditorRenderer が DAW の出力で鳴らす。
 import { call, callJob, status } from './engine.js';
-import { ARA, araPreview, araTransport } from './ara.js';
-import { S, audible, timelineRange } from './state.js';
+import { ARA, araPreview, araSelectedModification, araTransport } from './ara.js';
+import { S, audible, shownTrack, timelineRange } from './state.js';
 import { dbToGain, gainOf, panOf } from './mixer.js';
 import { follow, movePlayhead, renderToolbar } from './draw.js';
 import { waitFor } from './edits.js';
@@ -258,12 +258,65 @@ export function stop() {
 }
 
 // ---------------------------------------------------------------- つかんだノートのプレビュー音（issue #27）
+let previewOn = true;
 const PREVIEW_GAP_MS = 45;    // 作り直しの間隔の下限（間引き）
 const PREVIEW_FADE = 0.006;   // ループのつなぎ目・差し替えのフェード（秒）
-let previewOn = true;
+const PREVIEW_MIN_SOUND_MS = 200;   // 短いクリックでも鳴らす最短（鳴り始めてから）。離したあと、これだけ鳴らして止める
+const PREVIEW_RETRY_MS = 10000;     // 押している間、編集が続いていて作れなかった試聴を、待って取り直す上限
+const PREVIEW_KINDS = new Set(['note', 'unvoiced', 'breath']);   // 試聴できるもの（子音・息は cents = 0 だけ）
+const ATTACK_MAX_SEC = 0.30;  // ノートの頭に付く子音（アタック）の上限（エンジンの timing.ATTACK_MAX_SEC と同じ）
+const ATTACK_TOL_SEC = 0.02;
 const PV = { token: 0, note: null, range: null, want: 0, busy: 0, timer: 0, lastAt: 0,
-  src: null, gain: null, t0: 0, dur: 0, cents: null, host: false };
+  src: null, gain: null, t0: 0, dur: 0, cents: null, host: false, phase: 'idle', error: null,
+  prepared: null, context: null, soundAt: 0, releaseTimer: 0, pendingRelease: false };
+let primed = null;
+let inflightPrepare = null;
 const previewLog = [];        // 鳴らそうとしたもの（テスト用。音は出さずにこれで確かめる）
+
+// 編集したばかりのノートの試聴は、DAW のキャッシュ（まだ追いついていないことがある）ではなく、エンジンで作る（厳密）。
+// ほかのノートは、キャッシュが少し古くても、そのまま鳴らす（編集のたびに、ほかのノートの試聴が待たされない）
+const editedAt = new Map();   // ノートの id → 編集した時刻（performance.now()）
+let unknownEditUntil = 0;     // どのノートか分からない編集（元に戻す・歌詞・分割など）の後は、しばらく全部をエンジンで作る
+let seenViewRev = null;
+const EDIT_STRICT_MS = 8000;
+/** 編集した（確定した・順番待ちに入れた）ノートを覚える（interact.js が離したときに呼ぶ）。 */
+export function markNoteEdited(ids) {
+  const now = performance.now();
+  for (const id of ids || []) editedAt.set(id, now);
+  for (const [id, t] of editedAt) if (now - t > EDIT_STRICT_MS) editedAt.delete(id);
+  seenViewRev = S.vd?.view_rev ?? null;
+}
+/** テスト用: 編集の記憶を捨てる。 */
+export function clearEditMarks() { editedAt.clear(); unknownEditUntil = 0; seenViewRev = null; }
+function strictFor(id) {
+  const now = performance.now();
+  const rev = S.vd?.view_rev ?? null;
+  if (seenViewRev !== null && rev !== seenViewRev) {            // 覚えていない編集で描画データが変わった
+    const marked = [...editedAt.values()].some((t) => now - t < 2000);
+    if (!marked) unknownEditUntil = now + EDIT_STRICT_MS;
+  }
+  seenViewRev = rev;
+  const t = editedAt.get(id);
+  return now < unknownEditUntil || (t !== undefined && now - t < EDIT_STRICT_MS);
+}
+
+function setPreviewPhase(phase, error = null) {
+  const changed = PV.phase !== phase;
+  PV.phase = phase;
+  PV.error = error;
+  if (changed && phase === 'sounding') {
+    PV.soundAt = performance.now();
+    if (PV.pendingRelease) {                  // 鳴り始める前に離していた: 最短だけ鳴らして止める
+      PV.pendingRelease = false;
+      clearTimeout(PV.releaseTimer);
+      const tok = PV.token;
+      PV.releaseTimer = setTimeout(() => { if (PV.token === tok) stopPreview(); }, PREVIEW_MIN_SOUND_MS);
+    }
+  }
+  if (changed && typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('gliss-preview-state', { detail: previewState() }));
+  }
+}
 
 export function previewEnabled() { return previewOn; }
 /** つかんだノートを鳴らす（設定）。save: ユーザー設定に残す（起動時に読むときは残さない）。 */
@@ -282,18 +335,98 @@ function wantCents(id) {
   return Math.round((S.local.pitch.get(id) || 0) * 1000) / 10;
 }
 
-/** ノートをつかんだ（ピッチ・移動・端のドラッグの始め）。 */
-export function startPreview(noteId) {
-  stopPreview();
-  if (!previewOn || S.playing || !S.vd) return;
+/** ノートの頭に接した短い無声（子音。アタック）があれば、その頭の秒。ノートの試聴はその子音から鳴らす。 */
+function attackStart(n, a) {
+  const i = S.notes.indexOf(n);
+  const prev = i > 0 ? S.notes[i - 1] : null;
+  if (!prev || prev.kind !== 'unvoiced') return a;
+  const pa = prev.edited_start_sec ?? prev.start_sec;
+  const pb = prev.edited_end_sec ?? prev.end_sec;
+  return Math.abs(pb - a) <= ATTACK_TOL_SEC && pb - pa <= ATTACK_MAX_SEC ? pa : a;
+}
+
+function previewRequest(noteId) {
   const n = S.byId.get(noteId);
-  if (!n || n.kind !== 'note') return;
-  const a = n.edited_start_sec ?? n.start_sec;
+  if (!n || !PREVIEW_KINDS.has(n.kind)) return null;
+  let a = n.edited_start_sec ?? n.start_sec;
   const b = n.edited_end_sec ?? n.end_sec;
-  if (!(b - a > 0.01)) return;
+  if (n.kind === 'note') a = attackStart(n, a);
+  if (!(b - a > 0.01)) return null;
+  return { note_id: noteId, cents: n.kind === 'note' ? wantCents(noteId) : 0, start_sec: +a.toFixed(6), end_sec: +b.toFixed(6) };
+}
+
+/** 試聴の元になる状態。トラックの切り替えの途中（S.session.current は新しいトラックだが、S.vd・S.byId・S.projectDir はまだ前のトラック）は
+ * null（前のトラックのノートの時刻で、新しいトラックの音を切り出さない）。表示しているトラックは state.js の shownTrack（syncOff と同じ規則）。 */
+function previewContext() {
+  if (!ARA) return null;
+  const track = S.tracks.find((t) => t.id === S.session?.current);
+  const selected = araSelectedModification();
+  if (!track?.ara_id || !S.projectDir || !S.vd?.view_rev || shownTrack()?.id !== track.id
+      || (selected && (selected.track_id !== track.id || selected.ara_id !== track.ara_id))) return null;
+  return { view: S.vd, rev: S.vd.view_rev, track: track.id, araId: track.ara_id,
+    project: S.projectDir, selected };
+}
+
+/** プラグインのログ（preview: start の行）に残す、画面の側の状態（どのトラックを選んでいて、どのトラックを描いていたか）。 */
+function previewTrackInfo(context) {
+  return { ui_track: context.track, shown_track: shownTrack()?.id || '' };
+}
+
+function previewContextCurrent(ctx, args) {
+  if (!ctx || !args || S.playing || S.busy || S.queued || S.pendingPlan) return false;
+  const now = previewContext();
+  const current = previewRequest(args.note_id);
+  return !!now && now.view === ctx.view && now.rev === ctx.rev && now.track === ctx.track
+    && now.araId === ctx.araId && now.project === ctx.project
+    && now.selected?.track_id === ctx.selected?.track_id
+    && now.selected?.ara_id === ctx.selected?.ara_id
+    && current?.cents === args.cents && current?.start_sec === args.start_sec
+    && current?.end_sec === args.end_sec;
+}
+
+/** ARA の押下中だけ補正 PCM を先に作る。長押し判定までは host に渡さない。 */
+export function preparePreview(noteId) {
+  primed = null;
+  if (!ARA || S.playing || !S.vd || S.busy || S.queued || S.pendingPlan) return;
+  const args = previewRequest(noteId);
+  const context = previewContext();
+  if (!args || !context) return;
+  if (inflightPrepare) {
+    if (inflightPrepare.args.note_id === args.note_id
+        && inflightPrepare.args.cents === args.cents
+        && inflightPrepare.args.start_sec === args.start_sec
+        && inflightPrepare.args.end_sec === args.end_sec
+        && previewContextCurrent(inflightPrepare.context, args)) primed = inflightPrepare;
+    return; // A short-click burst must not fill the engine's serial request queue.
+  }
+  const p = { args, context };
+  p.result = call('render_audition', args).then(
+    (value) => ({ value }), (error) => ({ error }),
+  ).finally(() => { if (inflightPrepare === p) inflightPrepare = null; });
+  inflightPrepare = p;
+  primed = p;
+}
+
+/** ノートをつかんだ（押した。ピッチ・移動・端のドラッグの始め）。 */
+export function startPreview(noteId) {
+  const args = previewRequest(noteId);
+  const prepared = ARA && primed && args && primed.args.note_id === args.note_id
+    && primed.args.cents === args.cents && primed.args.start_sec === args.start_sec
+    && primed.args.end_sec === args.end_sec && previewContextCurrent(primed.context, args)
+    ? primed : null;
+  stopPreview();
+  if (!previewOn || S.playing || !S.vd || !args) return;
+  const context = ARA ? (prepared?.context || previewContext()) : null;
+  if (ARA && !context) {
+    setPreviewPhase('error', '画面を更新してから試聴してください');
+    return;
+  }
   PV.note = noteId;
-  PV.range = [+a.toFixed(6), +b.toFixed(6)];
-  PV.want = wantCents(noteId);
+  PV.range = [args.start_sec, args.end_sec];
+  PV.want = args.cents;
+  PV.prepared = prepared?.result || null;
+  PV.context = context;
+  setPreviewPhase('preparing');
   requestPreview();
 }
 
@@ -312,34 +445,123 @@ function schedulePreview() {
   PV.timer = setTimeout(() => { PV.timer = 0; requestPreview(); }, wait);
 }
 
+function araPreviewError(reason) {
+  switch (reason) {
+    case 'no-editor-renderer': return 'この DAW では試聴出力を使えません';
+    case 'host-playing': return 'DAW の再生中は試聴できません';
+    case 'invalid-path':
+    case 'invalid-audio': return '試聴用の音を読み込めません';
+    default: return 'DAW で試聴を開始できません';
+  }
+}
+
+/** 編集の確定・順番待ち・計画の確定が済むのを待つ（押している間、続く。token が変わったら false）。 */
+async function waitEditIdle(tok, limitMs) {
+  const t0 = performance.now();
+  while (S.busy || S.queued || S.pendingPlan) {
+    if (tok !== PV.token || performance.now() - t0 > limitMs) return false;
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  return tok === PV.token;
+}
+
 async function requestPreview() {
   if (!PV.note || PV.busy) return;
+  if (S.playing) { stopPreview(); return; }
   const tok = PV.token;
   const note = PV.note;
-  const cents = PV.want;
-  const [a, b] = PV.range;
+  const startedAt = performance.now();
   PV.busy = tok || -1;
   PV.lastAt = performance.now();
-  previewLog.push({ note, cents, range: [a, b], at: Date.now() });
+  setPreviewPhase('preparing');
   try {
-    const r = await call('render_audition', { note_id: note, cents, start_sec: a, end_sec: b });
-    if (tok !== PV.token) return;
-    if (ARA) {                      // 作った WAV は C++ が DAW の出力でループ再生する（差し替えは C++ が鳴っている位置のまま）
-      PV.host = true;
-      await araPreview('start', { path: r.path, loop: true, note, cents });
+    // ARA: 編集が続いていて（S.busy・順番待ち・描画データの更新）作れなかったときは、押している間、待って取り直す
+    // （黙って捨てない）。取り直すときは今の状態から作り直す（編集したノートは編集の後の音で鳴る）
+    for (let attempt = 0; attempt < 12; attempt++) {
+      let args;
+      let context;
+      if (attempt === 0) {
+        const [a, b] = PV.range;
+        args = { note_id: note, cents: PV.want, start_sec: a, end_sec: b };
+        context = ARA ? PV.context : null;
+      } else {
+        const left = PREVIEW_RETRY_MS - (performance.now() - startedAt);
+        if (left <= 0 || !(await waitEditIdle(tok, left))) {
+          if (tok === PV.token && left <= 0) setPreviewPhase('error', '編集が続いていて試聴を作れませんでした');
+          return;
+        }
+        if (ARA && PV.context && S.session?.current !== PV.context.track) { stopPreview(); return; }   // 別のトラックへ移った
+        args = previewRequest(note);
+        context = ARA ? previewContext() : null;
+        if (!args) { stopPreview(); return; }
+        if (ARA && !context) { await new Promise((r) => setTimeout(r, 60)); continue; }
+        PV.range = [args.start_sec, args.end_sec];
+        PV.context = context;
+        PV.want = args.cents;
+      }
+      if (attempt === 0) previewLog.push({ note, cents: args.cents, range: [args.start_sec, args.end_sec], at: Date.now() });
+      if (ARA && Math.abs(args.cents) < 1e-6 && context) {
+        // ずらさない試聴（長押し・クリック）は、DAW のプラグインが持つ編集済みの音から、エンジンを呼ばずに切り出して鳴らす。
+        // 編集したばかりのノートは、キャッシュが追いついていないことがあるので、追いついてから（stale ならエンジンで）
+        const local = await araPreview('start', { local: true, ara_id: context.araId, note, cents: 0,
+          start_sec: args.start_sec, end_sec: args.end_sec, allow_stale: !strictFor(note), loop: true,
+          ...previewTrackInfo(context) });
+        if (tok !== PV.token) return;
+        if (local?.ok) {
+          PV.host = true;
+          PV.cents = 0;
+          setPreviewPhase('sounding');
+          return;
+        }
+        if (local?.reason === 'cancelled' || local?.reason === 'host-playing') { stopPreview(); return; }
+        // それ以外（stale・not-cached・unsupported など）: エンジンで作る
+      }
+      const prepared = attempt === 0 ? PV.prepared : null;
+      PV.prepared = null;
+      const response = prepared ? await prepared : { value: await call('render_audition', args) };
+      if (response.error) throw response.error;
+      const r = response.value;
+      if (tok !== PV.token) return;
+      if (ARA) {
+        const fresh = previewContextCurrent(context, args) && r.view_rev && r.rev && r.view_rev === context.rev
+          && r.track_id === context.track && r.ara_id === context.araId && r.note_id === note && r.cents === args.cents;
+        if (!fresh) { await new Promise((r) => setTimeout(r, 80)); continue; }   // 編集の最中・版が変わった: 待って取り直す
+        // native は準備した PCM を EditorRenderer へ渡してから ok を返す
+        const result = await araPreview('start', { path: r.path, loop: true, note, cents: args.cents, ara_id: context.araId,
+          ...previewTrackInfo(context) });
+        if (tok !== PV.token) return;
+        if (!previewContextCurrent(context, args)) {            // 渡している間に編集が始まった: 止めて取り直す
+          await araPreview('stop');
+          if (tok !== PV.token) return;
+          continue;
+        }
+        if (!result?.ok) {
+          if (result?.reason === 'cancelled') { stopPreview(); return; }
+          throw new Error(araPreviewError(result?.reason));
+        }
+        PV.host = true;
+        PV.cents = args.cents;
+        setPreviewPhase('sounding');
+        return;
+      }
+      const bytes = await window.api.readFile(r.path);
+      if (tok !== PV.token) return;
+      const buf = await audioCtx().decodeAudioData(bytes);
+      if (tok !== PV.token || S.playing) return;
+      swapPreview(buf, args.cents);
+      setPreviewPhase('sounding');
       return;
     }
-    const bytes = await window.api.readFile(r.path);
-    if (tok !== PV.token) return;
-    const buf = await audioCtx().decodeAudioData(bytes);
-    if (tok !== PV.token || S.playing) return;
-    swapPreview(buf, cents);
+    if (tok === PV.token) setPreviewPhase('error', '編集が続いていて試聴を作れませんでした');
   } catch (err) {
-    if (tok === PV.token) status(`プレビューの音を作れなかった: ${err.message}`);
+    if (tok === PV.token) {
+      setPreviewPhase('error', err.message);
+      status(`プレビューの音を作れなかった: ${err.message}`);
+    }
   } finally {
     if (PV.busy === (tok || -1)) PV.busy = 0;
     // 作っている間に高さが変わった: いまの高さでもう一度（最後の高さだけ）
-    if (tok === PV.token && PV.note && Math.abs(PV.want - cents) >= 0.5) schedulePreview();
+    if (tok === PV.token && PV.note && PV.cents !== null && Math.abs(PV.want - PV.cents) >= 0.5) schedulePreview();
   }
 }
 
@@ -390,25 +612,66 @@ function releaseVoice(src, g) {
   src.onended = () => { try { g.disconnect(); } catch { /* noop */ } };
 }
 
-/** 離した（か再生を始めた・設定を切った）: 止める。作りかけの音は捨てる。 */
+/** 押していたものを離した: 鳴っていれば、鳴り始めてから最短（PREVIEW_MIN_SOUND_MS）だけ鳴らして止める（短いクリックでも
+ * 聞こえるように）。まだ鳴っていなければ、鳴り始めるのを（1 秒まで）待って、最短だけ鳴らして止める。 */
+export function releasePreview() {
+  if (!PV.note && !PV.host && !PV.busy) return;
+  const tok = PV.token;
+  clearTimeout(PV.releaseTimer);
+  if (PV.phase === 'sounding') {
+    const left = PREVIEW_MIN_SOUND_MS - (performance.now() - PV.soundAt);
+    if (left <= 0) { stopPreview(); return; }
+    PV.releaseTimer = setTimeout(() => { if (PV.token === tok) stopPreview(); }, left);
+    return;
+  }
+  if (PV.phase === 'preparing') {
+    PV.pendingRelease = true;
+    PV.releaseTimer = setTimeout(() => { if (PV.token === tok && PV.phase !== 'sounding') stopPreview(); }, 1000);
+    return;
+  }
+  stopPreview();
+}
+
+/** 離した（か再生を始めた・設定を切った）: すぐ止める。作りかけの音は捨てる。 */
 export function stopPreview() {
+  const hadPreview = !!(PV.note || PV.busy || PV.host);
+  clearTimeout(PV.releaseTimer);
+  PV.releaseTimer = 0;
+  PV.pendingRelease = false;
+  primed = null;
+  PV.prepared = null;
   PV.token += 1;
   clearTimeout(PV.timer);
   PV.timer = 0;
   PV.busy = 0;
   PV.note = null;
   PV.range = null;
-  if (PV.host) { PV.host = false; araPreview('stop'); }
+  PV.context = null;
+  PV.host = false;
+  if (ARA && hadPreview) araPreview('stop');
   releaseVoice(PV.src, PV.gain);
   PV.src = null; PV.gain = null; PV.dur = 0; PV.cents = null;
+  setPreviewPhase('idle');
 }
 
 /** テスト用: いま鳴らしているもの（鳴っていなければ null）と、鳴らそうとしたものの記録。 */
 export function previewState() {
   return {
     enabled: previewOn, note: PV.note, range: PV.range ? [...PV.range] : null, want: PV.note ? PV.want : null,
-    sounding: PV.src ? { cents: PV.cents, duration: PV.dur } : null,
+    phase: PV.phase, error: PV.error,
+    sounding: PV.src || PV.host ? { cents: PV.cents, duration: PV.dur || null } : null,
   };
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('blur', stopPreview);
+  window.addEventListener('gliss-host-play', stopPreview);
+  window.addEventListener('gliss-ara-selection', (event) => {
+    const context = PV.context || primed?.context;
+    if (!event.detail) return;               // 選択が空になっただけ（DAW で何も選んでいない）: 止めない
+    if (context && (event.detail.track_id !== context.track || event.detail.ara_id !== context.araId))
+      stopPreview();
+  });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stopPreview(); });
 }
 export function previewLogOf() { return previewLog.map((x) => ({ ...x, range: [...x.range] })); }
 export function clearPreviewLog() { previewLog.length = 0; }

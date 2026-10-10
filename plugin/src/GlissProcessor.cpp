@@ -3,6 +3,8 @@
 #include "Diagnostics.h"
 #include "GlissDocumentController.h"
 #include "GlissEditor.h"
+#include "GlissEditorRenderer.h"
+#include "GlissPlaybackRenderer.h"
 
 namespace gliss
 {
@@ -44,7 +46,7 @@ void GlissProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
         if (auto* hostPlayHead = getPlayHead())
             if (const auto position = hostPlayHead->getPosition())
                 juce::ARADocumentControllerSpecialisation::getSpecialisedDocumentController<GlissDocumentController> (documentController)
-                    ->getPlayheadState().write (*position);
+                    ->getPlayheadState().write (*position, reinterpret_cast<std::uintptr_t> (this));
 
     // ARA に結び付いていれば PlaybackRenderer が buffer を置き換える。そうでなければ入力をそのまま通す。
     processBlockForARA (buffer, isRealtime(), getPlayHead());
@@ -54,6 +56,31 @@ double GlissProcessor::getTailLengthSeconds() const
 {
     double tail = 0.0;
     return getTailLengthSecondsForARA (tail) ? tail : 0.0;
+}
+
+void GlissProcessor::didBindToARA() noexcept
+{
+    AudioProcessorARAExtension::didBindToARA();
+
+    auto* playback = dynamic_cast<GlissPlaybackRenderer*> (getPlaybackRenderer());
+    auto* editor = dynamic_cast<GlissEditorRenderer*> (getEditorRenderer());
+
+    if (playback == nullptr || editor == nullptr)
+        return;
+
+    auto pair = std::make_shared<RendererPair>();
+    playback->linkInstance (pair);
+    editor->linkInstance (pair);
+    diag::logAlways ("instance: editor renderer " + juce::String ((juce::int64) editor->getRendererId()) + " <-> playback renderer "
+                     + juce::String::toHexString ((juce::pointer_sized_int) playback));
+}
+
+std::uint64_t GlissProcessor::getEditorRendererId() const
+{
+    if (const auto* renderer = dynamic_cast<const GlissEditorRenderer*> (getEditorRenderer()))
+        return renderer->getRendererId();
+
+    return 0;
 }
 
 juce::AudioProcessorEditor* GlissProcessor::createEditor()

@@ -15,12 +15,18 @@ GlissEditor::GlissEditor (GlissProcessor& processor)
     if (bridge != nullptr)
     {
         webView = std::make_unique<editor::EditorWebView> (*bridge);
+        webView->setRequesterProvider ([&processor] { return processor.getEditorRendererId(); });
         addAndMakeVisible (*webView);
 
         editorView->addListener (this);
-        // 開いた時点の DAW の選択をドキュメントに知らせる（画面は bootstrap / hostState でこれを読む）
-        bridge->editorSelectionChanged (editorView->getViewSelection());
+        // 開いた時点の DAW の選択は、ドキュメントにまだ選択が無いときだけ知らせる（画面は bootstrap / hostState でこれを読む）。
+        // 隠れたエディタ・別のインスタンスのエディタが作られるたびに、共有する選択を上書きしない
+        if (! bridge->hasEditorSelection())
+            bridge->editorSelectionChanged (this, editorView->getViewSelection());
         diag::log ("editor: opened with a document");
+        // selection: の行の view の番地と、試聴を求めたときの requester（この instance の EditorRenderer）を結び付ける
+        diag::logAlways ("editor view " + juce::String::toHexString ((juce::pointer_sized_int) this) + " -> editor renderer "
+                         + juce::String ((juce::int64) processor.getEditorRendererId()));
     }
     else
     {
@@ -37,8 +43,12 @@ GlissEditor::GlissEditor (GlissProcessor& processor)
 GlissEditor::~GlissEditor()
 {
     if (bridge != nullptr)
+    {
+        bridge->editorVisibilityChanged (this, false);
+
         if (auto* editorView = getARAEditorView())
             editorView->removeListener (this);
+    }
 
     webView.reset();
 }
@@ -79,7 +89,37 @@ void GlissEditor::onNewSelection (const juce::ARAViewSelection& selection)
     jassert (juce::MessageManager::existsAndIsCurrentThread());
 
     if (bridge != nullptr)
-        bridge->editorSelectionChanged (selection);
+        bridge->editorSelectionChanged (this, selection);
+}
+
+void GlissEditor::visibilityChanged()
+{
+    reportVisibility();
+}
+
+void GlissEditor::parentHierarchyChanged()
+{
+    reportVisibility();
+}
+
+void GlissEditor::reportVisibility()
+{
+    if (bridge == nullptr)
+        return;
+
+    const auto showing = isShowing();
+
+    if (showing != reportedShowing)
+    {
+        reportedShowing = showing;
+        bridge->editorVisibilityChanged (this, showing);
+
+        // 窓が見えるようになった: 閉じている間（リスナーが無い間）に DAW の選択が変わっていたら拾う（今の修飾が選択に
+        // 残っていれば何も変わらない。SelectionPolicy）
+        if (showing)
+            if (auto* editorView = getARAEditorView())
+                bridge->editorSelectionChanged (this, editorView->getViewSelection());
+    }
 }
 
 } // namespace gliss

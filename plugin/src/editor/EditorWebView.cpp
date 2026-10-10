@@ -1,4 +1,5 @@
 #include "EditorWebView.h"
+#include "../ara/PreviewRequest.h"
 
 #include "../Diagnostics.h"
 #include "../ProcessUtils.h"
@@ -108,6 +109,9 @@ EditorWebView::EditorWebView (DocumentBridge& bridgeIn)
 
 EditorWebView::~EditorWebView()
 {
+    // The document can remain alive after this native editor is closed.
+    bridge.preview ("stop", {}, [] (const juce::var&) {});
+    diag::log ("editor: preview stopped on close");
     bridge.removeListener (this);
     pendingConfirm = nullptr;
     messageBox.close();
@@ -175,7 +179,11 @@ juce::WebBrowserComponent::Options EditorWebView::makeOptions()
                                  done (true);
                              })
         .withNativeFunction ("transport", [this] (Args args, Completion done) { done (bridge.transport (args[0].toString(), args[1])); })
-        .withNativeFunction ("preview", [this] (Args args, Completion done) { done (bridge.preview (args[0].toString(), args[1])); })
+        .withNativeFunction ("preview", [this] (Args args, Completion done)
+                             {
+                                 const auto requester = requesterProvider != nullptr ? requesterProvider() : std::uint64_t (0);
+                                 bridge.preview (args[0].toString(), withRequester (args[1], requester), guarded (std::move (done)));
+                             })
         .withNativeFunction ("setCompare", [this] (Args args, Completion done)
                              {
                                  bridge.setCompare ((bool) args[0]);

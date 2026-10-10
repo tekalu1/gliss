@@ -143,6 +143,14 @@ target_link_libraries(GlissARA
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
 
+# ---- 試験用の口（GLISS_TEST_BRIDGE_DIR: 画面の engineCall の代わり。plugin/tests/aratest の GlissARATest -changes） ----
+# 配布のプラグインには入れない（scripts/build-plugin.mjs は OFF で構成し、出来た DLL に口の名前が無いことを確かめる）。
+# plugin/scripts/test-plugin.ps1 が ON で構成する。そのファイルだけに定義を付けるので、切り替えても作り直すのは 1 ファイル
+option(GLISS_TEST_HOOKS "試験用の口（GLISS_TEST_BRIDGE_DIR）をプラグインに入れる" OFF)
+if(GLISS_TEST_HOOKS)
+    set_source_files_properties(src/GlissDocumentController.cpp PROPERTIES COMPILE_DEFINITIONS GLISS_TEST_HOOKS=1)
+endif()
+
 # ---- 検証用のホスト（JUCE のホストとして Gliss.vst3 を読み込み、画面の外で WebView2 まで確かめる） ----
 option(GLISS_BUILD_HOSTCHECK "検証用の GlissHostCheck をビルドする" ON)
 if(GLISS_BUILD_HOSTCHECK)

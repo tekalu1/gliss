@@ -72,3 +72,14 @@ def project(tmp_path):
     p = Project.open(TAKE, GUIDE, project_dir=str(tmp_path / "proj"))
     yield p
     shutil.rmtree(p.dir, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_relay_counters():
+    """外部の AI の中継（ara_relay.py）の変更の番号は、口を閉じても戻らない（同じエンジンのプロセスで数え続ける）。
+    中継を使った試験の後に戻し、後の試験がファイルの並びによらず 0 から数えるようにする。"""
+    yield
+    import sys
+    R = sys.modules.get("vocal_engine.ara_relay")
+    if R is not None:
+        R._srv_state.update(seq=0, session_seq=0, track_id=None)

@@ -15,7 +15,7 @@ import {
   connectGap, mergeNotes, resetBoundaries, setConnection, setLyrics,
 } from './edits.js';
 import {
-  commitOffset, removeTrack, selectTrack, setGuide, setKind, soundRegion, startRename,
+  commitOffset, openGuidePicker, removeTrack, selectTrack, setGuide, setKind, setTrackGuide, soundRegion, startRename,
 } from './tracks.js';
 import { status } from './engine.js';
 import { boxOf, bandOf } from './state.js';
@@ -30,6 +30,9 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 let menu = null;
 let root = null;
 let items = [];
+let anchor = null;          // プルダウンとして出したときのボタンを返す関数（閉じたら aria-expanded を戻し、フォーカスを返す）
+let closedAt = { el: null, t: 0 };   // 外を押して閉じたボタンと時刻（同じボタンの click で開き直さない）
+const MENU_LABEL = '右クリックのメニュー';
 
 export function installMenus(rootEl) {
   root = rootEl;
@@ -38,8 +41,7 @@ export function installMenus(rootEl) {
     const b = e.target.closest('button');
     if (!b || b.disabled) return;
     const it = items[+b.dataset.i];
-    closeMenu();
-    root.focus({ preventScroll: true });
+    if (!closeMenu()) root.focus({ preventScroll: true });
     try {
       const r = it.run?.();
       if (r && typeof r.catch === 'function') r.catch((err) => status(`${it.label} に失敗: ${err.message}`));
@@ -59,12 +61,29 @@ export function installMenus(rootEl) {
     bs[j].focus();
   });
   document.addEventListener('pointerdown', (e) => {
-    if (!menu.hidden && !menu.contains(e.target)) closeMenu();
+    if (menu.hidden || menu.contains(e.target)) return;
+    const a = anchor?.();
+    if (a && a.contains(e.target)) closedAt = { el: a, t: performance.now() };
+    closeMenu({ focus: false });
   }, true);
 }
 
-export function closeMenu() { if (menu) menu.hidden = true; }
+/** メニューを閉じる。プルダウン（anchor 付き）ならボタンにフォーカスを返して true（呼び手は root に移さない）。 */
+export function closeMenu({ focus = true } = {}) {
+  if (!menu || menu.hidden) return false;
+  menu.hidden = true;
+  menu.setAttribute('aria-label', MENU_LABEL);
+  const a = anchor?.();
+  anchor = null;
+  if (!a) return false;
+  a.setAttribute('aria-expanded', 'false');
+  if (!focus || !a.isConnected) return false;
+  a.focus({ preventScroll: true });
+  return true;
+}
 export function menuOpen() { return !!menu && !menu.hidden; }
+/** 外を押して閉じたばかりのボタンか（そのボタンの click でもう一度開かない）。 */
+export function justClosed(el) { return closedAt.el === el && performance.now() - closedAt.t < 500; }
 
 /** コマンドの項目（名前・キー・有効はコマンドの表から）。over で名前・実行を差し替える。 */
 function cmd(id, ctx, over = {}) {
@@ -80,9 +99,12 @@ function cmd(id, ctx, over = {}) {
   };
 }
 
-/** メニューを出す（items の hidden は出さない。続く区切り・端の区切りは詰める）。 */
-export function openMenu(e, list) {
+/** メニューを出す（items の hidden は出さない。続く区切り・端の区切りは詰める）。
+ * opts.label: 読み上げの名前。opts.anchor: プルダウンとして出すボタンを返す関数（見出しは描き直すので要素ではなく関数）。
+ * 項目の radio: true は選択肢（menuitemradio。checked の項目に最初のフォーカス）。 */
+export function openMenu(e, list, opts = {}) {
   e.preventDefault?.();
+  if (anchor) closeMenu({ focus: false });
   closePop();
   closeTr();
   const out = [];
@@ -94,16 +116,21 @@ export function openMenu(e, list) {
   while (out.length && out[out.length - 1].sep) out.pop();
   items = out;
   menu.innerHTML = items.map((it, i) => (it.sep ? '<hr>'
-    : `<button role="menuitem" data-i="${i}"${it.cmd ? ` data-cmd="${it.cmd}"` : ''}${it.id ? ` data-item="${it.id}"` : ''}`
+    : `<button role="${it.radio ? 'menuitemradio' : 'menuitem'}" data-i="${i}"${it.cmd ? ` data-cmd="${it.cmd}"` : ''}`
+      + `${it.id ? ` data-item="${esc(it.id)}"` : ''}${it.radio ? ` aria-checked="${!!it.checked}"` : ''}`
       + `${it.disabled ? ' disabled' : ''}${it.title ? ` title="${esc(it.title)}"` : ''}>`
-      + `<span class="c">${it.checked ? '✓' : ''}</span><span class="l">${esc(it.label)}</span>`
+      + `<span class="c" aria-hidden="true">${it.checked ? '✓' : ''}</span><span class="l">${esc(it.label)}</span>`
       + `<span class="k">${esc(it.key || '')}</span></button>`)).join('');
+  menu.setAttribute('aria-label', opts.label || MENU_LABEL);
   menu.hidden = false;
+  anchor = opts.anchor || null;
+  anchor?.()?.setAttribute('aria-expanded', 'true');
   const r = root.getBoundingClientRect();
   const w = menu.offsetWidth; const h = menu.offsetHeight;
   menu.style.left = `${Math.max(0, Math.min(e.clientX - r.left, r.width - w - 2))}px`;
   menu.style.top = `${Math.max(0, Math.min(e.clientY - r.top, r.height - h - 2))}px`;
-  (menu.querySelector('button:not([disabled])'))?.focus({ preventScroll: true });
+  (menu.querySelector('button[aria-checked="true"]:not([disabled])')
+    || menu.querySelector('button:not([disabled])'))?.focus({ preventScroll: true });
 }
 
 /** クリックの位置（root の中）。ポップアップを同じ所に出す。 */
@@ -143,12 +170,12 @@ function boundaryMenu(e, a, b) {
   const conn = !!a.connected_next;
   const gap = spanOf(b)[0] - spanOf(a)[1];
   return [
-    cmd('merge', ctx, { disabled: !touch, run: () => mergeNotes(a.id, b.id) }),
+    cmd('merge', ctx, { disabled: !touch || a.kind !== 'note' || b.kind !== 'note', run: () => mergeNotes(a.id, b.id) }),   // 結合は音程ノートどうしだけ
     conn
       ? { id: 'detach', label: '切り離す', key: 'Alt+ドラッグ', run: () => setConnection(a.id, b.id, false) }
       : { id: 'connect', label: 'つなぐ', key: 'Alt+ドラッグ',
         run: () => (gap > 0.0005 ? connectGap(a.id) : setConnection(a.id, b.id, true)) },
-    cmd('transition', ctx, { disabled: !conn }),
+    cmd('transition', ctx, { disabled: !conn || a.kind !== 'note' || b.kind !== 'note' }),   // なだらかさは音程ノートどうしだけ
   ];
 }
 
@@ -231,14 +258,16 @@ function rulerMenu(e) {
 
 /** 空白の中の、隙間のある境目（前のノートの尻と次のノートの頭の間。縦は両方の帯の近く）。 */
 function gapAt(x, y) {
-  const P = S.pitched;
+  const P = S.blocks;
   for (let i = 0; i + 1 < P.length; i++) {
     const a = P[i]; const b = P[i + 1];
     const xa = X(spanOf(a)[1]); const xb = X(spanOf(b)[0]);
     if (x < xa || x > xb || xb - xa < 1) continue;
-    const ba = boxOf(a); const bb = boxOf(b);
-    const top = Math.min(Y(ba.hi), Y(bb.hi), Y(bandOf(a)), Y(bandOf(b))) - 16;
-    const bot = Math.max(Y(ba.lo), Y(bb.lo), Y(bandOf(a)), Y(bandOf(b))) + 16;
+    const aa = S.blockAnchor.get(a.id); const ab = S.blockAnchor.get(b.id);
+    if (!aa || !ab) continue;
+    const ba = boxOf(aa); const bb = boxOf(ab);
+    const top = Math.min(Y(ba.hi), Y(bb.hi), Y(bandOf(aa)), Y(bandOf(ab))) - 16;
+    const bot = Math.max(Y(ba.lo), Y(bb.lo), Y(bandOf(aa)), Y(bandOf(ab))) + 16;
     if (y >= top && y <= bot) return [a, b];
   }
   return null;
@@ -254,11 +283,23 @@ export function editorMenu(e, svg) {
   if (d.scale !== undefined) { openMenu(e, rulerMenu(e)); return; }
   if (d.keys !== undefined) return;
   if (y >= rollBottom()) { openMenu(e, laneMenu(e, toSource(T(x)), y > rollBottom() + 22)); return; }
-  const P = S.pitched;
+  const P = S.blocks;                                    // 隣り合う区間（音程ノート・子音・息）
   const idx = (id) => P.findIndex((n) => n.id === id);
   if (d.join !== undefined) {
     const [a, b] = d.join.split('|').map((id) => S.byId.get(id));
     if (a && b) { openMenu(e, boundaryMenu(e, a, b)); return; }
+  }
+  if (d.nop !== undefined && d.nopEdge !== undefined) {
+    // 子音・息の端: 隣と接している端は境目のメニュー（音程ノートの端と同じ）
+    const i = idx(d.nop);
+    const n = P[i];
+    const nb = d.nopEdge === 'end' ? P[i + 1] : P[i - 1];
+    const conn = d.nopEdge === 'end' ? n?.connected_next : n?.connected_prev;
+    if (n && nb && (conn || (d.nopEdge === 'end' ? touching(n, nb) : touching(nb, n)))) {
+      const [a, b] = d.nopEdge === 'end' ? [n, nb] : [nb, n];
+      openMenu(e, boundaryMenu(e, a, b));
+      return;
+    }
   }
   if (d.edge !== undefined) {
     // 隣と接している端（接続でも切り離しでも）= 境目のメニュー。隙間のある端はそのノートのメニュー
@@ -289,16 +330,56 @@ export function editorMenu(e, svg) {
 }
 
 // ---------------------------------------------------------------- トラックビュー
+// ガイドはトラックごと（docs/track-view.md §9）: 見出しのガイドのボタン（プルダウン）で「共通のガイド」か、ほかの
+// ボーカルのトラックを選ぶ（set_track_guide）。共通のガイドの指定（set_guide_track）も同じプルダウンの最後に置く。
+
+/** プルダウンに出すトラックの名前（プラグインは修飾の名前。DAW のトラック名が違えば右に添える。共通のガイドはその旨も）。 */
+function guideChoice(x) {
+  const daw = ARA && x.group && x.group !== x.name ? x.group : '';
+  return { label: x.name, key: [daw, x.guide ? '共通のガイド' : ''].filter(Boolean).join(' · ') };
+}
+
+/** トラックのガイドのプルダウンの項目（共通のガイド・ほかのボーカル・共通のガイドの指定）。 */
+export function guideItems(t) {
+  const common = S.tracks.find((x) => x.id === S.session?.guide) || null;
+  const own = t.guide_id || null;
+  const head = !common
+    ? { label: 'なし（共通のガイドも未指定）', title: '共通のガイドを決めると、ガイドを選んでいないトラックはそれに合わせる' }
+    : common.id === t.id ? { label: 'なし（このトラックが共通のガイド）' }
+      : { label: `共通のガイド（${common.name}）`, title: '共通のガイドを変えると、このトラックのガイドも変わる' };
+  const others = S.tracks.filter((x) => x.kind === 'vocal' && x.id !== t.id);
+  return [
+    { id: 'guide-common', radio: true, checked: !own, ...head, run: () => setTrackGuide(t.id, null) },
+    SEP,
+    ...others.map((x) => ({ id: `guide-to:${x.id}`, radio: true, checked: own === x.id, ...guideChoice(x),
+      run: () => setTrackGuide(t.id, x.id) })),
+    SEP,
+    { id: 'guide', label: t.guide ? '共通のガイドから外す' : 'このトラックを共通のガイドにする',
+      title: '共通のガイド: ガイドを選んでいないトラックが合わせるトラック', run: () => setGuide(t.guide ? null : t.id) },
+  ];
+}
+
+/** 見出しのガイドのボタンの下にプルダウンを出す。anchor: ボタンを返す関数（見出しは描き直すので要素ではなく関数）。 */
+export function openGuideMenu(t, anchorFn) {
+  const el = anchorFn();
+  if (!el) return;
+  const b = el.getBoundingClientRect();
+  openMenu({ clientX: b.left, clientY: b.bottom + 2 }, guideItems(t), { label: `${t.name} のガイド`, anchor: anchorFn });
+}
+
 /** トラック見出し（とクリップの外のレーン）。 */
 export function trackItems(t) {
   const vocals = S.tracks.filter((x) => x.kind === 'vocal').length;
+  const guide = [
+    { id: 'guide-pick', label: 'ガイドを選ぶ…', hidden: t.kind !== 'vocal', run: () => openGuidePicker(t.id) },
+    { id: 'guide', label: t.guide ? '共通のガイドから外す' : 'このトラックを共通のガイドにする', hidden: t.kind !== 'vocal',
+      run: () => setGuide(t.guide ? null : t.id) },
+  ];
   // プラグイン: 名前・位置・種類・外す は DAW が決める。ガイドの指定だけ残す
-  if (ARA) return [{ id: 'guide', label: t.guide ? 'ガイドを外す' : 'このトラックをガイドにする', hidden: t.kind !== 'vocal',
-    run: () => setGuide(t.guide ? null : t.id) }];
+  if (ARA) return guide;
   return [
     cmd('rename', { trackId: t.id }, { label: '名前を変える', disabled: false, run: () => startRename(t) }),
-    { id: 'guide', label: t.guide ? 'ガイドを外す' : 'このトラックをガイドにする', hidden: t.kind !== 'vocal',
-      run: () => setGuide(t.guide ? null : t.id) },
+    ...guide,
     { id: 'zero', label: '元の位置に戻す', disabled: Math.abs(offsetOf(t)) < 1e-9,
       run: () => commitOffset(t.id, offsetOf(t), 0) },
     // 編集中のトラック・最後のボーカルは伴奏にできない

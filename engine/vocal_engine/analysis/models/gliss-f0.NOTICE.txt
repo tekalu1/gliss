@@ -1,10 +1,11 @@
-Gliss の F0 モデル（gliss-f0.onnx）の出典
+Gliss の F0 モデル（gliss-f0.onnx・gliss-f0-v2.onnx）の出典
 ==========================================
 
-gliss-f0.onnx は、SwiftF0（Lars Nieradzik 作。MIT）の学習コードと同じ構造のモデル（14 386 パラメータ）を、
+gliss-f0.onnx（第 3 版）と gliss-f0-v2.onnx（既存補正の復元用の第 2 版）は、SwiftF0（Lars Nieradzik 作。MIT）の学習コードと同じ構造のモデル（14 386 パラメータ）を、
 下のデータだけで Gliss が学習したもの。ピッチ（F0）の検出に使う。事前学習済みの F0 モデル（RMVPE・SwiftF0・CREPE など）の
 重みは、学習にもラベル作りにも使っていない。
 重みのライセンスは Gliss 本体（GPL-3.0-or-later）に従う。学習データそのものは同梱していない。
+LM-SSD・EMVD・SingBAP は第 3 版の学習で加えた。第 2 版はこれらを使っていない。
 
 学習コード
 ----------
@@ -47,6 +48,18 @@ SOFTWARE.
   https://doi.org/10.5281/zenodo.4618287 （Transactions of the International Society for Music Information
   Retrieval 3(1), 2020. https://doi.org/10.5334/tismir.48 ）— CC BY 4.0。近接マイク（DYN・HSM）の録音と、同じ歌い手の
   喉頭マイクに pYIN をかけた注釈（配布物の annotations_csv_F0_PYIN）を使った。
+- Larynx Microphone Singer-Songwriter Dataset (LM-SSD). Simon Schwär, Michael Krause, Michael Fast, Sebastian Rosenzweig,
+  Frank Scherbaum, Meinard Müller. https://doi.org/10.5281/zenodo.20287765 （Transactions of the International Society for
+  Music Information Retrieval 7(1), 2024）— CC BY 4.0。配布元の説明: 一部の曲はカバー曲を含む。3 人の歌い手の近接マイクと喉頭マイクの録音を使い、
+  2 つの信号に重みの要らない方式をかけた合意でラベルを作った。残る 1 人の歌い手の録音は評価にだけ使い、学習には入れていない。
+- Extreme Metal Vocals Dataset (EMVD), version 1.1. Modan Tailleur, Julien Pinquier, Laurent Millot, Corsin Vogel, Mathieu Lagrange,
+  Axel Marmoret, Bastien Pasdeloup. https://doi.org/10.5281/zenodo.17813678 — CC BY 4.0。叫び・シャウト・地声の高低などの録音を使った
+  （重みの要らない方式の合意でラベルを作った）。
+- SingBAP: A Multimodal Dataset of Singing Performance with Biosignals, Audio, and Pose Estimation. Suvi Häärä,
+  Rafael Ramirez-Melendez. Universitat Pompeu Fabra. https://doi.org/10.5281/zenodo.20744738 — CC BY 4.0（配布物の LICENSE.md:
+  "for any purpose, including commercially"）。マイクで録った音階・グリッサンドの録音を使った（付属の F0 は使わず、重みの要らない方式の
+  合意でラベルを作った）。
+  上の歌声の録音のうち、VocalSet・合唱・LM-SSD・EMVD・SingBAP の一部は、再生速度を変えて音高をずらした音（リサンプル）としても使った（改変あり。ずらした分だけ正解の音高を直した）。
 
 話し声
 - PTDB-TUG: Pitch Tracking Database from Graz University of Technology. Gregor Pirker, Michael Wohlmayr,
@@ -85,7 +98,7 @@ SOFTWARE.
   配布元のページ: "The database has CC-BY 4.0 license"。実測の部屋のインパルス応答（8 の部屋のうち 700 本。残りの 1 つの部屋
   VUT_FIT_C236 は評価にだけ使い、学習には入れていない）を、残響の拡張に使った。
 
-評価にだけ使い、学習には入れていないもの: vocadito（Rachel Bittner et al. https://doi.org/10.5281/zenodo.5578807 。CC BY 4.0）、
+評価にだけ使い、学習には入れていないもの: LM-SSD の 1 人の歌い手の録音、vocadito（Rachel Bittner et al. https://doi.org/10.5281/zenodo.5578807 。CC BY 4.0）、
 BUT Speech@FIT Reverb Database の部屋 VUT_FIT_C236。
 
 ラベルを作る道具（重みには入らない）: WORLD（pyworld。Modified BSD / MIT）・Praat（praat-parselmouth。GPL-3.0-or-later）・

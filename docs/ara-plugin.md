@@ -35,10 +35,18 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 
 ```json
 { "format": "gliss-ara", "version": 1,
-  "document": { "work_key": "<作業場所の鍵>", "guide": "<ガイドの修飾の persistentID>" | null },
+  "document": { "work_key": "<作業場所の鍵>", "guide": "<共通のガイドの修飾の persistentID>" | null,
+                "guides": { "<修飾の persistentID>": "<その修飾のガイドの修飾の persistentID>" } },
   "modifications": { "<persistentID>": { "name": "…", "archive": { …Project.to_archive()… } | null } } }
 ```
 
+  - `guide` は共通のガイド（`set_guide_track`）、`guides` はトラックごとのガイド（`set_track_guide`。修飾が 1 つでもあれば空でも書く。古いアーカイブは `guides` 無しで読める）。
+    どちらも `ara_archive` が返し、プラグインは保存でそのまま書く。開き直すと、フィルターが対応させた今の修飾の ID に直して、両方の修飾が登録できたものから
+    `ara_sync(guide=…, guides=…)` で戻す（取り消しの履歴に入れない）。`guides` のあるアーカイブでは、アーカイブにある修飾の指定をアーカイブのとおりにする
+    （載っていない修飾は `""` を送って外す。編集をアーカイブの内容に戻すのと同じ）。`guides` の無い古いアーカイブは作業場所の指定をそのまま使う。
+    エンジンが答えた組（当てた・断られた）は残さない（断られた組を毎回送り直して詰まらない）。
+    ガイドにした修飾を DAW で消すと、その指定は外れる。DAW の取り消しで修飾が戻ると、本人の指定とそれを指していた指定も戻る
+    （エンジンが `ara_gone` に控える。相手がまだ戻っていない組は `ara_guide_wait` に預ける）。
   - `work_key` は作業場所 `%LOCALAPPDATA%\Gliss\work\ara\<work_key>` の名前。新しいドキュメントで UUID を作り、アーカイブにあれば（まだエンジンで開いていなければ）それを使う（同じ PC なら前の解析のキャッシュが使える）。
   - `archive` の `f0_estimator` は、補正を作った F0 の方式（`rmvpe`・`gliss`・`praat`。未解析で明示も無ければ `null`）。
     再合成は F0 を使うので、方式が違うと音が変わる（実測: gliss で補正した編集を rmvpe で解析し直すと約 19 秒分が変わる）。
@@ -59,11 +67,14 @@ DAW にノートを返す（ARA の content reader、`kARAContentTypeNotes`）�
 - 伸縮フラグのあるリージョンは修飾の長さとソングの長さの比を一定の倍率として `StretchReader`（Signalsmith Stretch）で鳴らす。`RegionReader` が作った修飾の時間・ホストの周波数の音を伸縮し、シーク時は `outputSeek` で揃える。伸縮しないリージョンは従来の整数の切り出しと再生のまま。リージョンの途中でテンポが変わる場合の追従は未対応（`TimestretchReflectingTempo` は名乗らない）。
 - 伸縮用の作業領域は `prepareToPlay` で最大ブロック長と 8 倍までの入力を基準に確保する。8 倍を超える比は出力を小分けにして処理し、シークの先読みは確保した長さで切る。入力が 1 出力サンプル当たりの確保量を超える極端な比では無音になる。
 - 原音は**裏のスレッドが先読み**したもの（JUCE の `BufferingAudioReader`。全インスタンスで 1 本の `TimeSliceThread`。先読みは 4 秒）。先読みが間に合っていない範囲だけ無音にする。常にリアルタイムでないインスタンス（`alwaysNonRealtime`）は先読みせず直に読む。
+- **原音のリーダーとリージョンの表は、`prepareToPlay` の後にメッセージスレッドが差し替える**（beta.13。ホストは、Studio Pro でトラックを足すなど、`prepareToPlay` をやり直さずにソースやリージョンを変える）。ARAAudioSourceReader は、ソースの長さ・周波数・チャンネル数の変更か、サンプルに影響する `doUpdateAudioSourceContent` で**二度と戻らない無効**になり、BufferingAudioReader は、アクセスを切っている間に読めなかった区間を**無音のまま持ち続ける**。そのため `GlissDocumentController` が、`doUpdateAudioSourceContent`（サンプルに影響するとき）・`didEnableAudioSourceSamplesAccess(true)`・`didUpdateAudioSourceProperties`（長さ・形式が変わったときだけ）で、そのソースを持つ全部の `GlissPlaybackRenderer::refreshSource` を呼ぶ（知らせの中では作らない。ARAAudioSourceReader が同じ知らせで無効になるので、次のメッセージで、同じソースへの予約をまとめて、アクセスが入っているときに作る）。`refreshSource` は新しい ARAAudioSourceReader＋BufferingAudioReader を作ってから、ソースごとの `std::atomic` の枠に差し込む。リージョンの追加・削除（`didAddPlaybackRegion`・`willRemovePlaybackRegion`）と、準備のときに読み出しを作れなかったリージョンは `syncRegions` が表を作り直して差し替える。オーディオスレッドは枠と表を読むだけ（確保・ロック待ちなし）で、差し替えた古いものは、差し替えの時点で始まっていたブロックが全部終わる（`blocksEntered`・`blocksExited`）まで壊さない。準備の前に `processBlock` が呼ばれたときは無音にして `unpreparedBlocks` を数えるだけ（次の準備か解放のログに出る）。
 - ホストが「リアルタイムでない」描画（VST3 の `kOffline`＝バウンス）のときだけ、原音の先読みを最大 500 ms、**同期（ソースの読み込み・エンジン・差分の再合成）の完了を最大 10 秒**待つ（`prepareToPlay` ごとの持ち時間。待っても済まなければ原音のまま描き、ログに書く）。
 - 原音と比べる（`DocumentBridge::setCompare`）間は窓を当てない（全部の修飾の音が変わったとホストに知らせる）。
 - ドキュメントの編集中（`willBeginEditing`〜`didEndEditing`）は、オーディオスレッドが待たずに（`ScopedTryReadLock`）そのブロックを無音にする。
-- DAW の再生位置は `GlissProcessor::processBlock`（どの役のインスタンスでも）が `PlayheadState` の原子変数に書く。エディタが開いている間、30 Hz で変わったときだけ `playhead` の知らせを出す（ループの PPQ はその位置の BPM で秒に直す）。
-- ARA に結び付かない（普通の VST3 として読み込まれた）ときは、入力をそのまま通す。`EditorRenderer`（試聴）はまだ何も足さない（`GlissEditorRenderer`。画面の `bootstrap` も `preview` を出さない）。
+- DAW の再生位置は `GlissProcessor::processBlock` が `PlayheadState` に書く。再生中は一つの processor を位置の正本に選び、停止中に別の再生中 processor が現れた場合や更新が途切れた場合だけ切り替える。複数の値は連番の前後一致で同じブロックから読み、エディタへ `song_sec`・`stamp_ms`・`sequence` として 30 Hz で送る（ループの PPQ はその位置の BPM で秒に直す）。画面は通知時刻との差から配送の揺れを補正し、補間を 55 ms に制限する。ソングの秒は上段・時計の正本、リージョンに写したソースの秒は下段の表示だけに使う。
+- `EditorRenderer` はエンジンの `render_audition` が作った補正後の WAV を作業スレッドで読み、DAW の音声出力へ足す。音声コールバックは準備済み PCM を読むだけでロック・IO・確保をしない。ループ端、開始、ピッチ差し替え、離したときは 6 ms でフェードし、DAW の通常再生中とオフライン描画には足さない。離す・フォーカス喪失・ホストの再生開始・文書破棄・native editor の破棄では準備中のリクエストも世代番号で取り消す。短いホスト再生が画面への通知の間に終わっても、音声コールバックの取消印で古い試聴を再開させない。同一ドキュメントの複数 EditorRenderer のうち試聴を加算するのは 1 つだけ。画面は `preview('start')` に試聴するノートの修飾の `ara_id` を渡し、プラグインは DAW が各 EditorRenderer に割り当てた再生リージョン（またはリージョン列）にその修飾のリージョンを持つ renderer だけを加算の候補にする（Gliss を挿したトラックが何本もある曲で、ミュートのトラックやフォルダーの中のトラック、別のトラックの renderer に先に当たって、聞こえるトラックで鳴らなくなるのを避ける）。候補の中では最初に出力処理した 1 つが所有し、所有者が消えるか 250 ms 更新しなければ別の候補に渡す。候補でない renderer は、候補が 250 ms 呼ばれていない間（DAW がそのトラックの Gliss を処理していない）だけ加算を引き継ぐ。候補が呼ばれ始めたら、候補でない所有者から候補が奪う。持つ renderer が 1 つも無い（ホストが領域を渡さない）ときは、**同じインスタンスの PlaybackRenderer がその修飾のリージョンを持つ EditorRenderer** に絞る（beta.15。Studio Pro は EditorRenderer にリージョンを割り当てないが、PlaybackRenderer には再生のために必ず割り当てる。`GlissProcessor::didBindToARA` が同じインスタンスの PlaybackRenderer と EditorRenderer を結ぶ。`ara/RendererPair.h`）。それも無ければ**試聴を求めた側のインスタンスの EditorRenderer**（beta.14。`GlissEditor` が画面の `preview` の引数に `requester` として添える。画面のコードは変えない。エディタの窓を開いたインスタンスで、別のトラックの試聴を求めたときは、窓の持ち主のトラックのエフェクト・音量から鳴ってしまうので、最後の手掛かり）。それも分からなければ（`ara_id` が無い・要求元が分からない）絞らず、最初に処理した 1 つが加算する。手掛かりの順は、EditorRenderer の割り当て → 同じインスタンスの PlaybackRenderer の割り当て → requester → 絞らない（`PreviewAudio::chooseEligible`）。試聴を始めるたびに所有者を外し、前の試聴の所有者（前のトラックの renderer など）が絞れないまま足し続けない。絞った renderer が 250 ms 呼ばれなければ別の renderer が引き継ぐ（動作は変えず、`handovers` で数える）。絞りの結果は、常に残すログ（`plugin.log` の `preview:` の行。「検証用の環境変数」の後ろの段落）に出る。`bootstrap.preview` は EditorRenderer がある場合に保存した設定（未設定ならオン）を返す。`preview('start')` は PCM を公開してから `{ok:true}`、利用できないときは `{ok:false,reason}` を返す。
+- 画面の `previewState()` は `phase`（`idle`・`preparing`・`sounding`・`error`）、`error`、`sounding` を返す。`phase` が変わると `gliss-preview-state` を送り、`detail` はその時点の `previewState()`。遅れて返った取り消し済みの開始結果からは通知しない。
+- ARA に結び付かない（普通の VST3 として読み込まれた）ときは、入力をそのまま通す。
 
 ### エンジンとの同期（`plugin/src/ara/DocumentSync.*`）
 
@@ -72,7 +83,7 @@ DocumentController がエンジン（`McpClient`。`plugin/src/engine`）を **1
 1. エンジンの遅延起動（最初のソースの読み出しが許されたとき、または画面が開いたとき）→ `engine_info` → `ara_open(work_key)`。
 2. ソースの音をホストから読み（`ARAAudioSourceReader`。リーダーはメッセージスレッドで作り・壊す）、`<作業場所>\ara-src\<persistentID の FNV-1a 64 の 16 桁>.wav`（float32、ソースの周波数・チャンネルのまま）に書いて、**すぐ** `ara_set_modification`（保留のアーカイブがあれば続けて `ara_restore`）。音が変わったら読み直す。
 3. 外した修飾は `ara_remove_modification`、位置（代表のリージョン＝ソングで最初のものでソースの 0 秒が置かれる秒）・名前・DAW のトラック名の変化とアーカイブのガイドは `ara_sync`。
-4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty` → ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`）→ ノートを取った版と違う修飾に `ara_notes`（下の「DAW に返すもの」）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
+4. `ara_revs` で版の変わった修飾に `ara_render_dirty`（`max_sec` 10、`more` の間は続ける）→ `EditedPcm::applyDirty` → ホストに音が変わったと知らせ（メッセージスレッドで `notifyContentChanged`。下の「ホストに知らせないもの」）→ ノートを取った版と違う修飾に `ara_notes`（下の「DAW に返すもの」）→ `ara_archive` で保存用の写し。編集はあるが解析がまだのものは `waiting`（1 秒ごとの `ara_revs` で解析の終わりを拾う）。
 5. 画面の `engineCall` が成功したら（読むだけのもの以外）同期を予約する。途中で次の予約が来たら、終わってからもう 1 回だけ回す。
 
 エンジンが落ちたら `engine` の知らせ（`failed`）を出し、最後のキャッシュのまま鳴らす。画面の［つなぎ直す］（`restartEngine`）で起動し直し、`ara_open` → 全修飾の `ara_set_modification` → 全部の窓を取り直す。ドキュメントを閉じるとエンジンの stdin を閉じ、2 秒待って Job Object を閉じる（作業場所は消さない）。
@@ -99,7 +110,27 @@ DAW がイベントの上に音符を描く・MIDI に書き出す・ほかの�
 - 取り直し: `ara_revs` の版（`<解析の署名>:<編集の署名>`）が、ノートを取った版と違う修飾だけ `ara_notes(ara_ids)` を呼ぶ（解析が済む・編集・取り消し・アーカイブから戻す、で版が変わる）。
   中身が変わったら、メッセージスレッドで修飾と各リージョンに `notifyContentChanged(notesAreAffected)`、解析だけのノートが変わったらソースにも（ホストへは次の `notifyModelUpdates` で出る）。
   TestHost ではメッセージが回らないのでこの知らせは届かないが、TestHost は `isAudioSourceContentAnalysisIncomplete` を回して待つので、読み出しは確かめられる。
-- アーカイブから戻した直後も、解析が済んで中身が変わったところで知らせる（ARA は「戻した状態と違うときだけ知らせる」としているが、解析はアーカイブに入れていないので、戻した時点ではノートが無い）。
+- 初めて読めるようになったノート（登録・アーカイブから戻した後、pending から読めるようになった）は、ホストに「まだ無い」と答えた修飾・ソース
+  （`isAudio…ContentAvailable` などで聞かれて読めなかったもの）にだけ知らせる。聞かれていなければ、ホストが次に読むときにそのまま渡る。
+  読めていたノートが変わったとき（編集・取り消し・方式の切り替え）はいつも知らせる。
+
+### ホストに知らせないもの（曲を開いただけで「変更あり」にしない）
+
+ARA は、ホストが戻した状態（アーカイブ）と違うときだけ `notifyAudioSourceContentChanged`・`notifyAudioModificationContentChanged`・
+`notifyPlaybackRegionContentChanged` を呼ぶとしている（ホストはこれで保存の要否を決める）。Gliss が開いた直後にこれらを送っていた間、Fender Studio Pro は
+何も操作しないうちから曲を「変更あり」にし、終了時に保存を聞いた（2026-10-07。直した後の実機の確認はまだ）。Gliss は再合成の結果も解析もアーカイブに入れないので、開いた後に作り直すが、
+これは戻した状態に追いつくだけなので、ホストには知らせない（JUCE の `notifyContentChanged(…, notifyARAHost = false)`。ARA のリスナーには届く）。
+
+- 再合成: 手元に音が無い（登録・アーカイブから戻した直後・エンジンを起動し直した）か、前の版が解析待ちだった修飾の再合成で、編集の署名が
+  ホストの持っているもの（開いた時の `ara_set_modification`・`ara_restore` の返り値の `rev`、その後に音の変化を知らせた時の版）のままで、
+  保存の状態（下）も変わっていないもの（プラグインのログに `catching up`）。開いた後に編集が入っていれば知らせる（知らせないとホストが
+  保存を求めず、編集が失われる）。知らせた後に取り消して開いた時の編集に戻ったときも、知らせた版と違うので知らせる。窓の無いまま（原音のまま）の
+  `reset` も知らせない。エンジンが保存したときの音を出せないと答えた（`ara_restore` の `render_changed`。このエンジンより新しい描画の版）
+  修飾は、追いつくだけでも知らせる。
+- ノート: 上の「初めて読めるようになったノート」。
+- `GlissARATest` が、アーカイブから戻す 2 回（別の作業場所で解析し直す B・同じ作業場所で開き直す D）でホストへの知らせが 0 であること、
+  `-relay` で外部の編集の後に修飾とリージョンの「音が変わった」が届くこと、`-changes` で下の「保存するものだけが変わったとき」を確かめる
+  （下の「自動の検証」）。
 
 #### DAW ごとに確かめること（実物の DAW。人の許可を取って）
 
@@ -108,6 +139,36 @@ DAW がイベントの上に音符を描く・MIDI に書き出す・ほかの�
 | Fender Studio Pro 8 | **確認済み（8.1.2.113407、2026-10-04。このブランチの 0239d26 のビルド）**: 挿す・開く・解析・再生・Export Selection（オフラインの描画）・ソングの保存と開き直し（アーカイブの復元・ガイドの指定も戻る）・外部の AI からの編集（下の「外部の AI からの操作を DAW で確かめる」）。書き出しは Gliss の再合成と ±0.3 セント、開き直し前後の書き出しはサンプル単位でほぼ同じ（差 4e-6）。リアルタイムの再生は、開始位置の約 0.9 秒手前（Studio Pro の先行描画）の頭の約 80 ms だけ先読みが間に合わず無音のブロック（`incompleteReads` 19〜35）。ループの折り返しでは出ない。**未確認**: イベントの上・ピアノロールに Gliss のノートが出るか（この日の操作の間、Studio Pro は内容の読み出しを頼まなかった＝`notes: the host requested the analysis` の行が無い）（JUCE フォーラム 2023-10 に、Reaper では出るが Studio One では出ない・Melodyne を載せた後に出たという報告があり、条件が分かっていない）。「音声を MIDI に」のような操作で `adjusted` のノートが使われるか。編集の後に描き直されるか（`notifyContentChanged(notesAreAffected)` を受けるか）。プラグインのログ（`GLISS_ARA_TRACE_DIR`）の `notes: the host requested the analysis` で、DAW が解析を頼むかも分かる |
 | Cubase / Nuendo | 未確認。ARA の拡張の「音声を MIDI に」などでノートが取れるか、`detected` と `adjusted` で扱いが変わるか |
 | Reaper | 未確認（この PC に無い）。報告では ARA のノートを MIDI のアイテムに書き出せる |
+
+### 保存するものだけが変わったとき（音もノートも変わらない）
+
+ホストは保存の要否を知らせで決めることがある（`ARAInterface.h`: プラグインは保存の状態が変わったら確実に知らせる）。音もノートも変わらないが
+アーカイブに入るものが変わる操作（ガイドの指定・歌詞だけ・編集の無い修飾の F0 の方式・取り消し／やり直しの印・描画の版）も、ホストに知らせる。
+
+- エンジンの `ara_revs` が修飾ごとの**保存の状態の署名**（`states`。編集の changeset の列・利用者の歌詞・トラックの F0 の方式とその版・描画の版。
+  解析だけで変わるもの＝自動推定の歌詞・方式を決めていないトラックの解析の方式は入れない）と、ガイドの指定（`guide`・`guides`）を返す。
+- プラグインはホストの持っている署名（戻した時の `ara_restore`・登録した時の `ara_set_modification` の返り値の `state`、知らせた後の値）と比べ、
+  違えば修飾に音もノートも変わらない知らせ（`notifyAudioModificationContentChanged`、`nothingIsAffected`）を送る。
+  **再合成より先に**送り（再合成は長いことがあり、その間に保存・閉じると「変更あり」が間に合わない）、再合成の合間
+  （`ara_render_dirty` の続きの前と、修飾の間。1 秒に 1 回まで）にも `ara_revs` を見直して、再合成の最中に入った変更を知らせる。
+  音が変わる修飾には、再合成の後に音の知らせも送る。ガイドの指定は、保存に書く指定（`getGuidesForStore`）がホストの
+  持っているもの（戻したアーカイブの指定）と違えば、文書の知らせ（ARA 2.3 の `notifyDocumentDataChanged`。ホストに口が無ければ何もしない）と、
+  指定の変わった修飾への同じ知らせを送る。ガイドの指定を書いていない古いアーカイブは、戻し終えた後の指定をホストの持っているものとする。
+- 戻し途中・素材違いで当てていないアーカイブがある修飾は、保存に書くのがそのアーカイブなので知らせない。
+- 戻しただけ（同じ作業場所・別の作業場所で解析し直す）・編集対象の切り替えでは何も送らない。
+- Gliss が報告する ARA の版は 2.0（JUCE の既定）のまま。ホストの版と文書の知らせの口の有無は、プラグインのログ
+  （`document: host ARA API generation …, document data notification yes/no`）に出る。
+- 確かめるのは `GlissARATest -changes` と単体テスト（`AraSyncTests.cpp`。決めた答えを返す偽のエンジン）。実物の Studio Pro が
+  音の変わらない知らせ・文書の知らせで曲を「変更あり」にするかは、まだ確かめていない（下の「DAW ごとに確かめること」）。
+
+### 描画の版（`render_version`）
+
+保存した編集から音を作る仕組みには版がある（エンジンの `model.RENDER_VERSION`。版 2 = 0.1.0-beta.7 の、ピッチ曲線を重ねたつなぎ目で隣の
+ノートのずらし量が漏れない描画）。曲（修飾）は作ったときの版のまま鳴らす: 版の無いアーカイブ・project.json（0.1.0-beta.6 までの曲）は版 1 で、
+beta.6 と同じ音（サンプル一致）。新しい修飾・音の編集の無い修飾（歌詞だけのものも）に最初の編集を足したときは最新の版。編集のある修飾に編集を足しても版は変えない
+（同じ修飾の中で古い描画と新しい描画を混ぜると、つなぎ目で両方が混ざり、前の編集の音も変わりうるため。修飾ごとに 1 つの版にする）。
+上げるのは利用者が `set_render_version(apply=true)` で明示したときだけ（`apply` を省くと、上げたら音が変わる区間を返すだけ）。
+版はアーカイブ・`ara_revs` の解析の署名と保存の状態の署名に入るので、上げると再合成し直してホストに知らせる。
 
 ### 外部の AI から操作する（中継。`engine/vocal_engine/ara_relay.py`）
 
@@ -184,7 +245,7 @@ AI からの手順:
   （`ara_relay.py` は worktree のエンジンにしか無い）ことで分かる。
 - 1 音: `shift_pitch(+100)` は約 1 秒で `ara_render_dirty`・`sync: external edit`・`ara_notes … adjusted` がログに出て、画面は「外部の変更を読み込んだ」で
   描き直した。Export Selection で測ると、そのノートだけ +99.9 セント（前後のノート 0.0）。`undo` で書き出しは元とサンプル単位でほぼ同じ（差 3e-6）。
-- ガイドに合わせる: 主旋律のガイドと録り直しを別のトラックの同じ位置に置き、どちらにも Gliss を挿す。外部から `set_guide_track`（中継でそのまま使える。
+- ガイドに合わせる: 主旋律のガイドと録り直しを別のトラックの同じ位置に置き、どちらにも Gliss を挿す。外部から `set_guide_track`（共通のガイド。トラックごとに変えるなら `set_track_guide`。どちらも中継でそのまま使える。
   ARA 用の別のツールは要らない）→ 範囲 40–55 秒に `correct_to_guide`（タイミング 1.0 → 音程 1.0・`pitch_mode="contour"`）。`measure_against_guide` で
   区間の音程の残差 45.3 → 4.5 セント（±10 以内 12.5% → 83.3%）、発音の頭 19.9 → 0.2 ms（再合成して測り直した値）。Studio Pro の書き出しが変わったのは
   40–54 秒だけ（範囲外は −121 dB）で、Gliss の再合成した窓（`ara-out` の `.f32`）と ±0.3 セントで同じ。
@@ -218,9 +279,11 @@ AI からの手順:
 
 | 名前 | 意味 |
 |---|---|
-| `GLISS_ARA_TRACE_DIR` | 指すフォルダの `gliss-ara-<プロセス ID>.log` に、プラグインの出来事（アーカイブの保存・復元、レンダラーの準備・解放と集計、エディタの `ui-ready`・案内を出したこと）と、再生の記録（`trace` の行。ブロックごとの総和・二乗和）を書く。オーディオスレッドからは書かず、レンダラーの解放のときにまとめて書く |
+| `GLISS_ARA_TRACE_DIR` | 指すフォルダの `gliss-ara-<プロセス ID>.log` に、プラグインの出来事、通常再生の `trace`、EditorRenderer 試聴の `preview-trace` と `preview: release` を書く。試聴の各ブロックは加算したサンプルのフレーム数・非ゼロフレーム数・二乗和を数えて atomic で公開し、ログは message thread のタイマーから書く。未設定なら計測しない |
 | `GLISS_ARA_READ_TIMEOUT_MS` | リアルタイムの描画でも先読みの完了をこの ms だけ待つ。検証ホスト（TestHost は CPU の速さで取りに来る）で欠けなく比べるため。普段は使わない |
 | `GLISS_ARA_SYNC_WAIT_MS` | リアルタイムの描画でも、同期（エンジン・差分の再合成）の完了をこの ms だけ待つ（prepareToPlay ごとの持ち時間。既定はバウンスのときだけ 10 秒）。検証ホストで編集の当たった音を描かせるため |
+| `GLISS_TEST_BRIDGE_DIR` | **CMake の `GLISS_TEST_HOOKS=ON` のビルドだけ**（`test-plugin.ps1` が ON で構成する。配布の `scripts/build-plugin.mjs` は OFF で構成し、出来た DLL にこの名前が無いことを確かめる）。試験用の画面の代わり（絶対パス）。そのフォルダの `<名前>.call.json`（`{"tool", "args"}`）を順に画面と同じ `engineCall` に渡し、答えを `<名前>.result.json` に書く。`args` の文字列 `"@ara:<修飾の persistentID>"` はその修飾のトラックの id に置き換える（`GlissARATest -changes`） |
+| `GLISS_TEST_MAX_RENDER_SEC`・（エンジン）`GLISS_TEST_RENDER_DELAY_SEC` | 試験用。1 回の `ara_render_dirty` で再合成する長さ（`GLISS_TEST_HOOKS` のビルドだけ）と、エンジンが窓を作る呼び出しの前に待つ秒。再合成が長い間の知らせを確かめる（`GlissARATest -changes` の 16） |
 | `GLISS_TEST_EDIT` | 試験用の編集。エンジンにつないで最初の修飾を解析した後に 1 回だけ当てる。`{"tool": "shift_pitch", "args": {...}}`・`shift_pitch` の引数そのもの（`{"cents": 100, "start_sec": 0, "end_sec": 5}`）・`shift_pitch:<note_id>:<cents>` |
 | `GLISS_ENGINE_DISABLED` | `1` でエンジンを起動しない（原音のまま。エンジンの要らない検証を速く・利用者の環境のエンジンを起動しないため） |
 | `GLISS_PLUGIN_STATE_FILE` | 画面の設定 `plugin-state.json`（既定 `%APPDATA%\Gliss\plugin-state.json`）の置き場を差し替える（試験で利用者の設定を書かない） |
@@ -229,6 +292,18 @@ AI からの手順:
 | `GLISS_PLUGIN_WEB_DIR` | 既にあるフォルダ（`<repo>\app\renderer`）を指すと、エディタは画面の資源（`index.html`・`*.js`・`ara-bridge.js`）を埋め込みでなくそのフォルダから要求のたびに読む（ビルドし直さずに画面を直せる）。`ara-bridge.js` は user script なのでエディタを開き直したときに読み直す。このときは F5・Ctrl+R をブラウザの再読み込みに残す（DAW へ渡さない） |
 
 エンジンの起動の設定（`GLISS_ENGINE_PYTHON`・`GLISS_ENGINE_CWD`）は下の「配布版のプラグインがエンジンを見つける順」、エンジン側の環境変数（`VOCAL_ENGINE_WORK_DIR`・`GLISS_F0_ESTIMATOR` など）は AGENTS.md。試験では `VOCAL_ENGINE_WORK_DIR`・`VOCAL_ENGINE_LOG_DIR` を一時フォルダに向ける。
+
+**DAW の選択への追従**（`SelectionPolicy`・`ara-selection.js`）: DAW でリージョンを選ぶと、Gliss のエディタはそのリージョンの修飾へ切り替わる。次のときは切り替えない。
+- 今の修飾のリージョンが新しい選択にまだ入っている（ほかのリージョンも選ばれていても、先頭へ飛ばない）
+- 前の知らせと選択の中身（リージョン・リージョン列）が同じ、または選択が空
+- 開いている（見えている）エディタが 1 つでもあるとき、見えていないエディタ・別のインスタンスのエディタの知らせ（ドキュメントで共有する選択を上書きしない）。エディタを作った時点では、ドキュメントにまだ選択が無いときだけ DAW の選択を渡す（窓が見えるようになったときは、閉じている間に変わった選択を拾う）
+画面（`ara.js` の `onSelection`）は、最後に当てた選択と同じ知らせ、編集中（ドラッグ・確定中）に来た今の編集対象と同じトラックの知らせ（あとで当て直さない）を捨て、同じトラックの知らせのたびに表示範囲をリージョンに戻さない。`pullHostState`（画面が見えたとき）も、ホストの選択が変わっていなければトラックを切り替えない。DAW で別のトラックのリージョンを選んだときは、編集が済むのを待って切り替える。
+判断は常に書く小さなログ `%APPDATA%\Gliss\plugin.log`（`GLISS_PLUGIN_LOG_FILE` で変更。1 MB で回す。同じ行は 2 秒内に続けて書かない）の `selection:` の行に出る: どのエディタ（番地）が送ったか、選択のリージョン（`r<番地>=<修飾の ID>`）・リージョン列の順、採ったか無視したか（`adopted`・`ignored`）と理由（`hidden-editor`・`unchanged`・`empty`・`same-region`・`current-kept`・`first-region`・`nearest-in-sequence`・`no-modification`）。Studio Pro が何を送ったかを後から調べるのに使う。
+試聴の判断も常に書く（「試聴が別のトラックから鳴る」を後から調べるため）: `preview: start local|engine ara=<修飾> note=<ノート> range=<秒> cents=… ui-track=<画面が選んでいるトラック> shown=<画面が描いていたトラック> covered=N/M playback=P by=editor|playback|requester|none candidates=C narrowed=0|1 requester=<求めた側の EditorRenderer の id> owner=<始める前の所有者>`（`covered` は、その修飾のリージョンが割り当たった EditorRenderer の数 / 全部の数、`playback` は、同じインスタンスの PlaybackRenderer がその修飾のリージョンを持つ EditorRenderer の数、`by` は絞れた手掛かり、`candidates` は足してよい renderer の数）・`preview: local refused reason=…`（プラグインの切り出しを断った理由。画面は断られるとエンジンで作る）・`preview: stop played-by=<最後に足した renderer> narrowed=… handovers=…`・`editor view <番地> -> editor renderer <id>`（`selection:` の行の view の番地と EditorRenderer を結び付ける。`GlissEditor` を作るとき）・`instance: editor renderer <id> <-> playback renderer <番地>`（同じインスタンスの 2 つの renderer を結んだとき）。`ui-track` と `shown` が違えば、画面が切り替えの途中だった（beta.14 からは、その間の押下は鳴らさない）。
+同じログに、再生のレンダラーの行（`renderer:`）も常に書く: `renderer: prepare <周波数> Hz, block …, N region(s), M source(s), … skipped`（準備のとき。`skipped` は読み出しを作れなかったリージョン）・`renderer: source reader replaced id=<ソースの persistentID> reason=content|samples-access|properties`（リーダーの差し替え。形式が変わったときは `(format changed)`）・`renderer: regions synced, N of M region(s) readable`・`renderer: release blocks=… incompleteReads=… lockMisses=… unknownRegionBlocks=…（ホストが持つリージョンの数と読み出しの数が合わなかったブロック）unpreparedBlocks=… noSourceReads=… skippedRegions=… readerRefreshes=…`（解放のとき）・`source: samples access disabled id=…`。同じ行は 2 秒内にまとめ、1 秒に 20 行を超えると `(+N similar lines omitted)` に畳む。「トラックの音が鳴らなくなった」ときは、まずこの行で、準備の後に `source reader replaced` が出たか・`unknownRegionBlocks`・`unpreparedBlocks`・`incompleteReads` が増えていないかを見る。
+DAW の再生位置の知らせ（`playhead`。30 Hz）は、停止中は表示範囲を動かさない。DAW 側で再生位置が動いた（前の知らせと 1 ms 以上違う。再生から止まったときは、再生位置の見積もりから 0.15 秒以上の戻り）ときだけ、その位置が表示外なら 1 回寄せる（`ara.js` の `onPlayhead` が `follow({ locate })` を呼ぶ）。再生中に利用者が表示を動かしたら再生位置への追従を止め、位置が範囲に戻るか次の再生で再開する（`follow.js`。追従のオン・オフの設定が優先）。
+試聴は**押した瞬間**に始める（長押しの判定を待たない）。トラックを切り替えている途中（選んでいるトラック `S.session.current` に、描いているデータ `S.vd`・`S.byId`・`S.projectDir` がまだ追いついていない間）に押したときは鳴らさない（前のトラックのノートの時刻で、新しいトラックの音を切り出さないため。`previewContext()` が `shownTrack()` ＝ `syncOff` と同じ規則で、描いているトラックと選んでいるトラックが同じか確かめ、違えば null）。追いついてから押し直すと、新しいトラックの修飾・ノートで鳴る。ずらさない試聴（cents = 0）は、`preview('start', { local: true, ara_id, start_sec, end_sec, allow_stale })` で、プラグインが持つ編集済みの音（`EditedPcm` の窓）と DAW のソースから作ってその場で公開する（`GlissDocumentController::previewLocal`。エンジンを呼ばない。窓の中は再生と同じ PCM、外は原音、モノラル）。キャッシュが最新でなければ（同期の最中）`allow_stale` が false のとき `reason: "stale"` で断り、画面がエンジンの `render_audition` で作る。編集したばかりのノートは `allow_stale: false`（画面が `markNoteEdited` で覚える。覚えていない編集の後もしばらく全部）。ずらす試聴（ピッチのドラッグ）と断られたときは、エンジンの `render_audition` を `auditionPool`（ほかの呼び出しが長くても待たない専用のスレッドプール）で呼び、WAV の読み込みも同じプールで行う。編集の最中（`S.busy`・順番待ち・描画データの更新）に作れなかった試聴は、押している間、編集が済むのを待って今の状態から取り直す（黙って捨てない。上限 10 秒）。離しても、鳴り始めてから約 0.2 秒は鳴らして止める。1 回の長さの上限は 60 秒。遅れの大きな原因は、エンジンが `ara_revs`（プラグインが 1 秒ごとに全修飾の版を聞く）のたびに全修飾の project.json を読み直して GIL を握り、同じエンジンの `render_audition` が 0.5〜3 秒待たされることだった。`ara_revs` は変わっていないファイルを読み直さない（`engine/docs/MCP.md`）。段ごとの時間は `GLISS_ARA_TRACE_DIR` のログの `audition-latency stage=request / engine-call（queueMs）/ engine-result / native-start（local=1）/ decode-start / decode-end / published`（ミリ秒の時刻）と、エンジンのログの `render_audition ok (… s)` で読む。
+実 DAW の試聴音を確認するときは、DAW 起動前に `GLISS_ARA_TRACE_DIR` を試験用フォルダへ向ける。ホスト再生を止め、ノートを長押ししてから離し、停止後も 1 秒ほどエディタを開いたままにして音声コールバックを通す。ログは message thread が約 100 ms ごとに書く。`preview-trace` の `mode=r active=1 nonzero>0 energy>0` は EditorRenderer が実際に PCM を出力へ加えた証拠で、UI の `sounding` 表示には依存しない。離した後は `release=1` の短いフェードに続き、`mode=r active=0 release=0 nonzero=0 energy=0` のブロックを時系列で確認する。EditorRenderer の解放時には集計行 `preview: release ... frames>0 nonzero>0 energy>0 stopZeroBlocks>0 dropped=0` も出る。`mode=h` は DAW 再生中、`mode=o` はオフライン、`mode=x` は別の EditorRenderer が出力を担当した（または試聴するノートの修飾を持たない）ブロックで、これらのゼロは試聴停止の根拠に使わない。message thread が長く塞がれて `dropped>0` なら、その区間は確認できない。二乗和は発音と停止を示すが、実機でのピッチ値そのものは示さない。
 
 ## ビルド
 
@@ -362,11 +437,15 @@ ARA SDK のホスト（`ARATestHost` と `GlissARATest`）は `plugin/tests/arat
 | ARA SDK の **TestHost**（`-vst3 Gliss.vst3`、全 12 項目） | プロパティ更新・コンテンツ更新・読み出し・クローン・アーカイブ・分割アーカイブ・ドラッグ＆ドロップ・再生・EditorView・処理アルゴリズム・音声ファイルのチャンク。終了コード 0 |
 | TestHost の `PlaybackRendering` ＋ `verify_render_trace.py` | プラグインが返した音を、SDK の試験信号（5 秒・44.1 kHz のパルス状の正弦波）と、ブロックごとの総和・二乗和で突き合わせる（`tests/verify_render_trace.py`）。全ブロックが一致すること |
 | **GlissHostCheck**（`plugin/tests/hostcheck`、JUCE のホスト） | VST3 として見つかる・`hasARAExtension`・ARA ファクトリの ID が決めたとおり・解析の種類がノートだけ・ARA に結び付かない `processBlock` が入力を変えない・ARA に結び付かないエディタは画面を出さずに案内を出す・エディタとインスタンスを閉じて落ちない |
-| **GlissPluginTests**（`plugin/tests/unit`） | 単位ごとの単体テスト（カテゴリ `Gliss`）。エディタは `WebResources`（`/fs/` の decode と拒否・資源の振り分け・開発時のフォルダ）。ドキュメント（`AraTests.cpp`）はアーカイブの形と往復・作業場所の鍵・リージョンの時間の写し（周波数が同じときは段階 1 の計算と同じ・違うときは続きのブロックが途切れない）・再生位置・禁止のツールと同期を予約するツール・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方・float の WAV がホストの値をそのまま書く・`plugin-state.json`・エンジンの無いときの同期の待ち。DAW に返すノート（`NoteTests.cpp`）は `ara_notes` の写し・品質のラベル・時間の範囲・ソングの秒への写し・リージョンでの切り取り・知らせるかどうかの比べ方。JUCE の UnitTestRunner はこの console のアプリでは失敗の文を出さない（結果の数だけ）。失敗の中身を見たいテストは、`AraTests.cpp` の `ScopedStdoutLogger` のように間だけ stdout へ出すロガーを入れる |
+| **GlissPluginTests**（`plugin/tests/unit`） | 単位ごとの単体テスト（カテゴリ `Gliss`）。エディタは `WebResources`（`/fs/` の decode と拒否・資源の振り分け・開発時のフォルダ）。ドキュメント（`AraTests.cpp`）はアーカイブの形と往復・作業場所の鍵・リージョンの時間の写し（周波数が同じときは段階 1 の計算と同じ・違うときは続きのブロックが途切れない）・再生位置・禁止のツールと同期を予約するツール・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方・float の WAV がホストの値をそのまま書く・`plugin-state.json`・エンジンの無いときの同期の待ち。ホストへの知らせ（`AraSyncTests.cpp`。決めた答えを返す偽のエンジン）は、開いた状態に追いつくだけは知らせない・保存の状態だけ・ガイドの指定の変化を知らせる・解析待ちの後に取り消して開いた時の編集に戻ったら知らせる・戻しただけは知らせない（`render_changed` なら知らせる）・ガイドの指定の無い古いアーカイブ。DAW に返すノート（`NoteTests.cpp`）は `ara_notes` の写し・品質のラベル・時間の範囲・ソングの秒への写し・リージョンでの切り取り・知らせるかどうかの比べ方。JUCE の UnitTestRunner はこの console のアプリでは失敗の文を出さない（結果の数だけ）。失敗の中身を見たいテストは、`AraTests.cpp` の `ScopedStdoutLogger` のように間だけ stdout へ出すロガーを入れる |
 | エンジン: TestHost（全 12 項目） | エンジンにつないだまま全項目が終了コード 0（ドキュメントを作ってすぐ壊す試験でエンジンが残らない） |
-| エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る。ノート: 先に編集なしのドキュメント（リージョン 2 つ。2 つ目はソースの 1.5〜4.2 秒をソングの 10 秒）でホストとして解析を頼んで待ち、ソース・修飾・リージョンのノートがエンジンの `ara_notes` の解析だけのノートと一致して `detected`、2 つ目のリージョンは切って写したもの。編集の後は `adjusted` で、エンジンの編集後のノートと一致し、全部 1 半音上がる。アーカイブから戻した後も同じ |
+| エンジン: **GlissARATest** ＋ `verify_ara_engine.py`（`plugin/tests/aratest`） | ARA SDK の TestHost の部品で、合成の歌声もどき（44.1 kHz・6.2 秒）のドキュメントを作り、`GLISS_TEST_EDIT`（+100 セント）を当てて描画 → 保存 → 閉じる → 別の作業場所で同じ永続 ID のドキュメントにアーカイブを戻して描画 → 48 kHz でも描画。描画が**エンジンの `render_region`（同じ範囲）とサンプル単位で同じ**（float32 で差 0）・原音と違う・アーカイブから戻した音が同じ・48 kHz の描画が鳴る。ノート: 先に編集なしのドキュメント（リージョン 2 つ。2 つ目はソースの 1.5〜4.2 秒をソングの 10 秒）でホストとして解析を頼んで待ち、ソース・修飾・リージョンのノートがエンジンの `ara_notes` の解析だけのノートと一致して `detected`、2 つ目のリージョンは切って写したもの。編集の後は `adjusted` で、エンジンの編集後のノートと一致し、全部 1 半音上がる。アーカイブから戻した後も同じ。ホストへの知らせ（`ModelUpdateCounts.h`。`updates.json`）: アーカイブから戻した B と、同じ作業場所でもう一度戻す D（曲を開き直しただけ）で、ホストがノートを読むまで 0。D の終わりにノートが読めている |
 | エンジン: **GlissHostCheck `--ara-editor`**（`AraEditorCheck.h`） | JUCE の ARA ホスト（`juce_ARAHosting`）で Gliss.vst3 に本物のドキュメントを作り、インスタンスを全部の役で結び付けてエディタを開く。プラグインのログで、エディタがドキュメントの `DocumentBridge` を得る・画面の `ui-ready`・`bootstrap`・エンジンの起動と修飾の登録・画面の `engineCall`（`list_tracks`・`select_track`・`export_view_data`）の成功・`/fs/` を断っていないことを確かめる |
-| エンジン: **GlissARATest `-relay`** ＋ `verify_ara_relay.py` | 外部の AI の代わり（`plugin/tests/relay_client.py`。別のプロセスの `vocal_engine.mcp` を stdio で起動）が、開いているドキュメントを `ara_documents` で見つけ、`ara_attach` → `analyze_take` → `shift_pitch`（+100 セント）を中継で呼ぶ。編集の前の描画が原音・後の描画がエンジンの `render_region` とサンプル単位で同じ・保存（アーカイブ）に作者 `ai` の changeset・DAW に返すノートが adjusted で 1 半音上・プラグインのログに `sync: external edit`・ドキュメントを閉じたら中継の記録が消える |
+| **GlissHostCheck `--ara-playback`**（`AraPlaybackCheck.h`。エンジンなし） | JUCE の ARA ホストで正弦波のソースのドキュメントを作り、再生の役で 1 回だけ準備する。そのあと `prepareToPlay` をやり直さずに、(1) リージョンを足す・(2) サンプルへのアクセスを切って（切っている間に別の位置を読ませて）戻す・(3) `updateAudioSourceContent(samplesAreAffected)` を知らせる、のそれぞれで、まだ読んでいない位置・読めなかった位置・足したリージョンの音が鳴り、最初のリージョンも鳴り続けること。プラグインのログ（`GLISS_PLUGIN_LOG_FILE`）に `renderer: prepare`・`source reader replaced`（`samples-access`・`content`）・`regions synced`・`renderer: release` が出ること。修正前（beta.12）のプラグインでは (1)〜(3) と最初のリージョンの 4 項目が無音で落ちる |
+| **GlissHostCheck `--ara-preview`**（`AraPreviewCheck.h`。エンジンなし。`GLISS_TEST_HOOKS` のビルド） | 同じ ARA ドキュメントに 2 つのインスタンスを結び付け、インスタンス 1 の EditorRenderer にだけ修飾 N のリージョンを渡す。試験用の口（`GLISS_TEST_BRIDGE_DIR` の `"@preview"`。画面の `preview` の代わり。`requester` は EditorRenderer の id で、プラグインのトレースログの `preview: editor renderer N created` から読む）で、N の試聴をインスタンス 1 から求めるとインスタンス 1 だけに音が乗る・止める・どの EditorRenderer も持たない M の試聴をインスタンス 2 から求めるとインスタンス 2 だけに音が乗り、前の所有者のインスタンス 1 は足さない。修正前（beta.13）は M がインスタンス 1 から鳴り、求めたインスタンス 2 は無音 |
+| **GlissHostCheck `--ara-preview-playback`**（同じ `AraPreviewCheck.h` の変種） | EditorRenderer にはリージョンを割り当てず、PlaybackRenderer にだけ割り当てる（N はインスタンス 1、M はインスタンス 2。Studio Pro と同じ）。試聴を求めた側（`requester`。エディタの窓を開いたインスタンス）を、わざとその修飾を持たない側にして、N の試聴はインスタンス 1 だけ、M の試聴はインスタンス 2 だけに音が乗り、求めた側は足さない。修正前（beta.14）は絞り込みが requester になり、求めた側（別のトラック）から鳴って、リージョンを持つインスタンスは無音 |
+| エンジン: **GlissARATest `-changes`** | 修飾 2 つの文書で、保存するものが変わる操作のたびにホストへ知らせが届くこと（画面の操作はプラグインの試験用の口 `GLISS_TEST_BRIDGE_DIR` から画面と同じ `engineCall` で: 編集・歌詞だけ・F0 の方式だけ・トラックごとのガイド・取り消し／やり直し、外部の AI は `relay_client.py edit / guide` で）、編集対象の切り替えだけでは届かないこと、保存した文書を同じ作業場所・別の作業場所で戻しただけでは届かないこと、描画の版 1 のアーカイブを戻しても届かず（beta.6 の音のまま）、画面から版を上げると届くこと、再合成が長い間（3 秒ずつ 3 回）に外したガイドの指定の知らせが、再合成が終わる前に届くこと。操作ごとの数は `changes.json` |
+| エンジン: **GlissARATest `-relay`** ＋ `verify_ara_relay.py` | 外部の AI の代わり（`plugin/tests/relay_client.py`。別のプロセスの `vocal_engine.mcp` を stdio で起動）が、開いているドキュメントを `ara_documents` で見つけ、`ara_attach` → `analyze_take` → `shift_pitch`（+100 セント）を中継で呼ぶ。編集の前の描画が原音・後の描画がエンジンの `render_region` とサンプル単位で同じ・保存（アーカイブ）に作者 `ai` の changeset・DAW に返すノートが adjusted で 1 半音上・プラグインのログに `sync: external edit`・ドキュメントを閉じたら中継の記録が消える・外部の編集の後にホストへ修飾とリージョンの「音が変わった」が届く（`updates-r.json`） |
 | **GlissHostCheck `--editor`**（`EditorCheck.h`・`FakeDocumentBridge.h`） | Gliss.vst3 を読まず、エディタの画面の部品（`plugin/src/editor`）を**偽の DocumentBridge** につないでこのプロセスの中で画面の外に開く: `app/renderer` が読み込まれ `ui-ready` が来る（その前の知らせは捨てる）・`window.api` と `data-mode=ara`・user script から `/juce/index.js` の動的 import・`engineCall` の往復（`{ok:false}` も値で・別スレッドの completion も）・ほかのネイティブ関数・`/fs/`（空白・`%`・`+`・日本語の名前を読める／外・`..`・無い・フォルダ・知らない資源は拒否）・知らせ 6 種が画面の受け手に届く・F8 は窓へ渡り Space は渡らない・応答の前に閉じても落ちない・2 つ同時に 20 回開閉。`--expect-web-dir` で `GLISS_PLUGIN_WEB_DIR` から読むこと |
 
 どの検証もタイムアウトを持ち、終わりに起動したプロセス（ホスト・WebView2・エンジン）を木ごと止めて、残りが 0 であることを確かめる。
@@ -388,6 +467,8 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 - TestHost の `-file <wav>`（音声ファイルを渡す）は、**SDK 自身の TestPlugIn でも**ときどき終わらない（試験ごとに起きたり起きなかったりする）。Gliss の検証では使わず、内蔵の試験信号を使う。
 - TestHost は VST3 の `processMode` を `kRealtime` にして CPU の速さで描画する。先読みが間に合わないブロックが多く出る（普通の再生ではない）。このため、突き合わせの検証では `GLISS_ARA_READ_TIMEOUT_MS` で待たせる。待たない場合の挙動は、ブロックが欠ける（無音になる）だけで、読めた部分は正しい。同じ理由で、編集の当たった音を描かせるには `GLISS_ARA_SYNC_WAIT_MS` で同期を待たせる。
 - TestHost のメインスレッドは描画の間メッセージを回さない（眠るだけ）。プラグインの `MessageManager::callAsync`（エディタへの知らせ・ホストへの `notifyContentChanged`）はそこでは届かない。同期はメッセージスレッドに頼らずに進む作りなので、描画とアーカイブは確かめられる。
+  `GlissARATest` はホストへの知らせを数えるために、自分でメッセージを配り（`PeekMessage`）、`notifyModelUpdates` を呼ぶ（`pumpHost`）。
+  SDK の TestHost の受け口（`ARAModelUpdateController.cpp`）は TestHost が問い合わせている間だけ知らせを許すので、`GlissARATest` では数える版（`GlissModelUpdateController.cpp`）に差し替えている。
 - TestHost のホストは、ホストの音のリーダーの作成と破棄を**ドキュメントを作ったスレッドでだけ**許す（`ARA_VALIDATE_API_THREAD`）。読むのは描画のスレッド以外ならどこでもよい。プラグインは `ARAAudioSourceReader` をメッセージスレッドで作り、同期のスレッドで読む。
 - ARA のストリームに `juce::OutputStream::writeString` で書くと、文字列の後ろに NUL が 1 バイト付く（`readString` が読む印）。アーカイブを外から読むときは落とす。
 - ARA_Examples を `add_subdirectory` して自前のホストを足すとき（`plugin/tests/aratest`）、`configure_ARA_Examples_target` の `source_group(TREE …)` がターゲットのフォルダの外のソースで落ちる（関数 `ara_group_target_files` を空で定義し直す）。`ExamplesCommon\Windows\ARAExamples.rc` は版の定義が要るので外す。ARA の例は cp932 で読むので、日本語のコメントのあるファイルには `/utf-8` を付ける。
@@ -403,19 +484,19 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 | `plugin/CMakeLists.txt` | 依存の取得・`juce_add_plugin`・オプション |
 | `plugin/src/GlissProcessor.*` | `AudioProcessor`（`createPluginFilter`・`createARAFactory` もここ） |
 | `plugin/src/GlissDocumentController.*` | ARA の `DocumentController`。ARA の出来事 → `DocumentSync`、アーカイブ、`DocumentBridge` の実装（`engineCall`・`bootstrap`・`saveState`・`transport`・`hostState`・`isReadableByEditor`・選択と再生位置の知らせ）、ホストの音のリーダー |
-| `plugin/src/GlissPlaybackRenderer.*` | 再生（リージョンごとの `RegionReader`・原音の先読み・バウンスでの同期の待ち・比べる・検証の記録） |
-| `plugin/src/GlissEditorRenderer.*` | 試聴の役（まだ何も足さない） |
+| `plugin/src/GlissPlaybackRenderer.*` | 再生（リージョンごとの `RegionReader`・原音の先読みと差し替え・リージョンの表・バウンスでの同期の待ち・比べる・検証の記録） |
+| `plugin/src/GlissEditorRenderer.*` | 試聴の役（補正後の試聴 PCM を DAW の出力に足す。試聴するノートの修飾を持つ renderer だけが足す） |
 | `plugin/src/ara/` | ドキュメントの部品（ARA の型を使わず、単体テストにも入る）: `DocumentSync`（エンジンとの同期のスレッド）・`NoteContent`（DAW に返すノートの写し・リージョンでの切り取り・品質のラベル）・`ArchiveIO`（アーカイブの形・作業場所の鍵）・`RegionMapping`（リージョンの時間）・`PlayheadState`・`EngineCalls`（禁止のツール・同期の予約・`GLISS_TEST_EDIT`・`ara_render_dirty` の読み方）・`FloatWavWriter`・`PluginState`。`sources.cmake` が ARA を使うファイル（`GlissEditorRenderer`）をプラグインだけに足す |
 | `plugin/src/engine/`・`plugin/src/cache/` | エンジンの子プロセスと MCP クライアント・編集した窓のキャッシュと再生の読み出し |
 | `plugin/src/GlissEditor.*` | プラグインのエディタ（`DocumentBridge` を得て画面を出す・選択を渡す・ARA でないときの案内） |
 | `plugin/src/editor/` | 画面の橋: `EditorWebView`（WebView2・ネイティブ関数・知らせ・ユーザーデータのフォルダ）・`WebResources`（resource provider）・`EmbeddedAssets`・`KeyForwarding`・`key-forward.js` |
 | `plugin/src/ara/DocumentBridge.h` | エディタがドキュメントに頼む口（`GlissDocumentController` が実装する） |
 | `plugin/src/Diagnostics.*`・`ProcessUtils.*` | 検証用のログ・環境変数、プロセスの ID と生死 |
-| `plugin/tests/hostcheck/` | GlissHostCheck（`--editor` の偽の DocumentBridge、`--ara-editor` の本物の ARA ドキュメントも） |
-| `plugin/tests/aratest/` | ARA SDK のホスト（`ARATestHost`）と、その部品で作った通し試験 `GlissARATest` を 1 つのツリーで作る CMake |
+| `plugin/tests/hostcheck/` | GlissHostCheck（`--editor` の偽の DocumentBridge、`--ara-editor` の本物の ARA ドキュメント、`--ara-playback` の準備の後の変化、`--ara-preview`・`--ara-preview-playback` の試聴の足し先も） |
+| `plugin/tests/aratest/` | ARA SDK のホスト（`ARATestHost`）と、その部品で作った通し試験 `GlissARATest` を 1 つのツリーで作る CMake。`GlissModelUpdateController.cpp`・`ModelUpdateCounts.h` はホストへの知らせを数える |
 | `plugin/tests/verify_render_trace.py` | 再生の記録を試験信号と突き合わせる（numpy が要る） |
 | `plugin/tests/verify_ara_engine.py` | `GlissARATest` の出力をエンジンの `render_region`・`ara_notes` と突き合わせる（エンジンの python・cwd は engine） |
-| `plugin/tests/relay_client.py`・`verify_ara_relay.py` | `GlissARATest -relay` が起動する外部の AI の代わりと、その出力の確かめ |
+| `plugin/tests/relay_client.py`・`verify_ara_relay.py` | `GlissARATest -relay`・`-changes` が起動する外部の AI の代わりと、その出力の確かめ |
 | `plugin/scripts/test-plugin.ps1` | ビルドと検証の一式 |
 
 ## 段階と残り
@@ -433,7 +514,7 @@ AGENTS.md の「実装と検証」の表では、`plugin/` を変えたら `test
 ### 既知の制約・未解決
 
 - ステレオのソースと、モノラルのソースをステレオのバスで鳴らす経路は、ARA の通しの検証が無い（`RegionReader` の単体テストだけ。TestHost の `-file` が使えないため、試験の音はモノラル）。
-- 再生の先読みのリーダーは `prepareToPlay` で作る。準備されている間にホストが音声ソースへのアクセスを外して戻したときは、JUCE の `ARAAudioSourceReader` が自分で作り直す（エンジンへ渡す読み出しは DocumentController が `AudioSource` ごとに持ち、音が変わったら読み直す）。
+- 再生の先読みのリーダーは `prepareToPlay` で作り、準備されている間にホストがソースのサンプルを変えた・アクセスを戻した・リージョンを足したときは、メッセージスレッドが作り直して差し替える（上の「再生」）。JUCE の `ARAAudioSourceReader` は自分では作り直さない（beta.12 までは、Studio Pro でトラックを足すと、そのトラックの音が次の `prepareToPlay` まで鳴らなかった）。エンジンへ渡す読み出しは DocumentController が `AudioSource` ごとに持ち、音が変わったら読み直す。準備の前に `processBlock` が呼ばれる（ARA の規則に反する）ホストへの手当ては、無音にして数えるだけ。
 - ソースの読み込みは同期のスレッドで 1 つずつ（長いソースを読んでいる間は、ほかの修飾の編集の反映が待つ）。同じソースの 2 つの修飾は解析が 2 回走る（エンジンのトラックごとのキャッシュ）。
 - DAW のテンポ・拍子（`MusicalContext`）はまだエンジンに渡していない（画面のグリッドは画面で直したテンポのまま）。
 - ドキュメントを閉じる前に DAW がイベントを 1 つずつ消すと、その分だけ `ara_remove_modification` を呼ぶ（次に開いたとき同じ `ara_id` で足し直し、前の編集のまま戻る）。

@@ -560,9 +560,9 @@ def _build(project, start_sec, end_sec, peak_ms):
 
     # ---- 隣との接続（画面はカーソルの形だけに使う。色や枠は足さない）
     try:
-        from ..project.timing import connections
+        from ..project.timing import block_connections
         by = {d["id"]: d for d in out_notes}
-        for a, b, c, dflt in connections(project):
+        for a, b, c, dflt in block_connections(project):      # 隣り合う区間（子音・息も。種類によらない）
             if a.id in by:
                 by[a.id]["connected_next"] = bool(c)
             if b.id in by:

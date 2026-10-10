@@ -11,6 +11,7 @@
 //  - DAW の再生位置・ループを画面に出す（`playhead` → S.head・S.playing・S.loop）／画面の操作を DAW へ（transport）
 //  - リージョンの枠・キャッシュの状態（reading・syncing…）・エンジンの状態を、トラックビューとツールバーの札に出す
 import { S } from './state.js';
+import { createSelectionGate } from './ara-selection.js';
 
 export const ARA = typeof window !== 'undefined' && window.api?.mode === 'ara';
 if (ARA) document.documentElement.dataset.mode = 'ara';
@@ -19,7 +20,7 @@ const A = {
   transport: true,          // ホストが ARA の再生の制御を持つ（bootstrap.hostCanTransport）。持たなければ再生ボタンを隠す
   fileGuide: false,         // ファイル > ガイドを開く…（C++ が ara_add_file_guide に言い換える）を出す
   compare: false,
-  regions: new Map(),       // トラック id → [{ id, song_start, song_end, mod_start, mod_end }]（ソングの秒・修飾＝ソースの秒）
+  regions: new Map(),       // トラック id → [{ id, song_start, song_end, mod_start, mod_end }]（ソング秒・修飾の出力秒）
   cache: new Map(),         // トラック id → { state, progress, error }
   engine: { state: 'ready', error: null },
   sel: null,                // 最後の選択（{ track_id, ara_id, region }）
@@ -27,6 +28,11 @@ const A = {
   flashUntil: 0,
   loopHold: 0,              // 画面でループを動かした直後は DAW の値で上書きしない（ミリ秒の時刻）
   chipKey: '',
+  position: null,           // { song, at, sequence, playing }: 曲の秒。編集の秒とは分ける
+  positionRaf: 0,
+  reverseSince: 0,
+  clockBase: null,           // C++ の uint32 stamp_ms と performance.now の差分用
+  latencyWindow: [],        // 直近の通知遅延。最小値を基準にジッター分を除く
 };
 let H = {};                 // main.js から渡される画面の部品（araBoot）
 
@@ -34,7 +40,26 @@ let H = {};                 // main.js から渡される画面の部品（araBo
 export const araFeatures = () => ({ transport: A.transport, fileGuide: A.fileGuide, compare: A.compare });
 export const araEngine = () => ({ ...A.engine });
 export const araCacheOf = (id) => (ARA ? A.cache.get(id) || null : null);
+export const araSelectedModification = () => (ARA && A.sel
+  ? { track_id: A.sel.track_id, ara_id: A.sel.ara_id } : null);
 export const araRegions = (t) => (ARA ? A.regions.get(t.id) || null : null);
+/** ピアノロールだけで使う表示秒 + S.off。上段と時計の S.head はソング秒。リージョン外は null。 */
+export function araEditorHead() {
+  if (!ARA) return S.head;
+  const t = S.tracks.find((x) => S.projectDir && x.project_dir && norm(x.project_dir) === norm(S.projectDir))
+    || S.tracks.find((x) => x.id === S.session?.current);
+  const rs = t && A.regions.get(t.id);
+  if (!rs) return null;
+  // C++ PlayheadState と同じく、重なるリージョンでは後から始まるものを選ぶ。
+  let r = null;
+  for (const x of rs) {
+    if (S.head >= x.song_start && S.head < x.song_end && (!r || x.song_start > r.song_start)) r = x;
+  }
+  if (!r) return null;
+  const modSec = r.mod_start + (S.head - r.song_start) / araScale(r);
+  // mod は編集済 PCM の出力秒。ドラッグ中の見かけの warp は再生位置に適用しない。
+  return S.off + modSec;
+}
 /** トラックビュー・見出しを描き直すかの判定に足す（リージョンとキャッシュの状態）。 */
 export const araSig = () => (ARA ? JSON.stringify([[...A.regions], [...A.cache].map(([k, v]) => [k, v.state])]) : '');
 
@@ -52,6 +77,51 @@ export function araToRep(t, tl) {
   const r = rs.find((x) => tl >= x.song_start && tl <= x.song_end);
   if (!r) return tl;
   return (t.offset_sec || 0) + r.mod_start + (tl - r.song_start) / araScale(r);
+}
+
+/** 表示中の修飾のリージョン。エンジンの track とホストの選択の切替中も画面の track を優先する。 */
+export function araEditorTrack() {
+  return S.tracks.find((x) => S.projectDir && x.project_dir && norm(x.project_dir) === norm(S.projectDir))
+    || S.tracks.find((x) => x.id === S.session?.current) || null;
+}
+
+/** mod 秒は編集済 PCM の出力秒。選択イベント、現在の再生イベント、最初の配置の順で対応を選ぶ。 */
+export function araRegionForMod(regions, sec, selectedId = '', currentSong = NaN, allowEnd = false) {
+  if (!Number.isFinite(sec)) return null;
+  const contains = (r) => r.mod_end > r.mod_start && r.song_end > r.song_start && sec >= r.mod_start
+    && (sec < r.mod_end || (allowEnd && Math.abs(sec - r.mod_end) < 1e-9));
+  const preferred = selectedId && regions.find((r) => r.id === selectedId && contains(r));
+  if (preferred) return preferred;
+  const current = regions.filter((r) => currentSong >= r.song_start && currentSong < r.song_end && contains(r))
+    .sort((a, b) => b.song_start - a.song_start)[0];
+  return current || regions.filter(contains).sort((a, b) => a.song_start - b.song_start)[0] || null;
+}
+
+export function araEditorRegion(sec, allowEnd = false) {
+  const track = araEditorTrack();
+  if (!track) return null;
+  const regions = A.regions.get(track.id) || [];
+  const selected = A.sel?.track_id === track.id ? A.sel.region?.id || '' : '';
+  return araRegionForMod(regions, sec, selected, S.head, allowEnd);
+}
+
+/** 下段の固定した出力秒から DAW をシーク。S.head はホスト通知だけで更新する。 */
+export function araSeekEditor(sec) {
+  const r = araEditorRegion(sec);
+  const song = r ? r.song_start + (sec - r.mod_start) * araScale(r) : null;
+  return song === null ? Promise.resolve({ ok: false, reason: 'no-region' }) : araTransport('seek', { song_sec: song });
+}
+
+/** ループの両端は同一のイベントへ対応させる。song 値はホストから通知されるまで書かない。 */
+export function araLoopEditor(a, b) {
+  const r = araEditorRegion(a);
+  if (!r || !Number.isFinite(b) || b <= a || b > r.mod_end + 1e-9) {
+    return Promise.resolve({ ok: false, reason: 'no-region' });
+  }
+  const scale = araScale(r);
+  A.loopHold = 0;
+  return araTransport('loop', { a: r.song_start + (a - r.mod_start) * scale,
+    b: r.song_start + (b - r.mod_start) * scale });
 }
 
 /** タイムラインの範囲 [頭, 終わり] を、リージョンの範囲まで広げる（複製したリージョンが代表の位置より後ろにあるとき）。 */
@@ -97,19 +167,60 @@ export async function araCompare(on) {
 }
 
 // ---------------------------------------------------------------- DAW の再生位置
-function onPlayhead(p) {
+const EXTRAPOLATE_MS = 55; // 通知が途切れたら止め、ホストとの差を長く隠さない
+function paintPosition() {
+  A.positionRaf = 0;
+  const p = A.position;
+  if (!p || !p.playing) return;
+  const elapsed = performance.now() - p.at;
+  S.head = p.song + Math.min(EXTRAPOLATE_MS, Math.max(0, elapsed)) / 1000;
+  H.follow?.();
+  H.movePlayhead?.();
+  A.positionRaf = requestAnimationFrame(paintPosition);
+}
+
+export function onPlayhead(p) {
   if (!p || typeof p !== 'object') return;
-  const cur = S.session?.current;
-  const m = cur && p.mapped ? p.mapped[cur] : null;
-  S.head = m != null ? S.off + m : (Number.isFinite(p.song_sec) ? p.song_sec : S.head);
+  if (!Number.isFinite(p.song_sec)) return;
+  const now = performance.now();
+  const seq = Number.isSafeInteger(p.sequence) ? p.sequence : null;
+  if (seq !== null && A.position?.sequence !== null && A.position?.sequence !== undefined && seq <= A.position.sequence) return;
+  let arrivalCorrection = 0;
+  if (Number.isInteger(p.stamp_ms) && p.stamp_ms >= 0 && p.stamp_ms <= 0xffffffff) {
+    if (!A.clockBase) A.clockBase = { stamp: p.stamp_ms, at: now };
+    const elapsedStamp = ((p.stamp_ms - A.clockBase.stamp + 0x80000000) >>> 0) - 0x80000000;
+    const latency = now - A.clockBase.at - elapsedStamp;
+    A.latencyWindow.push({ at: now, value: latency });
+    A.latencyWindow = A.latencyWindow.filter((x) => now - x.at < 3000);
+    const floor = Math.min(...A.latencyWindow.map((x) => x.value));
+    arrivalCorrection = Math.min(80, Math.max(0, latency - floor)) / 1000;
+  }
+  const reportedSong = p.song_sec + (p.playing ? arrivalCorrection : 0);
   const playing = !!p.playing;
   const was = S.playing;
+  const expected = A.position?.playing ? S.head : A.position?.song;
+  const delta = reportedSong - expected;
+  // 20 ms 未満の一時的な逆行だけ一通知分保持する。継続した逆行・シーク・ループは本当の位置へ戻す。
+  let song = reportedSong;
+  if (playing && was && delta < 0 && delta > -0.02) {
+    if (!A.reverseSince) A.reverseSince = now;
+    if (now - A.reverseSince < 50) song = expected;
+  } else A.reverseSince = 0;
+  if (!playing || !was || Math.abs(delta) >= 0.1) A.reverseSince = 0;
+  A.position = { song, at: now, sequence: seq, playing };
+  S.head = song;
   S.playing = playing;
+  if (playing && !was) window.dispatchEvent(new Event('gliss-host-play'));
+  if (A.positionRaf) cancelAnimationFrame(A.positionRaf);
+  if (playing) A.positionRaf = requestAnimationFrame(paintPosition);
   const loop = Array.isArray(p.loop) && p.loop.length === 2 ? [p.loop[0], p.loop[1]] : null;
   const loopChanged = A.transport && performance.now() > A.loopHold
     && JSON.stringify(loop) !== JSON.stringify(S.loop);
-  if (loopChanged) { S.loop = loop; H.render?.(); }
-  H.follow?.();
+  if (loopChanged) { S.loop = loop; S.araLoopDraft = null; H.render?.(); }
+  // 停止中は追従しない。ただし DAW 側で再生位置が動いた（ロケート・シーク。1 ms 以上。再生から止まったときは、再生位置の見積もりと
+  // 0.15 秒以上離れた戻り）ときだけ、表示外なら 1 回寄せる（draw.js の follow・follow.js）
+  const locate = !playing && Number.isFinite(delta) && Math.abs(delta) > (was ? 0.15 : 0.001);
+  H.follow?.({ locate });
   H.movePlayhead?.();
   if (was !== playing) {
     H.renderToolbar?.();
@@ -122,12 +233,22 @@ function onPlayhead(p) {
 // ---------------------------------------------------------------- DAW の選択への追従
 let selPending = null;
 let selWaiting = false;
+const selGate = createSelectionGate();      // 当てる・捨てるの判断（ara-selection.js）
+const editingNow = () => (H.idle ? !H.idle() : false) || !!S.drag || !!S.opening || (H.isDragging ? H.isDragging() : false);
 const isVocal = (id) => S.tracks.some((t) => t.id === id && t.kind === 'vocal');
 
 /** DAW で選ばれたリージョンのトラックに切り替える。ドラッグ中・開いている途中・編集の確定中は最後の 1 件だけ覚えて、静かになってから当てる。 */
 async function onSelection(sel) {
+  const before = A.sel;
   A.sel = sel && sel.track_id ? sel : null;
-  if (!A.sel) return;
+  if (before?.track_id !== A.sel?.track_id || before?.ara_id !== A.sel?.ara_id) {
+    window.dispatchEvent(new CustomEvent('gliss-ara-selection', {
+      detail: A.sel ? { track_id: A.sel.track_id, ara_id: A.sel.ara_id } : null,
+    }));
+  }
+  // 選択が空・最後に当てたものと同じ・編集中に来た今の編集対象と同じ、は何もしない（編集の最中に別のトラックへ飛ばない）
+  const verdict = selGate.decide(A.sel, { editing: editingNow(), currentTrack: S.session?.current });
+  if (verdict !== 'apply') return;
   selPending = A.sel;
   if (selWaiting) return;
   selWaiting = true;
@@ -136,6 +257,8 @@ async function onSelection(sel) {
       await H.waitFor(() => H.idle() && !S.drag && !S.opening && !H.isDragging());
       const s = selPending;
       selPending = null;
+      if (selGate.isApplied(s)) continue;              // 待っている間に同じ選択を当て終えた
+      selGate.markApplied(s);
       await applySelection(s);
     }
   } finally { selWaiting = false; }
@@ -172,9 +295,10 @@ export function pullHostState() {
         }
         if (h.engine) A.engine = { state: h.engine.state || 'ready', error: h.engine.error || null };
         if (h.playhead) onPlayhead(h.playhead);
+        H.render?.();
         H.renderTracks?.();
         updateChip();
-        if (h.selection && h.selection.track_id && JSON.stringify(h.selection) !== JSON.stringify(A.sel)) onSelection(h.selection);
+        if (JSON.stringify(h.selection ?? null) !== JSON.stringify(A.sel)) onSelection(h.selection);
       } catch (err) {
         console.error('[ara] hostState:', err);
       } finally { pulling = null; }
@@ -361,8 +485,11 @@ export async function araAfterSession() {
 }
 
 /** 起動（main.js の boot の最後）。host: 画面の部品、b: bootstrap の返り値。 */
+/** 画面の部品を渡す（araBoot が使う。単体試験も使う）。 */
+export function araSetHost(host) { H = host; }
+
 export async function araBoot(host, b) {
-  H = host;
+  araSetHost(host);
   A.transport = b.hostCanTransport !== false;
   A.fileGuide = b.fileGuide === true;
   A.compare = !!b.compare;
@@ -398,4 +525,5 @@ export async function araBoot(host, b) {
   const view = r && r.mod_end > r.mod_start && t ? [(t.offset_sec || 0) + r.mod_start, (t.offset_sec || 0) + r.mod_end] : null;
   const whole = !r || !t?.duration_sec || (r.mod_end - r.mod_start) >= t.duration_sec * 0.9;
   if (await H.selectTrack(want, { view: whole ? null : view, first: whole })) A.sig = sigOf();
+  if (A.sel && A.sel.track_id === want) selGate.markApplied(A.sel);     // 起動で当てた選択。同じ知らせで選び直さない
 }

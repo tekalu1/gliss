@@ -2,6 +2,8 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include <functional>
+
 #include "WebResources.h"
 #include "../ara/DocumentBridge.h"
 
@@ -40,6 +42,10 @@ public:
     int getNumEventsSent() const { return eventsSent; }
     int getNumEventsDropped() const { return eventsDropped; }
     int getNumKeysForwarded() const { return keysForwarded; }
+
+    /** 試聴を求めたこのエディタのインスタンスの EditorRenderer の id を返す関数（画面の preview に requester として添える。
+        返す関数が無い・0 のときは添えない）。メッセージスレッドから呼ばれる。 */
+    void setRequesterProvider (std::function<std::uint64_t()> provider) { requesterProvider = std::move (provider); }
 
     /** 検証用: 画面で JS を評価する。 */
     void evaluateJavascript (const juce::String& script, juce::WebBrowserComponent::EvaluationCallback callback = nullptr);
@@ -84,6 +90,7 @@ private:
     juce::ScopedMessageBox messageBox;
     Completion pendingConfirm;
     bool uiReady = false;
+    std::function<std::uint64_t()> requesterProvider;
     int eventsSent = 0, eventsDropped = 0, keysForwarded = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (EditorWebView)

@@ -4,7 +4,7 @@
 - cents = 0 なら render_region（モノラル）の同じ範囲と同じ中身
 - cents を渡すと、shift_pitch(cents) を当ててから render_region したものと同じ中身（先取り）
 - プロジェクトを書き換えない（編集・取り消しの履歴・project.json が変わらない）
-- 範囲の既定はノートの範囲・毎回同じファイルに上書き・無いノートはエラー
+- 範囲の既定はノートの範囲・要求ごとに不変のファイル・無いノートはエラー
 """
 import hashlib
 import os
@@ -62,7 +62,8 @@ def test_audition_zero_is_region_and_does_not_touch_project(tmp_path, mcp):
     hist0 = m._history_summary()
     r = _ok(m.render_audition(note_id=n.id))
     assert r["note_id"] == n.id and r["cents"] == 0
-    assert r["path"].endswith("audition.wav")
+    assert os.path.basename(r["path"]).startswith("audition-")
+    assert r["path"].endswith(".wav")
     y, sr = _read(r["path"])
     assert sr == r["sr"]
     assert len(y) == int(round(n.end_sec * sr)) - int(round(n.start_sec * sr))   # 既定はノートの範囲
@@ -84,7 +85,8 @@ def test_audition_cents_matches_shift_pitch_then_region(tmp_path, mcp):
     r0 = _ok(m.render_audition(note_id=n.id, start_sec=a, end_sec=b))
     y0, sr = _read(r0["path"])
     r = _ok(m.render_audition(note_id=n.id, cents=200, start_sec=a, end_sec=b))
-    assert r["path"] == r0["path"]                           # 毎回同じファイルに上書き
+    assert r["path"] != r0["path"]                           # 返却済みのWAVは変えない
+    assert np.array_equal(_read(r0["path"])[0], y0)
     assert r["cents"] == 200
     y, _ = _read(r["path"])
     assert len(y) == len(y0)

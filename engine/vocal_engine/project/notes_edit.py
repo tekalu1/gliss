@@ -19,9 +19,8 @@
 - 接続 / つなぎのなだらかさ（`connection` / `transition`、params に隣の id を持つ）→
   新しい id の組に付け替える（結合で消える境目の `connection` は外す。`transition` は**時刻で**
   段差に掛かるので残す = 結合しても線と音が変わらない。`project/pitch.py`）
-- 結合: 境目にあった無音の挿入（`silence`。切り離して縮めた隙間）を外し、結合したノートの頭と尻の
-  位置はそのままにノート全体を伸縮して埋める（ノートの中に無音の穴を残さない。後ろはずらさない）。
-  片側だけにある `crop` / `silence`（範囲）はそのまま残す
+- 結合: 境目の `silence` と両側のタイミングを保持する。同一ソースの分割片を結合したとき、
+  境目のピッチ段差は自動で平滑化しない。手動の `transition` は保持する
 """
 from __future__ import annotations
 
@@ -138,6 +137,12 @@ def _repair_pairs(project, rename, drop):
         if e.kind not in PAIR_KINDS:
             continue
         a, b = e.params.get("a"), e.params.get("b")
+        if e.params.get("by_time"):
+            # 方式を替える前に付け替えた組は時刻で引く（名前を直す要は無い。結合で消える組なら外す）
+            from .timing import connection_pair
+            if e.kind == "connection" and connection_pair(project, e) in drop:
+                rm.append(e.id)
+            continue
         if (a, b) in drop:
             if e.kind == "connection":
                 rm.append(e.id)
@@ -197,7 +202,7 @@ def merge_specs(project, note_a, note_b):
     t = a.end_sec
     rm1, add1 = _retarget(project, [a.id, b.id])
     rm2, add2 = _repair_pairs(project, {b.id: a.id}, {(a.id, b.id)})
-    rm4, add4 = _merge_timing(project, a, b, t)
+    # 境目の無音・伸縮は手編集。結合で埋めると両側のタイミングが変わる。
     # ユーザーが分割した境目なら、その split を外すだけ（編集リストを太らせない）
     own = [e for e in project.edits if e.kind == "split"
            and abs(float(e.target.start_sec) - t) <= MERGE_TOL_SEC]
@@ -206,55 +211,12 @@ def merge_specs(project, note_a, note_b):
     else:
         rm3, add3 = [], [{"kind": "merge", "target": Target.range(t, t),
                           "params": {"a": a.id, "b": b.id}}]
-    return rm1 + rm2 + rm3 + rm4, add1 + add2 + add3 + add4, {
+    same_source = a.id.split("@")[0] == b.id.split("@")[0]
+    manual = any(e.kind == "transition" and abs(float(e.target.start_sec) - t) <= MERGE_TOL_SEC
+                 and abs(float(e.target.end_sec) - t) <= MERGE_TOL_SEC for e in project.edits)
+    step = ([{"kind": "transition", "target": Target.range(t, t),
+              "params": {"a": a.id, "b": b.id, "value": 0.0}}]
+            if same_source and not manual else [])
+    return rm1 + rm2 + rm3, add1 + add2 + add3 + step, {
         "sec": t, "note_id": a.id, "span": [a.start_sec, b.end_sec],
-        "removed_split": bool(own), "removed_silence": bool(rm4)}
-
-
-def _merge_timing(project, a, b, t):
-    """結合する境目 t にある無音の挿入（`silence`）を外す編集。(外す id, 入れる spec)
-
-    ノートの中に無音の穴を残さないため。外したぶんは、結合したノート全体（a の頭〜b の尻）を
-    伸ばして埋める（頭と尻の編集後の位置は変えない = 後ろはずらさない）。"""
-    from .timing import TIMING_KINDS, _dedup, _emit, current_map
-    sil = [e for e in project.edits if e.kind == "silence"
-           and abs(float(e.target.start_sec) - t) <= MERGE_TOL_SEC]
-    if not sil:
-        return [], []
-    tm = current_map(project)
-    s0, s1 = float(a.start_sec), float(b.end_sec)
-    es, ee = tm.at(s0, "right"), tm.at(s1, "left")
-    d = sum(float(e.params["sec"]) for e in sil)
-    if ee - d - es < 0.01:
-        return [], []                                  # 穴の方が長い: 触らない
-    W0, W1 = s0, s1
-    ids = set()
-    while True:
-        grow = False
-        for e in project.edits:
-            if e.kind not in TIMING_KINDS or e.id in ids:
-                continue
-            x, y = project.edit_span(e)
-            if y >= W0 - 1e-9 and x <= W1 + 1e-9:
-                ids.add(e.id)
-                if x < W0:
-                    W0, grow = float(x), True
-                if y > W1:
-                    W1, grow = float(y), True
-        if not grow:
-            break
-    if any(e.kind == "move" for e in project.edits if e.id in ids):
-        return [], []                                  # 旧式の move が絡む: 触らない
-    pts = tm.points(W0, "left", W1, "right")
-    k = (ee - es) / (ee - d - es)
-    out, cut = [], 0.0
-    for i, (s, o) in enumerate(pts):
-        if (i > 0 and abs(s - pts[i - 1][0]) < 1e-12 and abs(s - t) <= MERGE_TOL_SEC
-                and o > pts[i - 1][1] + 1e-12 and cut < d - 1e-9):
-            cut += o - pts[i - 1][1]                   # 無音（同じ秒の縦の段）を詰める
-            continue
-        if s0 - 1e-12 <= s <= s1 + 1e-12 and not (s == s1 and o > ee + 1e-12):
-            o = es + (o - cut - es) * k
-        out.append((s, o))
-    removes = [e.id for e in project.edits if e.id in ids]
-    return removes, _emit(_dedup(out))
+        "removed_split": bool(own), "removed_silence": False}

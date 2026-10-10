@@ -35,6 +35,15 @@ body{display:flex;flex-direction:column}
 .mbd .sep{border-top:1px solid #2f2f34;margin:4px 0}
 .mock:focus-visible{outline:none}
 .tb{display:flex;align-items:center;gap:2px;height:36px;padding:0 8px;color:var(--fg2);flex:0 0 auto}
+.undo-label{font-size:11px;max-width:150px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg2)}
+#bAudition{font-size:11px;white-space:nowrap;min-width:36px}
+#auditionState{font-size:11px;white-space:nowrap;color:var(--fg2)}
+#auditionState:empty{display:none}
+.stroke-actions{position:absolute;right:10px;bottom:23px;z-index:8;display:flex;align-items:center;gap:7px;padding:6px 8px;background:var(--card,#242428);border:1px solid var(--border,#555);border-radius:4px;font-size:11px;box-shadow:0 2px 12px #0006}
+.stroke-actions[hidden]{display:none}
+.stroke-actions button{font:inherit;color:var(--fg);background:#34343a;border:1px solid #777;border-radius:3px;padding:3px 7px;cursor:pointer}
+.stroke-actions button:focus-visible,#bUndo:focus-visible,#bRedo:focus-visible{outline:2px solid var(--sel);outline-offset:2px}
+@media (max-width:560px){.undo-label{max-width:74px;flex:none}.stroke-actions{left:8px;right:8px;flex-wrap:wrap}}
 .busy-line{height:2px;position:absolute;top:35px;left:0;right:0;z-index:9;pointer-events:none;background:transparent;overflow:hidden}
 .busy-line[hidden],.busy-scrim[hidden],.busy-pop[hidden],.busy-clip[hidden]{display:none}
 .busy-line span,.busy-clip span{display:block;height:100%;background:#d6d6d6;transition:width .18s linear}
@@ -155,9 +164,19 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 .th button{background:none;border:0;color:var(--fg3);width:20px;height:20px;padding:0;font:600 10.5px system-ui,"Segoe UI",sans-serif;cursor:pointer;border-radius:2px;display:inline-flex;align-items:center;justify-content:center}
 .th button:hover{color:var(--fg)}
 .th button[aria-pressed="true"]{background:#2a2a2e;color:var(--sel)}
-.th .g{visibility:hidden}
-.th:hover .g,.th .g[aria-pressed="true"]{visibility:visible}
-.th .g[aria-pressed="true"]{background:none;color:var(--sel)}
+.th button.g{width:auto;padding:0 1px 0 2px;gap:0}
+.th .g .cv{width:8px;height:8px;stroke-width:1.4;margin-left:-1px}
+.th .g.own{color:var(--fg2)}
+.th .g[aria-expanded="true"]{background:#2a2a2e;color:var(--sel)}
+.th button:focus-visible{outline:1px solid var(--sel);outline-offset:-1px}
+.th .r2.rg{padding-right:0}
+.th button.g.wide{width:auto;max-width:100%;min-width:0;height:17px;gap:4px;padding:0 4px 0 2px;margin-left:-2px;justify-content:flex-start;font:11px system-ui,"Segoe UI",sans-serif}
+.th .g.wide>svg:first-child{width:12px;height:12px;flex:none}
+.th .g.wide .gt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.th .g.wide .cv{flex:none;margin-left:0}
+.th .g.wide.none .gt{color:var(--fg3)}
+html[data-mode=ara] .th .g.ic{display:none}
+html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
 .th svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block}
 .th .gx{width:20px;flex:none}
 /* 音量のスライダー（3 乗に近い目盛り。縦線が 0 dB）とパンのノブ。聞こえないトラックは薄く（値は残す） */
@@ -218,7 +237,7 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 .pop input[type=range]{flex:1;accent-color:#d6d6d6;margin:0}
 .pop-v{font-variant-numeric:tabular-nums;width:3em;text-align:right;color:var(--fg)}
 /* 右クリックのメニュー（issue #17。モック v3 と同じ）: 左にチェックの列、右にキー、区切りは細い線 */
-.menu{padding:4px 0;min-width:210px}
+.menu{padding:4px 0;min-width:210px;z-index:4;max-height:calc(100% - 4px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:#3a3a3e transparent}
 .menu button{display:flex;width:100%;text-align:left;background:none;border:0;color:var(--fg);padding:4px 14px 4px 6px;font:inherit;font-size:12px;line-height:1.6;cursor:pointer}
 .menu button .c{width:16px;flex:none;text-align:center}
 .menu button .l{flex:1;white-space:nowrap}
@@ -378,9 +397,12 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
     <button id="bToolDraw" aria-label="鉛筆（2）: ピッチを描く" title="鉛筆（2）: ピッチを描く" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.2 6.8a2.8 2.8 0 0 0-4-4L3.8 16.2 3 21l4.8-.8z"/><path d="m15 5 4 4"/></svg></button>
     <button id="bToolCut" aria-label="はさみ（3）: ノートを分ける" title="はさみ（3）: ノートを分ける（境目をダブルクリックで結合）" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M20 4 8.12 15.88"/><path d="M14.47 14.48 20 20"/><path d="M8.12 8.12 12 12"/></svg></button>
     <button id="bToolMute" aria-label="ミュート（4）: クリックで無音にする／戻す" title="ミュート（4）: クリックで無音にする／戻す（なぞるとまとめて）" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/></svg></button>
+    <button id="bAudition" type="button" aria-label="選択ノートを押している間試聴（P）" title="選択ノートを押している間試聴（P）">試聴</button>
+    <span id="auditionState" role="status" aria-live="polite"></span>
     <span class="grp"></span>
     <button id="bUndo" aria-label="元に戻す（Ctrl+Z）" title="元に戻す（Ctrl+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg></button>
     <button id="bRedo" aria-label="やり直す（Ctrl+Shift+Z）" title="やり直す（Ctrl+Shift+Z）"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/></svg></button>
+    <span id="undoLabel" class="undo-label" aria-live="polite">元に戻す: なし</span>
     <span class="grp"></span>
     <button id="bGuide" aria-label="ガイドを重ねて表示" title="ガイドを重ねて表示" aria-pressed="true"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg></button>
     <span class="grp"></span>
@@ -420,6 +442,7 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
   </div>
   <div id="split" role="separator" aria-orientation="horizontal" aria-label="トラックビューとエディタービューの境界" hidden></div>
   <svg id="roll" role="img" aria-label="ピアノロール"></svg>
+  <div id="strokeActions" class="stroke-actions" hidden role="group" aria-label="手描きピッチの確認"><span id="strokeMessage"></span><button id="strokeRetry" type="button">再試行</button><button id="strokeCancel" type="button">描線を取消</button></div>
   <div class="status" id="status"></div>
   <div class="pop" id="pop" hidden role="dialog" aria-label="ガイドに合わせる">
     <div class="pop-t">ガイドに合わせる <span id="popScope">全体</span></div>

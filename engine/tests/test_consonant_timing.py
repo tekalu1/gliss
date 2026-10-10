@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-"""子音・息（音程の無いノート）の幅とタイミング（issue #35。`project/timing.py` の冒頭）。
+"""子音・息（音程の無いノート）の幅とタイミング。音程のあるノートと同じ 1 つの規則（`project/timing.py` の冒頭）:
+接している隣とは境目を共有、離れていれば隙間が変わる、Alt で自分だけ。素材の要る試験（素材なしの試験は test_single_timing_rule.py）。
 
-- 無声（子音）・息のノートの端・移動も、音程のあるノートと同じ計画（plan_edge / plan_move）で動く
+- 子音・息の端・移動も、音程のあるノートと同じ計画（plan_edge / plan_move）で動く
 - 接していれば接続（隣が伸び縮み）。Alt（detach）で切り離すと隙間ができ、`connection` 編集に残る。吸着で戻る
-- 挟んでいる音程ノートの組をユーザーが切り離していれば、子音の両側も切り離し（頭の子音は次のノートとつながる）
+- アタック・境目の子音の特別な規則や、挟んでいる音程ノートの組の接続の引き継ぎは無い
 - 確定した結果 = 計画の式（ドラッグ中の見た目 = 離した後）。編集した所と隣の外は動かない。undo で戻る
-- 無音のノートは動かさない。子音・息を操作しないときの骨組みは今までどおり（音程のあるノートだけ）
+- 無音は区間ではなく隙間（動かさない）
 """
 import shutil
 
@@ -133,28 +134,28 @@ def test_consonant_alt_detach_and_snap_back(pa):
     _unchanged(e0, e2, set())
 
 
-def test_user_detached_pair_detaches_consonant(pa):
-    """挟んでいる音程ノートの組を切り離していれば、子音の前は切り離し、次のノートの頭の子音は次とつながる。"""
+def test_old_override_on_the_pitched_pair_is_not_inherited(pa):
+    """挟んでいる音程ノートの組（a, b）の古い切り離しは、子音の接続に引き継がない（接していれば接続。種類によらない）。"""
     from vocal_engine.project import timing as TM
+    from vocal_engine.project.model import Target
     a, u, b = _between(pa, "unvoiced")
-    if u.end_sec - u.start_sec > TM.ATTACK_MAX_SEC:
-        pytest.skip("アタックより長い無声")
-    rm, add = TM.connection_specs(pa, [(a.id, b.id, False)])
-    pa.apply_changes(rm, add, author="human", label="切り離し")
-    assert TM.plan_edge(pa, u.id, "start").info["connected"] is False
+    pa.apply_changes([], [{"kind": "connection", "target": Target.range(a.end_sec, b.start_sec),
+                           "params": {"a": a.id, "b": b.id, "connected": False}}], author="human", label="古い切り離し")
+    assert TM.connection_specs(pa, [(a.id, b.id, False)]) == ([], [])      # 隣り合わない組は新しく覚えない
+    assert (a.id, b.id) not in TM.connection_map(pa)
+    assert TM.plan_edge(pa, u.id, "start").info["connected"] is True
     assert TM.plan_edge(pa, u.id, "end").info["connected"] is True
-    # 音程ノートの組の骨組みは前と同じ（子音は次のノートのアタック）
     st, _ = TM.build_structure(pa)
-    ks, _ = st.note_knots[b.id]
-    assert any(abs(k.src - u.start_sec) < 1e-6 and k.role == "attack" for k in st.knots)
-    assert u.id not in st.note_knots
+    assert u.id in st.note_knots and not any(k.role == "attack" for k in st.knots)      # アタックの規則は無い
 
 
 def test_breath_moves_with_connected_neighbours(pc):
     """息も動かせる（接していれば接続。前の尻と次の頭が一緒に動く）。確定 = 計画の式。"""
     from vocal_engine.project import timing as TM
     a, u, b = _between(pc, "breath")
-    assert TM.connection_map(pc)[(a.id, b.id)] is False               # 音程ノートの組は息を挟むので切り離し
+    cm = TM.connection_map(pc)
+    assert cm[(a.id, u.id)] is True and cm[(u.id, b.id)] is True       # 接していれば、種類によらず接続
+    assert (a.id, b.id) not in cm                                      # 息を挟んだ音程ノートの組は、隣り合う組ではない
     e0 = _edges(pc)
     plan = TM.plan_move(pc, [u.id])
     assert plan.x_lo < -0.05 and plan.x_hi > 0.05
@@ -166,7 +167,7 @@ def test_breath_moves_with_connected_neighbours(pc):
     _unchanged(e0, e1, {a.id, u.id, b.id})
 
 
-def test_silence_is_not_movable_and_pitched_structure_unchanged(pa, pc):
+def test_silence_is_not_movable_and_every_block_is_in_the_structure(pa, pc):
     from vocal_engine.project import timing as TM
     sil = next((n for p in (pa, pc) for n in p.take_notes if n.kind == "silence"), None)
     if sil is not None:
@@ -175,12 +176,10 @@ def test_silence_is_not_movable_and_pitched_structure_unchanged(pa, pc):
             TM.plan_edge(p, sil.id, "end")
         with pytest.raises(TM.TimingError):
             TM.plan_move(p, [sil.id])
-    # 子音・息を操作しないときの骨組みは音程のあるノートだけ（前と同じ）
+    # 骨組みは、音程のあるノート・子音・息のすべて（どの区間を操作しても同じ。無音は入らない）
     st, _ = TM.build_structure(pa)
-    assert set(st.note_knots) == {n.id for n in TM.pitched_notes(pa)}
-    a, u, b = _between(pa, "unvoiced")
-    st2, _ = TM.build_structure(pa, extra=[u.id])
-    assert set(st2.note_knots) == set(st.note_knots) | {u.id}
+    assert set(st.note_knots) == {n.id for n in TM.blocks(pa)}
+    assert not any(n.kind == "silence" and n.id in st.note_knots for n in pa.take_notes)
 
 
 def test_mcp_move_note_and_stretch_accept_consonant(tmp_path):

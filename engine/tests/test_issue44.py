@@ -11,8 +11,9 @@ pytestmark = [needs_clips, needs_model]
 SILENT_TAKE = CLIP_E
 
 
+# 無音（silence）は区間ではなく隙間なので、時間は動かせない（project/timing.py の冒頭）。分割と取り消しは下の試験
 @pytest.mark.parametrize("kind,take", [
-    ("unvoiced", CLIP_A), ("breath", TAKE), ("silence", SILENT_TAKE),
+    ("unvoiced", CLIP_A), ("breath", TAKE),
 ])
 def test_split_nonpitched_edit_and_undo(tmp_path, kind, take):
     from vocal_engine import mcp_server as m
@@ -95,6 +96,48 @@ def test_split_nonpitched_edit_and_undo(tmp_path, kind, take):
         assert p.note(right).kind == kind
         p.undo()
         assert [v.id for v in p.take_notes if v.id == right] == []
+    finally:
+        m._state.update(project=None, session=None, track=None)
+        m._invalidate_renderer()
+
+
+def test_split_silence_is_not_movable_and_undo(tmp_path):
+    from vocal_engine import mcp_server as m
+    from vocal_engine.project import Project, timing as TM
+
+    p = Project.open(SILENT_TAKE, None, project_dir=str(tmp_path / "silence"))
+    p.analyze()
+    candidates = [n for n in p.take_notes if n.kind == "silence" and n.duration_sec > 0.06]
+    assert candidates, "silence の分割可能な区間が素材に無い"
+    n = candidates[0]
+    t = round((n.start_sec + n.end_sec) / 2, 4)
+    before = p.time_map()
+    m._state["project"] = p
+    m._invalidate_renderer()
+    try:
+        cut = m.split_note(sec=t, note_id=n.id, author="human")
+        assert cut["ok"], cut
+        right = cut["right"]
+        assert [p.note(n.id).kind, p.note(right).kind] == ["silence", "silence"]
+        assert p.note(n.id).end_sec == pytest.approx(p.note(right).start_sec)
+        after = p.time_map()
+        assert np.array_equal(before[0], after[0]) and np.array_equal(before[1], after[1])
+        assert right not in {b.id for b in TM.blocks(p)}
+        with pytest.raises(TM.TimingError):
+            TM.plan_edge(p, right, "start")
+        with pytest.raises(TM.TimingError):
+            TM.plan_move(p, [right])
+
+        # 結合と undo: 同じ種類の区間に戻り、分割境界も復元できる。
+        merged = m.merge_notes(n.id, right, author="human")
+        assert merged["ok"] and merged["removed_split"]
+        assert p.note(n.id).kind == "silence" and p.note(n.id).end_sec == pytest.approx(n.end_sec)
+        p.undo()
+        assert p.note(right).kind == "silence"
+        p.undo()
+        assert [v.id for v in p.take_notes if v.id == right] == []
+        after = p.time_map()
+        assert np.array_equal(before[0], after[0]) and np.array_equal(before[1], after[1])
     finally:
         m._state.update(project=None, session=None, track=None)
         m._invalidate_renderer()

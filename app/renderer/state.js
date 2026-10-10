@@ -40,8 +40,10 @@ export const S = {
   pv: null,
   view: { t0: 0, span: 0 },   // span 0 = 未設定（読み込み時に全体にする）
   showGuide: true,
+  showAllBounds: false, // 音素境界の全高表示。吸着・編集には影響しない
   sel: [],             // 選択中のノート id
-  loop: null,          // [t0, t1]（編集後の時間）
+  loop: null,          // [t0, t1]（ソング秒。ARA ではホスト通知だけで更新）
+  araLoopDraft: null,  // { trackId, range }。下段スケールの出力秒で、S.loop とは別に描く
   head: 0,
   playing: false,
   drag: null,
@@ -86,6 +88,10 @@ export const S = {
   trPreview: null,
   // 鉛筆で描いている線: { vals: Map(フレーム → MIDI), last: {i, m} }（離したら set_pitch_curve(mode=draw)）
   stroke: null,
+  strokePhase: 'idle', // drawing / pending / checking / failed / committed
+  boundHover: null,
+  edgeDraft: null, // 計画待ちの間に見せる仮の端（エンジンには未適用）
+  lastEdgeTiming: null, // 直近の端編集の plan / apply / view の実測値
   cutHover: null,      // はさみ: { id, t（編集後の秒）, src（編集前の秒） }
   // 接続の見せ方（B 案）: ポインタが近づいた境目（'a|b'）と、Alt を押しているか
   near: null,
@@ -133,13 +139,18 @@ export function currentTrack() {
   return S.tracks.find((t) => t.id === S.session?.current) || null;
 }
 
+/** 画面が今描いているデータ（S.vd・S.byId = S.projectDir）のトラック。切り替えの途中（S.session.current は新しいトラック、
+ * S.vd はまだ前のトラック）では current と違う。無ければ null。 */
+export function shownTrack() {
+  const norm = (p) => String(p || '').replace(/\//g, '\\').toLowerCase();
+  return S.projectDir
+    ? S.tracks.find((t) => t.project_dir && norm(t.project_dir) === norm(S.projectDir)) || null : null;
+}
+
 /** 下に出しているデータ（S.vd = S.projectDir のトラック）の位置を S.off に。切り替えの途中でも、
  * 下の目盛り・再生位置は下に出ているトラックの位置で描く（ドラッグ中の見かけの位置を含む）。 */
 export function syncOff() {
-  const norm = (p) => String(p || '').replace(/\//g, '\\').toLowerCase();
-  const shown = S.projectDir
-    ? S.tracks.find((t) => t.project_dir && norm(t.project_dir) === norm(S.projectDir)) : null;
-  const t = shown || currentTrack();
+  const t = shownTrack() || currentTrack();
   S.off = t ? offsetOf(t) : 0;
 }
 
@@ -597,7 +608,12 @@ export function fadeGain(n, t, span = null) {
   return g;
 }
 export function spanOf(n) {
-  return [warp(n.edited_start_sec, 'right'), warp(n.edited_end_sec, 'left')];
+  const a = warp(n.edited_start_sec, 'right');
+  const b = warp(n.edited_end_sec, 'left');
+  const d = S.edgeDraft;
+  if (!d || d.id !== n.id || d.trackId !== S.session?.current || (d.planId && S.plan?.data?.plan_id === d.planId)) return [a, b];
+  return d.which === 'start' ? [Math.min(a + d.want, b - LAYOUT.MIN_SEG), b]
+    : [a, Math.max(b + d.want, a + LAYOUT.MIN_SEG)];
 }
 export function boxOf(n) {
   const p = pitchOf(n);
@@ -680,6 +696,11 @@ export function aiNotesOf(edits, notes) {
 
 /** 新しい view-data を取り込む。 */
 export function adopt(vd, { keepView = true } = {}) {
+  if (S.stroke && S.stroke.trackId !== S.session?.current) {
+    S.stroke = null;
+    S.strokePhase = 'idle';
+  }
+  if (S.edgeDraft && S.edgeDraft.trackId !== S.session?.current) S.edgeDraft = null;
   S.vd = vd;
   // 曲の取り消しの履歴（セッション）の要約。セッションの無いプロジェクトはプロジェクトの changeset から
   const vh = vd.history || {};
@@ -687,6 +708,9 @@ export function adopt(vd, { keepView = true } = {}) {
     redo: vh.can_redo ? { label: '編集' } : null };
   S.notes = vd.notes || [];
   S.pitched = S.notes.filter((n) => n.kind === 'note');
+  // タイミングの単位（音程ノート・子音・息。種類によらず同じ規則。無音は隙間）と、記号の高さ・当たりの元にする音程ノート
+  S.blocks = S.notes.filter((n) => BLOCK_KINDS.has(n.kind)).sort((a, b) => a.start_sec - b.start_sec);
+  S.blockAnchor = anchorsOf(S.blocks);
   S.byId = new Map(S.notes.map((n) => [n.id, n]));
   S.aiNotes = aiNotesOf(vd.edits || [], S.pitched);
   S.local.pitch.clear();
@@ -753,6 +777,10 @@ export function clearProject() {
   S.sel = [];
   S.plan = null;
   S.stroke = null;
+  S.strokePhase = 'idle';
+  S.edgeDraft = null;
+  S.lastEdgeTiming = null;
+  S.boundHover = null;
   S.loop = null;
   S.head = 0;
   S.pv = null;
@@ -814,6 +842,22 @@ export function nextUtterance(tSrc, dir = 1) {
   if (dir > 0) return us.find(([a]) => a > tSrc + 1e-3) || us[us.length - 1];
   const prev = us.filter(([, b]) => b < tSrc - 1e-3);
   return prev.length ? prev[prev.length - 1] : us[0];
+}
+
+export const BLOCK_KINDS = new Set(['note', 'unvoiced', 'breath']);
+
+/** 区間 → 高さの元にする音程ノート（音程ノートはその自身、子音・息は直前の音程ノート。無ければ直後）。 */
+function anchorsOf(blocks) {
+  const out = new Map();
+  let last = null;
+  let nextIdx = 0;
+  blocks.forEach((n, i) => {
+    if (n.kind === 'note') { last = n; out.set(n.id, n); return; }
+    if (last) { out.set(n.id, last); return; }
+    while (nextIdx < blocks.length && (nextIdx <= i || blocks[nextIdx].kind !== 'note')) nextIdx++;
+    out.set(n.id, blocks[nextIdx] || null);
+  });
+  return out;
 }
 
 export function totalSec() {

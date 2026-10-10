@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <vector>
 
 namespace gliss
@@ -82,9 +83,16 @@ public:
     struct Callbacks
     {
         std::function<void (const juce::String& name, const juce::var& data)> event;   // engine・cache・session-changed・project-changed・test-edit
-        std::function<void (const juce::StringArray& araIds)> contentChanged;           // 再生の音が変わった修飾
-        /** ノートが変わった修飾と、解析だけのノートが変わったソース（AudioSource の persistentID）。 */
-        std::function<void (const juce::StringArray& araIds, const juce::StringArray& sourceIds)> notesChanged;
+        /** 再生の音が変わった修飾。notifyHost が false なら、登録・アーカイブから戻した状態に追いついただけ
+            （最初の再合成・解析待ちの後の再合成。ARA は「戻した状態と違うときだけ知らせる」。ホストには知らせない）。 */
+        std::function<void (const juce::StringArray& araIds, bool notifyHost)> contentChanged;
+        /** ノートが変わった修飾と、解析だけのノートが変わったソース（AudioSource の persistentID）。
+            firstContent: 登録してから初めてノートが読めるようになった（それまで読めなかった）もの。 */
+        std::function<void (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent)> notesChanged;
+        /** 保存するもの（アーカイブ）が、ホストに知らせた後に変わった（音・ノートの知らせは出していない）。araIds: 修飾の
+            保存の状態（編集の履歴・歌詞・F0 の方式）が変わった修飾と、ガイドの指定が変わった修飾。documentData: 文書の
+            保存の状態（ガイドの指定）が変わった。ホストが保存を求めないと失われる（ARA は確実に知らせることを求める）。 */
+        std::function<void (const juce::StringArray& araIds, bool documentData)> stateChanged;
         std::function<void (const juce::String& line)> log;
     };
 
@@ -116,6 +124,15 @@ public:
     /** アーカイブのガイド（修飾の persistentID）。登録が済んだら ara_sync(guide=…) で当てる。 */
     void setPendingGuide (const juce::String& araId);
 
+    /** アーカイブのトラックごとのガイド（修飾 → ガイドの修飾。値が空ならその修飾の指定を外す = アーカイブを正にする）。
+        両方の登録が済んだものから ara_sync(guides=…) で当てる。エンジンが答えたもの（当てた・断られた）は残さない。 */
+    void setPendingGuides (const std::map<juce::String, juce::String>& guides);
+
+    /** ホストが持っている文書のガイドの指定（アーカイブから戻したもの。修飾 → ガイドの修飾・共通のガイド）。保存に書く
+        指定がこれと違ってきたら、ホストに知らせる（Callbacks::stateChanged）。known = false（ガイドの指定を書いていない
+        古いアーカイブ）なら、戻し終えて最初に見た指定をホストの持っているものとする。新しい文書は空（known）。 */
+    void setHostGuides (const std::map<juce::String, juce::String>& guides, const juce::String& guide, bool known);
+
     void requestSync();
     void requestEngine();
     void restartEngine();
@@ -146,6 +163,9 @@ public:
 
     /** 保存に書くガイドの修飾（無ければ空）。 */
     juce::String getGuideForStore() const;
+
+    /** 保存に書くトラックごとのガイド: エンジンの最新に、まだ当てていない戻し途中の指定を重ねたもの。 */
+    std::map<juce::String, juce::String> getGuidesForStore() const;
 
     /** DAW に返すノートの写し（まだ無ければ nullptr）。エンジンを待たない（ARA の content reader が呼ぶ）。 */
     std::shared_ptr<const ModificationNotes> getNotes (const juce::String& araId) const;
@@ -182,7 +202,22 @@ private:
     bool captureSource (const SyncSource&, const SyncModel&);
     bool registerModification (const SyncModification&, const SyncSource&, juce::StringArray& changed);
     void restoreIfPending (const juce::String& araId, int generation, juce::StringArray& changed);
-    bool renderModification (const SyncModification&, juce::StringArray& contentChanged);
+    /** between: 続きの再合成（more）の前に呼ぶ（保存の状態の変化を再合成の合間にも知らせる）。 */
+    bool renderModification (const SyncModification&, bool stateChanged, juce::StringArray& contentChanged, juce::StringArray& caughtUp,
+                             const std::function<void()>& between);
+    /** ara_revs の保存の状態の署名・ガイドの指定を、ホストの持っているものと比べ、違えば Callbacks::stateChanged で知らせて
+        ホストの持っているものを更新する（再合成の前と合間に呼ぶ）。changed: 保存用の写しを取り直す修飾に足す。 */
+    void noticeSavedState (const SyncModel&, const juce::var& revs, juce::StringArray& changed);
+    /** ara_set_modification・ara_restore の返り値の版（rev）・保存の状態の署名（state）を、ホストが持っている
+        （開いた・戻した）ものとして覚える。restored: アーカイブから戻した（ホストの持っているものはそれ。登録し直しでは
+        前に覚えた保存の状態を保つ）。エンジンが保存したときの音を出せない（render_changed。このエンジンより新しい描画の版）
+        なら、最初の再合成も知らせる。 */
+    void setOpenedEdits (const juce::String& araId, const juce::var& result, bool restored);
+    /** ara_revs のガイドの指定を、保存に書く写しに入れる（refreshArchivesLocked と同じ。mutex を持って呼ぶ）。 */
+    void takeGuidesLocked (const juce::var& guide, const juce::var& guides);
+    /** 保存に書くガイドの指定がホストの持っているものと違ってきた修飾（違わなければ空。mutex を持たずに呼ぶ）。
+        ready: 登録と戻しが済んでいる（ホストの持っているものが分からない古いアーカイブは、ここで覚える）。 */
+    juce::StringArray guidesChangedSinceHost (const SyncModel&, bool ready);
     void refreshNotes (const SyncModel&, const std::map<juce::String, juce::String>& targets);
     void applyTestEdit (const SyncModel&);
     void refreshArchivesLocked (const juce::var& args, int timeoutMs);
@@ -206,6 +241,11 @@ private:
     bool guidePending = false;
     std::map<juce::String, juce::var> latestArchives;
     juce::String latestGuide;
+    std::map<juce::String, juce::String> pendingGuides;   // 戻している途中のトラックごとのガイド（当てたものから外す）
+    std::map<juce::String, juce::String> latestGuides;
+    std::map<juce::String, juce::String> hostGuides;     // ホストが持っているガイドの指定（setHostGuides・知らせた後）
+    juce::String hostGuide;
+    bool hostGuidesKnown = true;
     EngineStatus engineStatus;
     std::map<juce::String, ModStatus> modStatus;
     std::map<juce::String, std::shared_ptr<const ModificationNotes>> notesByMod;
@@ -221,6 +261,11 @@ private:
     std::map<juce::String, Captured> captured;              // ソースの persistentID
     std::map<juce::String, Applied> applied;                // ara_id
     std::map<juce::String, juce::String> localRev;          // ara_id → 手元のキャッシュの版
+    std::map<juce::String, juce::String> openedEdits;       // ara_id → ホストの持っている編集の署名（開いた・戻した・音の変化を知らせた時）
+    std::map<juce::String, juce::String> hostStates;        // ara_id → ホストの持っている保存の状態の署名（ara_revs の states）
+    std::set<juce::String> renderChanged;                   // 保存したときの音を出せない編集を戻した修飾（最初の再合成も知らせる）
+    std::set<juce::String> stateMoved;                      // 保存の状態の変化を知らせた後、まだ再合成していない修飾
+    double lastStateCheck = 0.0;                            // 再合成の合間に保存の状態を見直した時刻
     std::map<juce::String, juce::String> notesRev;          // ara_id → ノートの写しを取ったときの ara_revs の版
     ExternalChanges external;                               // 外部の AI の中継の番号（ara_revs の external）
 

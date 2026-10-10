@@ -29,7 +29,7 @@ from ..analysis.notes import Note, segment_notes
 from ..audio import file_sig, sha256_file
 from .. import media as M
 from ..phoneme import lyrics as LY
-from .model import Changeset, Edit, Target, now_iso
+from .model import RENDER_VERSION, Changeset, Edit, Target, now_iso
 
 def _default_projects_root():
     """旧形式のプロジェクト（`.gliss` でない）の既定の置き場。配布版（単体 exe）はインストール先の外
@@ -324,31 +324,45 @@ def recorded_estimator(analysis):
     return ta.get("estimator") or "rmvpe"
 
 
-_recorded_cache = {}                # project.json のパス -> (署名, 方式)
+_recorded_cache = {}                # project.json のパス -> (署名, 方式, Gliss F0 の版)
 _recorded_lock = Lock()
 
 
-def recorded_estimator_in(pdir):
-    """ディレクトリの project.json に記録された F0 の方式（`recorded_estimator`）。裏の準備の署名
-    （`prep.track_sig`）が、開いていないトラックについても曲ごとの方式を知るため。project.json が変わったときだけ読む。"""
+def _recorded_f0_in(pdir):
+    """裏の準備の署名に使う保存済み方式とモデル版。変更時だけ project.json を読む。"""
     path = os.path.join(pdir, "project.json")
     sig = _src_sig(path)
     if sig is None:
-        return None
+        return None, None
     key = sig[0]
     with _recorded_lock:
         hit = _recorded_cache.get(key)
     if hit is not None and hit[0] == sig:
-        return hit[1]
+        return hit[1], hit[2]
     try:
-        est = recorded_estimator(read_json(path).get("analysis"))
+        doc = read_json(path)
+        analysis = doc.get("analysis") or {}
+        est = recorded_estimator(analysis)
+        take = analysis.get("take") or {}
+        version = doc.get("f0_model_version") or (
+            take.get("estimator_version") if take.get("estimator") == "gliss" else None)
     except (OSError, ValueError, AttributeError):
-        return None
+        return None, None
     with _recorded_lock:
         if len(_recorded_cache) > 256:
             _recorded_cache.clear()
-        _recorded_cache[key] = (sig, est)
-    return est
+        _recorded_cache[key] = (sig, est, version)
+    return est, version
+
+
+def recorded_estimator_in(pdir):
+    """ディレクトリの project.json に記録された F0 の方式。"""
+    return _recorded_f0_in(pdir)[0]
+
+
+def recorded_gliss_version_in(pdir):
+    """旧モデルで解析した曲の裏の準備に、元の版を使う。"""
+    return _recorded_f0_in(pdir)[1]
 
 
 def _src_sig(path):
@@ -392,7 +406,7 @@ def _stable(analysis, drop=("analyzed_at",)):
 
 def _edit_state(doc):
     """解析要約と保存時刻を除いた、利用者の編集状態。解析だけの外部保存を見分ける。"""
-    fields = ("schema_version", "take", "guide", "lyrics", "seq", "edits", "changesets")
+    fields = ("schema_version", "take", "guide", "lyrics", "seq", "edits", "changesets", "render_version")
     return json.dumps([doc.get(k) for k in fields], sort_keys=True, ensure_ascii=False)
 
 
@@ -457,6 +471,9 @@ class Project:
         self.analysis = {}          # {"take": {...}, "guide": {...}, "alignment": {...}}
         self.lyrics = {}            # {"take": [{start_sec,end_sec,text}, ...]}（区間ごと）
         self.align_method = ALIGN_METHOD    # DTW の特徴量（段階2 から MFCC が既定）
+        # 描画の版（保存した編集から音を作る仕組みの版。model.RENDER_VERSION）。新しく作る曲は最新、前の版で作った曲
+        # （project.json・アーカイブに版の無いもの）は 1 のまま（利用者が聴いて了承した音を、版を上げただけで変えない）
+        self.render_version = RENDER_VERSION
         self._phonemes = {"take": None, "guide": None}
         # 音素アラインの失敗: role -> (入力の鍵, 例外)。同じ歌詞・音声では操作のたびにやり直さない（issue #58）
         self._phoneme_failed = {}
@@ -479,10 +496,12 @@ class Project:
         # analyze の commit で、読み直した最新の内容に合わせて書く
         self.background = False
         self.estimator_pref = None       # このトラックで明示した F0 の方式（None なら選んでいる方式。session.py のトラックの estimator）
+        self.f0_model_version = None     # 古い ARA アーカイブの Gliss F0 をキャッシュ無しで復元するための版
         self._auto_proposed = []    # 最後の歌詞の自動推定で足した区間
         self._disk_sig = None      # project.json の (mtime_ns, size, file ID)
         self._base_edit_state = None
         self._base_analysis = {}
+        self._base_f0_model_version = None
         # メモリの解析結果を読んだ・書いたファイルの署名（take / guide / alignment / ph_take / ph_guide）。
         # 同じファイルなら読み直さない・描画データの鍵（`view_key`）に入れる（issue #63）
         self._srcs = {}
@@ -503,6 +522,23 @@ class Project:
         if estimator is None:
             estimator = self.estimator_pref
         return f0mod.resolve_estimator(estimator, recorded=recorded_estimator(self.analysis))
+
+    def _gliss_version_for(self, estimator, latest=False):
+        """Gliss で解析し直すときに使う旧モデルの版（第 2 版の曲なら第 2 版。それ以外は None = 同梱の最新版）。
+        latest: 記録した版を無視して最新版にする（利用者が `analyze_take(force=true, estimator="gliss")` を明示したときだけ）。"""
+        if estimator != "gliss" or latest:
+            return None
+        take = self.analysis.get("take") or {}
+        version = self.f0_model_version or (take.get("estimator_version") if take.get("estimator") == "gliss" else None)
+        if version not in (None, f0mod.GLISS_F0_V2_VERSION, f0mod.estimator_version("gliss")):
+            raise f0mod.ModelMissingError("保存された Gliss F0 モデルの版を復元できない: %s" % version)
+        return version if version == f0mod.GLISS_F0_V2_VERSION else None
+
+    def _same_take_estimator(self, result_estimator, result_version, wanted, latest=False):
+        old = self._gliss_version_for(wanted, latest)
+        if old is not None:
+            return result_estimator == "gliss" and result_version == old
+        return f0mod.same_estimator(result_estimator, result_version, wanted)
 
     def sub(self, name):
         p = os.path.join(self.dir, name)
@@ -685,6 +721,8 @@ class Project:
             "edits": [e.to_json() for e in self.edits],
             "changesets": [c.to_json() if copy else c.to_json_shallow() for c in self.changesets],
             "analysis": self.analysis,
+            "f0_model_version": self.f0_model_version,
+            "render_version": self.render_version,
         }
 
     def save(self):
@@ -708,6 +746,8 @@ class Project:
                             else:
                                 merged.pop(key, None)
                     self.analysis = merged
+                    if self.f0_model_version == self._base_f0_model_version:
+                        self.f0_model_version = latest.f0_model_version
                     self._disk_sig = latest._disk_sig
                 else:
                     self.load()
@@ -725,6 +765,7 @@ class Project:
             self._disk_sig = self._json_sig()
             self._base_edit_state = _edit_state(doc)
             self._base_analysis = json.loads(json.dumps(self.analysis))
+            self._base_f0_model_version = self.f0_model_version
             if not self.background and PREP_SAVED is not None:
                 PREP_SAVED(self)
         return self.json_path
@@ -779,9 +820,16 @@ class Project:
         self._seq = d.get("seq", {"edit": 0, "changeset": 0})
         self.changesets = [Changeset.from_json(c) for c in d.get("changesets", [])]
         self.analysis = d.get("analysis", {})
+        self.f0_model_version = d.get("f0_model_version")
+        self.render_version = int(d.get("render_version") or 1)     # 版の無い project.json は 0.1.0-beta.6 までの曲
+        if self.f0_model_version is None and (self.analysis.get("take") or {}).get("estimator") == "gliss":
+            version = self.analysis["take"].get("estimator_version")
+            if version == f0mod.GLISS_F0_V2_VERSION:
+                self.f0_model_version = version
         self._disk_sig = sig
         self._base_edit_state = _edit_state(d)
         self._base_analysis = json.loads(json.dumps(self.analysis))
+        self._base_f0_model_version = self.f0_model_version
         if old_g is not None and not M.same_clip(old_g, self.guide):
             # 外部（別のプロセス）がガイドを差し替えた・ずらした: 前のガイドの解析と対応付けを使わない
             self._forget_guide_state()
@@ -789,6 +837,16 @@ class Project:
         return self
 
     # ------------------------------------------------------------ アーカイブ（UI と無関係の状態）
+    def archived_f0_version(self, estimator):
+        """アーカイブに書く F0 の方式の版（`f0_estimator_version`。Gliss だけ）: 覚えた版（古いアーカイブから戻した印）→
+        保存した解析の版 → 同梱の最新版。印は解析で外れる（版が解析に記録される）が、この値は前後で変わらない。"""
+        if estimator != "gliss":
+            return None
+        recorded = self.analysis.get("take") or {}
+        return (self.f0_model_version or
+                (recorded.get("estimator_version") if recorded.get("estimator") == "gliss" else None) or
+                f0mod.estimator_version("gliss"))
+
     def to_archive(self):
         """**編集の状態だけ**を UI・マシンと無関係な dict にする（ARA のアーカイブに入れる単位）。
 
@@ -797,10 +855,14 @@ class Project:
         F0 の方式（`f0_estimator`。明示した方式、無ければ前に解析した方式、未解析なら None）。
         F0 の方式が編集の「音」を決める（再合成は F0 を使う）ので、別の PC・別の作業場所で開き直しても
         同じ方式で解析するために持つ。
+        描画の版（`render_version`。保存した編集から音を作る仕組みの版。戻すとその版で鳴らす）。
         入らないもの: プロジェクトのディレクトリ、解析のキャッシュ（F0・ノート・音素。素材から作り直せる）、
         画面の状態（表示範囲・選択・ツール。画面は userData の `state.json` に別に持つ）、ログ、時刻の更新日。
         JSON にそのまま書ける（数値・文字列・真偽・None・配列・dict だけ）。
         """
+        estimator = self.estimator_pref or recorded_estimator(self.analysis)
+        version = self.archived_f0_version(estimator)
+
         def ref(m):
             if not m:
                 return None
@@ -818,7 +880,9 @@ class Project:
             "lyrics": {k: [dict(e) for e in v] for k, v in self.lyrics.items()},
             "auto_lyrics_attempted": "auto_lyrics" in self.analysis,
             "align_method": self.align_method,
-            "f0_estimator": self.estimator_pref or recorded_estimator(self.analysis),
+            "f0_estimator": estimator,
+            "f0_estimator_version": version,
+            "render_version": self.render_version,
             "seq": dict(self._seq),
             "changesets": [c.to_json() for c in self.changesets],
         }
@@ -907,8 +971,26 @@ class Project:
         est = archive.get("f0_estimator")
         if est in f0mod.ESTIMATORS and (est != "rmvpe" or f0mod.rmvpe_available()):
             p.estimator_pref = est                   # 補正を作った方式で解析する（使えない方式は選んでいる方式に任せる）
+        if est == "gliss":
+            # v2 の archive は方式名のみ。v3 以降は版を記録する。
+            p.f0_model_version = archive.get("f0_estimator_version") or f0mod.GLISS_F0_V2_VERSION
+        else:
+            p.f0_model_version = None
         p._seq = dict(archive.get("seq") or {"edit": 0, "changeset": 0})
         p.changesets = [Changeset.from_json(c) for c in archive.get("changesets", [])]
+        # 描画の版: 版の無いアーカイブは 0.1.0-beta.6 までのもの（その音のまま鳴らす）。このエンジンより新しい版は、
+        # 使える最新の版で鳴らす（`ara_restore` の render_changed）
+        p.render_version = min(int(archive.get("render_version") or 1), RENDER_VERSION)
+        # ノート ID に頼る編集を作った解析の記録の無い（前の版の）changeset: アーカイブの方式（保存したときにその編集を
+        # 鳴らしていた解析）を記録にする。方式の記録も無いアーカイブは「分からない」（方式を替えるときに付け替えない）
+        if est in f0mod.ESTIMATORS:
+            legacy = {"op": "basis", "estimator": est,
+                      "version": (archive.get("f0_estimator_version") or f0mod.GLISS_F0_V2_VERSION) if est == "gliss" else None}
+        else:
+            legacy = {"op": "basis", "unknown": True}
+        for cs in p.changesets:
+            if _changeset_basis(cs) is None and any(op.get("op") == "add" and note_dependent(op["edit"]) for op in cs.ops):
+                cs.ops.append(dict(legacy))
         p._phonemes = {"take": None, "guide": None}
         p._notes_cache = None
         p._replay()
@@ -1025,8 +1107,9 @@ class Project:
         """F0・音符・発音の頭はガイドの切り出しと解析設定だけに依存する。"""
         key = [1, self._clip_cache_identity(self.guide), estimator, bool(sweep),
                RMVPE_THRESHOLD, ENERGY_FLOOR_DB]
-        if f0mod.estimator_version(estimator) is not None:
-            key.append(f0mod.estimator_version(estimator))   # 方式の中身を変えたら作り直す（RMVPE は前と同じ鍵）
+        version = self._gliss_version_for(estimator) or f0mod.estimator_version(estimator)
+        if version is not None:
+            key.append(version)   # 方式の中身を変えたら作り直す（RMVPE は前と同じ鍵）
         return self._guide_cache_dir("analysis", key)
 
     def _alignment_cache_dir(self):
@@ -1069,7 +1152,7 @@ class Project:
                 result = F0Result.from_json(json.load(f)["f0"])
         except (OSError, ValueError, KeyError, TypeError):
             return None
-        same_estimator = f0mod.same_estimator(result.estimator, result.meta.get("version"), estimator)
+        same_estimator = self._same_take_estimator(result.estimator, result.meta.get("version"), estimator)
         vuv_rule = "%s f0>0 AND rms > %.1f dBFS" % (result.estimator, ENERGY_FLOOR_DB)
         if not same_estimator or bool(result.meta.get("sweep")) != bool(sweep) or \
                 result.meta.get("threshold") != RMVPE_THRESHOLD or \
@@ -1156,12 +1239,15 @@ class Project:
         return t
 
     def analyze(self, force=False, estimator=None, sweep=False, with_guide=True,
-                cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None):
+                cancel=None, progress=None, commit=None, auto_lyrics=True, stage=None, latest=None):
         """F0 → 音符 → （ガイドがあれば）DTW。結果は cache/ に保存する。
 
         estimator: F0 の方式。省くと `f0_estimator()`（画面の「ピッチ検出の方式」で選んだ方式 → この曲を前に
         解析した方式 → 既定）。保存した解析が別の方式のものなら、テイクの F0 から解析し直す（ガイドの解析は
         方式ごとの鍵付きの保存）。
+
+        latest: Gliss の第 2 版で解析した曲も最新版で解析し直す。省くと「force かつ estimator を渡した」とき
+        （`analyze_take` は利用者が estimator を明示したときだけ True を渡す。force だけ・素材の差し替えでは版を保つ）。
 
         stage: 段の名前（"take_f0" / "lyrics" / "guide_f0" / "alignment" / "onsets" / "phonemes"）を
         段に入る前に受け取る関数（裏の準備の進み具合と、段の境目での取り消し。`prep.py`）。
@@ -1190,6 +1276,8 @@ class Project:
             else:
                 self._save_analysis()
 
+        if latest is None:
+            latest = bool(force and estimator is not None)
         estimator = self.f0_estimator(estimator)
         publish = not self.background   # 今の組み合わせを指す写しを書くか（裏の準備では書かない）
         advance(0.0)
@@ -1200,12 +1288,16 @@ class Project:
             if self._take_f0 is None or self._srcs.get("take") != _src_sig(take_cache):
                 self._load_take_analysis(take_cache)     # 同じファイルをもう読んでいれば読み直さない
             # 方式を替えた（画面の「ピッチ検出の方式」・MCP の estimator）: 解析し直す
-            reuse = f0mod.same_estimator(self._take_f0.estimator, self._take_f0.meta.get("version"),
-                                         estimator)
+            reuse = self._same_take_estimator(self._take_f0.estimator,
+                                              self._take_f0.meta.get("version"), estimator, latest)
         if not reuse:
             enter("take_f0")
             x, sr = self.audio("take")
-            f0r = estimate_f0(x=x, sr=sr, estimator=estimator, sweep=sweep)
+            kwargs = {"x": x, "sr": sr, "estimator": estimator, "sweep": sweep}
+            old_version = self._gliss_version_for(estimator, latest)
+            if old_version:
+                kwargs["gliss_version"] = old_version
+            f0r = estimate_f0(**kwargs)
             notes = segment_notes(f0r, source="take")
             self._take_f0, self._take_notes = f0r, notes
             tmp = _tmp_name(take_cache)
@@ -1216,6 +1308,11 @@ class Project:
             self._srcs["take"] = _src_sig(take_cache)
             log.get().info("テイクを解析: %d フレーム / %d ノート（%.2f s）",
                            f0r.n_frames, len(notes), f0r.elapsed_sec)
+        if estimator == "gliss":
+            self.f0_model_version = (self._take_f0.meta.get("version")
+                                     if self._take_f0.meta.get("version") == f0mod.GLISS_F0_V2_VERSION else None)
+        else:
+            self.f0_model_version = None
 
         self.analysis["take"] = {
             "analyzed_at": t0, "estimator": self._take_f0.estimator,
@@ -1255,7 +1352,11 @@ class Project:
                 gf0 = self._guide_f0_from_track(estimator, sweep)
                 if gf0 is None:
                     gx, gsr = self.audio("guide")
-                    gf0 = estimate_f0(x=gx, sr=gsr, estimator=estimator, sweep=sweep)
+                    kwargs = {"x": gx, "sr": gsr, "estimator": estimator, "sweep": sweep}
+                    old_version = self._gliss_version_for(estimator, latest)
+                    if old_version:
+                        kwargs["gliss_version"] = old_version
+                    gf0 = estimate_f0(**kwargs)
                 gnotes = segment_notes(gf0, source="guide", id_prefix="g")
                 self._guide_f0, self._guide_notes = gf0, gnotes
                 tmp = _tmp_name(keyed_guide)
@@ -1420,7 +1521,7 @@ class Project:
         if not os.path.exists(take_cache):
             return False
         ta = self.analysis.get("take") or {}
-        if ta.get("estimator") is not None and not f0mod.same_estimator(
+        if ta.get("estimator") is not None and not self._same_take_estimator(
                 ta["estimator"], ta.get("estimator_version"), estimator):
             return False                                 # 方式を替えた: テイクから解析し直す
         if "auto_lyrics" not in self.analysis and os.environ.get("VOCAL_ENGINE_AUTO_LYRICS", "1") != "0":
@@ -1767,38 +1868,25 @@ class Project:
 
     def _replay(self):
         """取り消されていない changeset を順に適用して、有効な編集リストを作る。"""
-        by_id = {}
-        order = []
-        for cs in self.changesets:
-            if cs.undone:
-                continue
-            for op in cs.ops:
-                if op.get("op") == "add":
-                    e = Edit.from_json(op["edit"])
-                    by_id[e.id] = e
-                    # 置き換え（分割で範囲対象に直す・オリジナルに戻すで切る等）は元の編集の位置へ入れる。
-                    # 編集リストの順は意味を持つ（pitch_curve は後勝ち、鉛筆は「後から入ったピッチ編集」
-                    # だけを描いた線に足す）ので、末尾へ回すと音が変わる
-                    at = op.get("in_place_of")
-                    if at and at in order:
-                        order.insert(order.index(at), e.id)
-                    else:
-                        order.append(e.id)
-                elif op.get("op") == "remove":
-                    by_id.pop(op["edit_id"], None)
-        seen = set()
-        self.edits = []
-        for eid in order:
-            if eid in by_id and eid not in seen:
-                seen.add(eid)
-                self.edits.append(by_id[eid])
+        self.edits = _live_edits(cs for cs in self.changesets if not cs.undone)
         return self.edits
+
+    def _first_edit_takes_latest_renderer(self):
+        """音の編集の履歴の無い曲（前の版で作って解析だけした曲・歌詞だけを入れた曲を含む）に最初の編集を足す: 最新の描画の
+        版にする（歌詞の changeset は音を作らない）。音の編集の履歴がある曲の版は変えない（`set_render_version` で利用者が
+        明示したときだけ。同じ修飾の中で前の編集と新しい編集を別の描画の版で鳴らすと、つなぎ目で両方が混ざるので、修飾ごとに
+        1 つの版にする）。取り消した編集も履歴に数える（やり直すと前の版の音で鳴らす編集なので）。"""
+        if self.render_version != RENDER_VERSION and not any(
+                op.get("op") in ("add", "remove") for cs in self.changesets for op in cs.ops):
+            log.get().info("描画の版を %d → %d（編集の無い曲の最初の編集）", self.render_version, RENDER_VERSION)
+            self.render_version = RENDER_VERSION
 
     def apply_edits(self, specs, author="ai", label=None, origin="manual"):
         """specs = [{kind, target, params, note}] を 1 つの changeset として適用。
 
         origin: "auto"（ガイドに合わせる）/ "manual"。変わったノートに印を付ける（`project/correction.py`）。"""
         self.reload_if_changed()
+        self._first_edit_takes_latest_renderer()
         from .correction import Marker, kinds_of, TIMING_KINDS
         marker = Marker(self, kinds_of(self, specs), origin)
         cs_id = self._next_id("changeset")
@@ -1811,6 +1899,7 @@ class Project:
                      changeset=cs_id, note=s.get("note"))
             ops.append({"op": "add", "edit": e.to_json()})
             made.append(e)
+        self._stamp_basis(ops)
         cs = Changeset(id=cs_id, label=label or (made[0].describe() if made else "（空）"),
                        author=author, created_at=now_iso(), ops=ops)
         self.changesets.append(cs)
@@ -1835,6 +1924,7 @@ class Project:
         `project/timing.py` の組み直しで使う（変わる範囲のタイミング編集を外して、
         正規形の stretch / crop / silence を入れ直す）。origin は `apply_edits` と同じ。"""
         from .correction import Marker, kinds_of, TIMING_KINDS
+        self._first_edit_takes_latest_renderer()
         structural = []
         for spec in specs:
             if spec.get("kind") not in ("split", "merge"):
@@ -1860,6 +1950,7 @@ class Project:
                 op["in_place_of"] = s["in_place_of"]     # 編集リストの中の元の位置に入れる
             ops.append(op)
             made.append(e)
+        self._stamp_basis(ops)
         cs = Changeset(id=cs_id, label=label or (made[0].describe() if made else "（空）"),
                        author=author, created_at=now_iso(), ops=ops)
         self.changesets.append(cs)
@@ -1941,6 +2032,144 @@ class Project:
         ids = {n.id for n in self.take_notes}
         return [(e, e.target.note_id) for e in self.edits
                 if e.target.type == "note" and e.target.note_id not in ids]
+
+    def _note_basis(self):
+        """今の解析（メモリのテイクのノート）の記録 `{"op": "basis", estimator, version, notes}`。notes はノートの
+        id・種類・区間（ms）の指紋（同じ指紋 = 同じ番号が同じノート）。解析がメモリに無ければ None。"""
+        ns = self._take_notes
+        if not ns:
+            return None
+        ta = self.analysis.get("take") or {}
+        fp = hashlib.sha1(json.dumps([[n.id, n.kind, int(round(n.start_sec * 1000)), int(round(n.end_sec * 1000))]
+                                      for n in ns]).encode("utf-8")).hexdigest()[:16]
+        return {"op": "basis", "estimator": ta.get("estimator"), "version": ta.get("estimator_version"), "notes": fp}
+
+    def _stamp_basis(self, ops):
+        """ノート ID に頼る編集を足す changeset の ops に、その編集を作った解析の記録を足す
+        （方式を替える前の付け替えが、記録と今の解析を照合する。`retarget_note_targets`）。"""
+        if any(op.get("op") == "add" and note_dependent(op["edit"]) for op in ops):
+            b = self._note_basis()
+            if b is not None:
+                ops.append(b)
+
+    def _basis_matches(self, b, basis):
+        """changeset の記録 b（無ければ None）の番号が、保存した解析（メモリに読んだもの）の番号と同じノートを指すか。
+        (合う, 合わない理由)。b が無い（前の版のエンジンで作り、アーカイブを経ていない）編集は、今までどおり
+        保存した解析が basis（省くと `f0_estimator()`）の方式のものなら合うとする。"""
+        ta = self.analysis.get("take") or {}
+        if b is None:
+            basis = self.f0_estimator(basis)
+            if ta.get("estimator") is not None and not self._same_take_estimator(
+                    ta["estimator"], ta.get("estimator_version"), basis):
+                return False, "保存した解析（%s）が編集を作った方式（%s）のものでない" % (ta["estimator"], basis)
+            return True, None
+        if b.get("notes"):
+            now = self._note_basis()
+            if now is not None and now["notes"] == b["notes"]:
+                return True, None
+            return False, "保存した解析（%s）のノートの区切りが、編集を作った解析（%s）と違う" % (
+                ta.get("estimator"), b.get("estimator"))
+        if b.get("estimator"):
+            same = ta.get("estimator") == b["estimator"] and (
+                b["estimator"] != "gliss" or not b.get("version") or not ta.get("estimator_version")
+                or ta["estimator_version"] == b["version"])
+            if same:
+                return True, None
+            return False, "保存した解析（%s）が、アーカイブに記録された方式（%s）のものでない" % (
+                ta.get("estimator"), b["estimator"])
+        return False, "編集を作った解析が分からない（方式の記録の無いアーカイブから戻した編集）"
+
+    def retarget_note_targets(self, basis=None):
+        """F0 の方式・モデルの版を替える**前に**: ノートの ID に頼る編集を、今の解析での区間に書き換える。
+        target = note はそのノートの区間の範囲対象（`notes_edit._retarget` と同じ書き換え。区間が同じなので音は
+        変わらない）、`connection` は組の境目の区間で引く形（params.by_time。`timing.connection_overrides`）。
+
+        ノートの ID は解析ごとの通し番号なので、方式・版を替えた後の解析では同じ番号が別のノートを指す
+        （無声・息のこともある）。替える前に区間へ直しておけば、替えた後も同じ区間に同じ量が掛かる。
+        changeset の中の `add` を書き換えるので、編集の id・author・changeset・並び・取り消しの単位は変わらない
+        （人の編集も中身はそのまま）。取り消した changeset の編集は、その changeset を当てた状態のノートの区間で書き換える。
+
+        書き換えるのは、編集を作った解析の記録（changeset の `basis`。ノートの区切りの指紋・アーカイブの方式）が
+        保存した解析と合う changeset だけ。合わない・分からない（記録の無い古いアーカイブ）ものは書き換えず、
+        `unverified` に返す（番号のまま残る。替えた後の解析で別のノートに当たりうるので、呼び出し側が報告する）。
+        basis: 記録の無い（前の版で作った）編集を作った F0 の方式（省くと `f0_estimator()`）。
+        返り値 {"retargeted": 書き換えた有効な編集の数, "history": 履歴の中だけの編集の数,
+                 "pairs": そのうち connection の数, "unresolved": [区間が分からなかった編集の id],
+                 "unverified": [作った解析を確かめられず書き換えなかった有効な編集の id], "skipped": 理由 | None}"""
+        out = {"retargeted": 0, "history": 0, "pairs": 0, "unresolved": [], "unverified": [], "skipped": None}
+        self.reload_if_changed()
+        found = [(i, op) for i, cs in enumerate(self.changesets) for op in cs.ops
+                 if op.get("op") == "add" and note_dependent(op["edit"])
+                 and not (op["edit"].get("params") or {}).get("by_time")]
+        if not found:
+            return out
+        ta = self.analysis.get("take") or {}
+        if not ta or not os.path.exists(self._cache_path("take-analysis.json")):
+            out["skipped"] = "テイクがまだ解析されていない"
+            return out
+        self.ensure_analyzed()
+        verdict = {}
+        for i, _op in found:
+            if i not in verdict:
+                verdict[i] = self._basis_matches(_changeset_basis(self.changesets[i]), basis)
+        live = {e.id for e in self.edits}
+        now = {n.id: n for n in self.take_notes}
+        states = {}
+
+        def notes_at(i):
+            """changeset i を当てた状態（i より前の有効な changeset ＋ i）のノート。"""
+            if i not in states:
+                from .notes_edit import apply_note_edits
+                eds = _live_edits(cs for j, cs in enumerate(self.changesets[:i + 1])
+                                  if j == i or not cs.undone)
+                ops = [e for e in eds if e.kind in ("split", "merge")]
+                ns = apply_note_edits(self._take_notes or [], ops, self._take_f0) if ops else (self._take_notes or [])
+                states[i] = {n.id: n for n in ns}
+            return states[i]
+
+        def lookup(i, d, nid):
+            return now.get(nid) if d["id"] in live else (notes_at(i).get(nid) or now.get(nid))
+
+        reasons = []
+        for i, op in found:
+            d = op["edit"]
+            ok, why = verdict[i]
+            if not ok:
+                if d["id"] in live:
+                    out["unverified"].append(d["id"])
+                if why not in reasons:
+                    reasons.append(why)
+                continue
+            if d.get("kind") == "connection":
+                pr = d.get("params") or {}
+                na, nb = lookup(i, d, pr.get("a")), lookup(i, d, pr.get("b"))
+                if na is None or nb is None:
+                    out["unresolved"].append(d["id"])
+                    continue
+                # 組の境目の区間（a の終わり〜b の始まり）で、替えた後の解析の組を引く
+                op["edit"] = dict(d, target=Target.range(na.end_sec, nb.start_sec).to_json(),
+                                  params=dict(pr, by_time=True,
+                                              pair="note" if na.kind == "note" and nb.kind == "note" else "any"))
+                out["pairs"] += 1
+            else:
+                n = lookup(i, d, d["target"].get("note_id"))
+                if n is None:
+                    out["unresolved"].append(d["id"])
+                    continue
+                op["edit"] = dict(d, target=Target.range(n.start_sec, n.end_sec).to_json())
+            out["retargeted" if d["id"] in live else "history"] += 1
+        if reasons:
+            out["skipped"] = "；".join(reasons)
+            log.get().warning("F0 の方式を替える前の付け替え: ノート ID に頼る編集 %d 件を、作った解析を確かめられないので"
+                              "書き換えない（%s）", len(out["unverified"]), out["skipped"])
+        if out["retargeted"] or out["history"]:
+            self._replay()
+            self._notes_cache = None
+            self.save()
+            log.get().info("F0 の方式を替える前に、ノート ID に頼る編集 %d 件（履歴の中だけ %d 件。うち接続 %d 件）を"
+                           "区間に付け替えた（区間が分からない %d 件）", out["retargeted"], out["history"], out["pairs"],
+                           len(out["unresolved"]))
+        return out
 
     def missing_note_targets_with(self, estimator):
         """テイクを `estimator` で解析したとしたとき、ノート対象の編集の対象になるノートが無いもの（ノート ID の一覧）。
@@ -2206,6 +2435,8 @@ class Project:
         if not force and self._phonemes.get(source) is not None and src is not None and \
                 _src_sig(src[0]) == src and (self.background or os.path.exists(cache)):
             # 今の歌詞の音素を、同じファイルからもう読んでいる（歌詞を変えると _phonemes は捨てる）
+            if not os.path.exists(keyed):
+                _copy(src[0], keyed)
             self._register_phonemes(source, keyed if self.background else None)
             return self._phonemes[source]
         for path in ((cache, keyed) if not force else ()):
@@ -2238,6 +2469,9 @@ class Project:
                 self._srcs["ph_" + source] = sig
                 if path != cache and not self.background:
                     _copy(path, cache)
+                if path != keyed and not os.path.exists(keyed):
+                    # 鍵付きの保存が無い（古い作業場所・外された）: 今の写しから作る（準備済みの印に要る）
+                    _copy(path, keyed)
                 self._register_phonemes(source)
                 return self._phonemes[source]
         if not self.background:
@@ -2342,6 +2576,45 @@ class Project:
             return r.boundary(boundary_id)
         except KeyError as e:
             raise ProjectError(str(e))
+
+
+def note_dependent(edit):
+    """編集（dict）がノート ID に頼るか: 対象がノート（target = note）か、ノートの組を ID で引く `connection`。
+    `transition`・`split`・`merge` は時刻で引くので入れない。"""
+    return (edit.get("target") or {}).get("type") == "note" or edit.get("kind") == "connection"
+
+
+def _changeset_basis(cs):
+    """changeset に記録した、ノート ID に頼る編集を作った解析（`{"op": "basis", …}`。無ければ None）。"""
+    return next((op for op in cs.ops if op.get("op") == "basis"), None)
+
+
+def _live_edits(changesets):
+    """changeset の列を順に適用した、有効な編集リスト（`Project._replay`）。"""
+    by_id = {}
+    order = []
+    for cs in changesets:
+        for op in cs.ops:
+            if op.get("op") == "add":
+                e = Edit.from_json(op["edit"])
+                by_id[e.id] = e
+                # 置き換え（分割で範囲対象に直す・オリジナルに戻すで切る等）は元の編集の位置へ入れる。
+                # 編集リストの順は意味を持つ（pitch_curve は後勝ち、鉛筆は「後から入ったピッチ編集」
+                # だけを描いた線に足す）ので、末尾へ回すと音が変わる
+                at = op.get("in_place_of")
+                if at and at in order:
+                    order.insert(order.index(at), e.id)
+                else:
+                    order.append(e.id)
+            elif op.get("op") == "remove":
+                by_id.pop(op["edit_id"], None)
+    seen = set()
+    out = []
+    for eid in order:
+        if eid in by_id and eid not in seen:
+            seen.add(eid)
+            out.append(by_id[eid])
+    return out
 
 
 def _shift_guide_lyrics(old, new, entries):

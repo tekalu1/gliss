@@ -1,5 +1,7 @@
 #include "GlissDocumentController.h"
 
+#include <cstring>
+
 #include "Diagnostics.h"
 #include "GlissEditorRenderer.h"
 #include "GlissPlaybackRenderer.h"
@@ -71,6 +73,70 @@ private:
 };
 
 //==============================================================================
+#if GLISS_TEST_HOOKS
+/** 試験用（GLISS_TEST_BRIDGE_DIR。CMake の GLISS_TEST_HOOKS のビルドだけ）: 画面の engineCall の代わり。フォルダの <名前>.call.json（{tool, args}）を順に
+    engineCall に渡し、答えを <名前>.result.json に書く（plugin/tests/aratest の GlissARATest -changes が使う）。tool が "@preview" のときは
+    画面の preview の代わり（{tool: "@preview", op, args}。GlissHostCheck --ara-preview が使う）。
+    args の文字列 "@ara:<修飾の persistentID>" はその修飾のトラックの id に置き換える。メッセージスレッドで動く。 */
+class GlissDocumentController::TestBridge final : private juce::Timer
+{
+public:
+    TestBridge (GlissDocumentController& ownerIn, juce::File dirIn) : owner (ownerIn), dir (std::move (dirIn))
+    {
+        startTimer (50);
+    }
+
+private:
+    void timerCallback() override
+    {
+        if (*busy)
+            return;
+
+        auto calls = dir.findChildFiles (juce::File::findFiles, false, "*.call.json");
+
+        if (calls.isEmpty())
+            return;
+
+        calls.sort();
+        const auto call = calls[0];
+        const auto base = call.getFileName().upToFirstOccurrenceOf (".call.json", false, false);
+        const auto request = juce::JSON::parse (call.loadFileAsString());
+        call.deleteFile();
+
+        auto args = request.getProperty ("args", {});
+
+        if (auto* o = args.getDynamicObject())
+            for (auto& p : o->getProperties())
+                if (p.value.isString() && p.value.toString().startsWith ("@ara:"))
+                    o->setProperty (p.name, owner.sync->getModStatus (p.value.toString().fromFirstOccurrenceOf ("@ara:", false, false)).trackId);
+
+        *busy = true;
+        auto answer = [out = dir.getChildFile (base + ".result.json"), tmp = dir.getChildFile (base + ".result.tmp"), flag = busy]
+                      (const juce::var& result)
+        {
+            tmp.replaceWithText (juce::JSON::toString (result, true));
+            tmp.moveFileTo (out);
+            *flag = false;
+        };
+        const auto tool = request.getProperty ("tool", {}).toString();
+
+        // "@preview": 画面の preview（{op, args}）の代わり。args の requester（試聴を求めたエディタの EditorRenderer の id）は、
+        // 本物の GlissEditor が足すもの（EditorWebView の preview）と同じ名前
+        if (tool == "@preview")
+            owner.preview (request.getProperty ("op", "start").toString(), args, std::move (answer));
+        else
+            owner.engineCall (tool, args, std::move (answer));
+    }
+
+    GlissDocumentController& owner;
+    juce::File dir;
+    std::shared_ptr<bool> busy = std::make_shared<bool> (false);
+};
+#else
+class GlissDocumentController::TestBridge {};   // 配布のビルド: 試験用の口は無い
+#endif
+
+//==============================================================================
 GlissAudioModification::GlissAudioModification (juce::ARAAudioSource* audioSource,
                                                 ARA::ARAAudioModificationHostRef hostRef,
                                                 const juce::ARAAudioModification* optionalModificationToClone)
@@ -90,6 +156,11 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
     DocumentSync::Options options;
     options.engineDisabled = env ("GLISS_ENGINE_DISABLED").isNotEmpty() && env ("GLISS_ENGINE_DISABLED") != "0";
     options.testEdit = TestEdit::parse (env ("GLISS_TEST_EDIT"));
+#if GLISS_TEST_HOOKS
+    // 試験用: 1 回の ara_render_dirty で再合成する長さ（GlissARATest -changes が再合成を何回かに分けるのに使う）
+    if (const auto maxSec = env ("GLISS_TEST_MAX_RENDER_SEC").getDoubleValue(); maxSec > 0.0)
+        options.maxRenderSec = maxSec;
+#endif
 
     if (env ("GLISS_TEST_EDIT").isNotEmpty() && ! options.testEdit.has_value())
         diag::log ("document: GLISS_TEST_EDIT could not be read: " + env ("GLISS_TEST_EDIT"));
@@ -103,20 +174,29 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
                 onSyncEvent (name, data);
         });
     };
-    callbacks.contentChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids)
+    callbacks.contentChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, bool notifyHost)
     {
-        juce::MessageManager::callAsync ([this, token, ids]
+        juce::MessageManager::callAsync ([this, token, ids, notifyHost]
         {
             if (token.lock() != nullptr)
-                notifyContentChanged (ids);
+                notifyContentChanged (ids, notifyHost);
         });
     };
-    callbacks.notesChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, const juce::StringArray& sources)
+    callbacks.notesChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, const juce::StringArray& sources,
+                                                                            bool firstContent)
     {
-        juce::MessageManager::callAsync ([this, token, ids, sources]
+        juce::MessageManager::callAsync ([this, token, ids, sources, firstContent]
         {
             if (token.lock() != nullptr)
-                notifyNotesChanged (ids, sources);
+                notifyNotesChanged (ids, sources, firstContent);
+        });
+    };
+    callbacks.stateChanged = [this, token = std::weak_ptr<bool> (alive)] (const juce::StringArray& ids, bool documentData)
+    {
+        juce::MessageManager::callAsync ([this, token, ids, documentData]
+        {
+            if (token.lock() != nullptr)
+                notifyStateChanged (ids, documentData);
         });
     };
     callbacks.log = [] (const juce::String& line) { diag::log (line); };
@@ -124,13 +204,24 @@ GlissDocumentController::GlissDocumentController (const ARA::PlugIn::PlugInEntry
     const auto disabled = options.engineDisabled;
     sync = std::make_unique<DocumentSync> (EngineConfig::discover(), std::move (options), std::move (callbacks));
     diag::log ("document: created, work key " + workKey + (disabled ? " (engine disabled)" : ""));
+
+#if GLISS_TEST_HOOKS
+    if (const auto dir = env ("GLISS_TEST_BRIDGE_DIR"); dir.isNotEmpty() && juce::File::isAbsolutePath (dir))
+    {
+        juce::File (dir).createDirectory();
+        testBridge = std::make_unique<TestBridge> (*this, juce::File (dir));
+        diag::log ("document: test bridge on " + dir);
+    }
+#endif
 }
 
 GlissDocumentController::~GlissDocumentController()
 {
+    testBridge.reset();
     stopTimer();
     *alive = false;
     sync->shutdown();
+    auditionPool.removeAllJobs (true, 10000);
     bridgePool.removeAllJobs (true, 10000);
     sync.reset();
 
@@ -153,19 +244,93 @@ void GlissDocumentController::didEndEditing (juce::ARADocument*)
 {
     editing = false;
     processBlockLock.exitWrite();
+
+    if (! hostLogged)
+    {
+        // 保存するものだけが変わったときの知らせの届き方（notifyStateChanged）。ホストの ARA の版と、文書の知らせ
+        // （notifyDocumentDataChanged。ARA 2.3）を受ける口があるか
+        hostLogged = true;
+        auto* dc = getDocumentController();
+        auto* updates = dc->getHostModelUpdateController();
+        const auto documentData = updates != nullptr
+            && updates->getInterface().implements<ARA_STRUCT_MEMBER (ARAModelUpdateControllerInterface, notifyDocumentDataChanged)>();
+        diag::log ("document: host ARA API generation " + juce::String ((int) dc->getUsedApiGeneration())
+                   + ", model updates " + (updates != nullptr ? "yes" : "no")
+                   + ", document data notification " + (documentData ? "yes" : "no"));
+    }
+
     pushModel();
 }
 
 void GlissDocumentController::willDestroyDocument (juce::ARADocument*)
 {
+    stopPreviewAudio();
     // 先に同期とエンジンを止める（この後、モデルの各オブジェクトが壊される）。
     sync->shutdown();
 }
 
-void GlissDocumentController::didEnableAudioSourceSamplesAccess (juce::ARAAudioSource*, bool)
+void GlissDocumentController::didEnableAudioSourceSamplesAccess (juce::ARAAudioSource* source, bool enable)
 {
+    // 切っている間に読めなかった区間を、先読みのリーダーが無音のまま持っている。戻ったら作り直す
+    if (enable)
+        scheduleReaderRefresh (source, "samples-access");
+    else
+        diag::logAlways ("source: samples access disabled id=" + juce::String (source->getPersistentID()));
+
     if (! editing)
         pushModel();
+}
+
+void GlissDocumentController::didUpdateAudioSourceProperties (juce::ARAAudioSource* source)
+{
+    scheduleReaderRefresh (source, "properties");
+}
+
+void GlissDocumentController::scheduleReaderRefresh (juce::ARAAudioSource* source, const char* reason)
+{
+    // 同じソースへの予約はまとめる（プロパティの更新より、内容・アクセスの理由を優先する。前者は変わっていなければ何もしない）
+    const auto [pending, inserted] = pendingReaderRefresh.emplace (source, reason);
+
+    if (! inserted && std::strcmp (pending->second, "properties") == 0)
+        pending->second = reason;
+
+    if (readerRefreshScheduled)
+        return;
+
+    readerRefreshScheduled = true;
+    juce::MessageManager::callAsync ([this, token = std::weak_ptr<bool> (alive)]
+    {
+        if (token.lock() != nullptr)
+            runReaderRefresh();
+    });
+}
+
+void GlissDocumentController::runReaderRefresh()
+{
+    readerRefreshScheduled = false;
+    auto pending = std::move (pendingReaderRefresh);
+    pendingReaderRefresh.clear();
+
+    auto* document = getDocument();
+
+    if (document == nullptr)
+        return;
+
+    const auto& liveSources = document->getAudioSources();
+
+    for (const auto& [source, reason] : pending)
+    {
+        // 予約の間に壊れたソースには触らない
+        if (std::find (liveSources.begin(), liveSources.end(), source) == liveSources.end())
+            continue;
+
+        // サンプルへのアクセスが切れている間は作り直しても読めない。戻ったとき（samples-access）に作り直す
+        if (! source->isSampleAccessEnabled())
+            continue;
+
+        for (auto* renderer : getDocumentController()->getPlaybackRenderers<GlissPlaybackRenderer>())
+            renderer->refreshSource (source, reason);
+    }
 }
 
 void GlissDocumentController::doUpdateAudioSourceContent (juce::ARAAudioSource* source, juce::ARAContentUpdateScopes scopeFlags)
@@ -173,7 +338,10 @@ void GlissDocumentController::doUpdateAudioSourceContent (juce::ARAAudioSource* 
     if (! scopeFlags.affectSamples())
         return;
 
-    // DAW 側で音が変わった: 読み直す（エンジンは音の中身で比べ、違えば source_changed）。
+    // DAW 側で音が変わった: 再生の原音のリーダーを作り直す（ARAAudioSourceReader はこの知らせで無効になる）
+    scheduleReaderRefresh (source, "content");
+
+    // 読み直す（エンジンは音の中身で比べ、違えば source_changed）。
     if (auto it = sourceEntries.find (source); it != sourceEntries.end())
         it->second.contentChanged = true;
 
@@ -328,7 +496,7 @@ juce::ARAPlaybackRenderer* GlissDocumentController::doCreatePlaybackRenderer() n
 
 juce::ARAEditorRenderer* GlissDocumentController::doCreateEditorRenderer() noexcept
 {
-    return new GlissEditorRenderer (getDocumentController());
+    return new GlissEditorRenderer (getDocumentController(), previewAudio);
 }
 
 juce::ScopedTryReadLock GlissDocumentController::getProcessingLock()
@@ -341,7 +509,7 @@ bool GlissDocumentController::isSyncSettled() const noexcept
     return sync == nullptr || sync->isSettled();
 }
 
-void GlissDocumentController::notifyContentChanged (const juce::StringArray& araIds)
+void GlissDocumentController::notifyContentChanged (const juce::StringArray& araIds, bool notifyHost)
 {
     auto* document = getDocument();
 
@@ -355,12 +523,32 @@ void GlissDocumentController::notifyContentChanged (const juce::StringArray& ara
             if (! araIds.contains (juce::String (modification->getPersistentID())))
                 continue;
 
-            modification->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), true);
+            modification->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), notifyHost);
 
             for (auto* region : modification->getPlaybackRegions<juce::ARAPlaybackRegion>())
-                region->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), true);
+                region->notifyContentChanged (juce::ARAContentUpdateScopes::samplesAreAffected(), notifyHost);
         }
     }
+}
+
+void GlissDocumentController::notifyStateChanged (const juce::StringArray& araIds, bool documentData)
+{
+    auto* document = getDocument();
+
+    if (document == nullptr)
+        return;
+
+    // 音もノートも変わらない（nothingIsAffected）が、保存するもの（アーカイブ）が変わった。ARA はプラグインに、保存の状態が
+    // 変わったら確実に知らせることを求める（ホストは知らせを受けたものだけを保存し直すことがある。ARAInterface.h）。
+    // 修飾ごとの知らせ（ARA 2.0）と、文書の知らせ（ガイドの指定。ARA 2.3 の notifyDocumentDataChanged。ホストに口が無ければ
+    // 何もしない）の両方を送る
+    for (auto* source : document->getAudioSources<juce::ARAAudioSource>())
+        for (auto* modification : source->getAudioModifications<GlissAudioModification>())
+            if (araIds.contains (juce::String (modification->getPersistentID())))
+                modification->notifyContentChanged (juce::ARAContentUpdateScopes::nothingIsAffected(), true);
+
+    if (documentData)
+        getDocumentController()->notifyDocumentDataChanged();
 }
 
 //==============================================================================
@@ -412,7 +600,7 @@ bool isActive (const ARA::PlugIn::AudioModification* m)
 }
 } // namespace
 
-std::shared_ptr<const ModificationNotes> GlissDocumentController::notesOf (const ARA::PlugIn::AudioModification* modification) const
+std::shared_ptr<const ModificationNotes> GlissDocumentController::readyNotes (const ARA::PlugIn::AudioModification* modification) const
 {
     if (! isActive (modification))
         return nullptr;
@@ -421,14 +609,36 @@ std::shared_ptr<const ModificationNotes> GlissDocumentController::notesOf (const
     return n != nullptr && n->ready ? n : nullptr;
 }
 
+std::shared_ptr<const ModificationNotes> GlissDocumentController::notesOf (const ARA::PlugIn::AudioModification* modification) const
+{
+    // ホストに「まだ無い」と答えたら覚える（読めるようになったときに知らせる相手。notifyNotesChanged）。
+    // 答えと記録を同じロックの中で行う（同期のスレッドが写しを置いた後の知らせと、すれ違わない）
+    std::lock_guard guard (hostNotesMutex);
+    auto n = readyNotes (modification);
+
+    if (n == nullptr && isActive (modification))
+        hostSawNoNotes.insert ("m:" + juce::String (modification->getPersistentID()));
+
+    return n;
+}
+
 std::shared_ptr<const ModificationNotes> GlissDocumentController::sourceNotesOf (const ARA::PlugIn::AudioSource* source) const
 {
+    std::lock_guard guard (hostNotesMutex);
+
     // 同じソースの修飾は同じ音の同じ解析を持つ。解析の済んだ最初のもの。
     for (const auto* modification : source->getAudioModifications())
-        if (auto n = notesOf (modification))
+        if (auto n = readyNotes (modification))
             return n;
 
+    hostSawNoNotes.insert ("s:" + juce::String (source->getPersistentID()));
     return nullptr;
+}
+
+bool GlissDocumentController::takeHostSawNoNotes (const juce::String& key)
+{
+    std::lock_guard guard (hostNotesMutex);
+    return hostSawNoNotes.erase (key) > 0;
 }
 
 bool GlissDocumentController::doIsAudioSourceContentAvailable (const ARA::PlugIn::AudioSource* source, ARA::ARAContentType type)
@@ -529,7 +739,7 @@ void GlissDocumentController::doRequestAudioSourceContentAnalysis (ARA::PlugIn::
     sync->requestEngine();
 }
 
-void GlissDocumentController::notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds)
+void GlissDocumentController::notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent)
 {
     auto* document = getDocument();
 
@@ -538,20 +748,30 @@ void GlissDocumentController::notifyNotesChanged (const juce::StringArray& araId
 
     const auto scope = juce::ARAContentUpdateScopes::notesAreAffected();
 
+    // 初めて読めるようになったノートは、ホストが「まだ無い」と答えられたもの（読み直すのを待っている）だけに知らせる。
+    // 聞かれていなければ、ホストが次に読むときにそのまま渡る。曲を開いた（アーカイブから戻した）だけで、ホストに
+    // 「中身が変わった」と知らせない（ARA の notifyAudioSourceContentChanged・notifyAudioModificationContentChanged）
+    const auto toHost = [this, firstContent] (const juce::String& key) { return ! firstContent || takeHostSawNoNotes (key); };
+
     for (auto* source : document->getAudioSources<juce::ARAAudioSource>())
     {
-        if (sourceIds.contains (juce::String (source->getPersistentID())))
-            source->notifyContentChanged (scope, true);
+        const auto sourceId = juce::String (source->getPersistentID());
+
+        if (sourceIds.contains (sourceId))
+            source->notifyContentChanged (scope, toHost ("s:" + sourceId));
 
         for (auto* modification : source->getAudioModifications<GlissAudioModification>())
         {
-            if (! araIds.contains (juce::String (modification->getPersistentID())))
+            const auto araId = juce::String (modification->getPersistentID());
+
+            if (! araIds.contains (araId))
                 continue;
 
-            modification->notifyContentChanged (scope, true);
+            const auto host = toHost ("m:" + araId);
+            modification->notifyContentChanged (scope, host);
 
             for (auto* region : modification->getPlaybackRegions<juce::ARAPlaybackRegion>())
-                region->notifyContentChanged (scope, true);
+                region->notifyContentChanged (scope, host);
         }
     }
 }
@@ -567,6 +787,7 @@ bool GlissDocumentController::doStoreObjectsToStream (juce::ARAOutputStream& out
     a.workKey = sync->hasOpened() ? sync->getOpenedWorkKey() : workKey;
 
     const auto guide = sync->getGuideForStore();
+    const auto guides = sync->getGuidesForStore();
     int withEdits = 0;
 
     for (const auto* modification : filter->getAudioModificationsToStore<GlissAudioModification>())
@@ -581,6 +802,11 @@ bool GlissDocumentController::doStoreObjectsToStream (juce::ARAOutputStream& out
         if (id == guide)
             a.guide = guide;
     }
+
+    // トラックごとのガイドは、修飾もガイドの修飾も保存するものだけ書く（外した修飾を指す指定は残さない）。
+    for (const auto& [id, guideId] : guides)
+        if (a.modifications.count (id) > 0 && a.modifications.count (guideId) > 0)
+            a.guides[id] = guideId;
 
     const auto json = archive::write (a);
     diag::log ("archive: store " + juce::String ((int) a.modifications.size()) + " modification(s), " + juce::String (withEdits)
@@ -628,6 +854,39 @@ bool GlissDocumentController::doRestoreObjectsFromStream (juce::ARAInputStream& 
     if (a.guide.isNotEmpty())
         if (auto* guide = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (a.guide.toRawUTF8()))
             sync->setPendingGuide (juce::String (guide->getPersistentID()));
+
+    // トラックごとのガイド（フィルターが対応させた今の修飾の ID に直す）。guides のあるアーカイブでは、アーカイブにある
+    // 修飾の指定をアーカイブのとおりにする（載っていない修飾は外す。編集をアーカイブの内容に戻すのと同じ）。
+    std::map<juce::String, juce::String> restoredGuides;
+
+    if (a.hasGuides)
+        for (const auto& [id, m] : a.modifications)
+            if (auto* modification = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (id.toRawUTF8()))
+                restoredGuides[juce::String (modification->getPersistentID())] = {};
+
+    for (const auto& [id, guideId] : a.guides)
+    {
+        auto* modification = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (id.toRawUTF8());
+        auto* guide = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (guideId.toRawUTF8());
+
+        if (modification != nullptr && guide != nullptr)
+            restoredGuides[juce::String (modification->getPersistentID())] = juce::String (guide->getPersistentID());
+    }
+
+    if (! restoredGuides.empty())
+        sync->setPendingGuides (restoredGuides);
+
+    // ホストが持っているガイドの指定（保存に書く指定がこれと違ってきたら知らせる）。ガイドの指定を書いていない古い
+    // アーカイブは、戻し終えた後の指定をホストが持っているものとする
+    {
+        juce::String guide;
+
+        if (a.guide.isNotEmpty())
+            if (auto* g = filter->getAudioModificationToRestoreStateWithID<GlissAudioModification> (a.guide.toRawUTF8()))
+                guide = juce::String (g->getPersistentID());
+
+        sync->setHostGuides (restoredGuides, guide, a.hasGuides);
+    }
 
     diag::log ("archive: restore " + juce::String ((int) a.modifications.size()) + " entr(ies), " + juce::String (restored)
                + " matched, work key " + workKey);
@@ -690,10 +949,16 @@ void GlissDocumentController::removeListener (Listener* l)
 
 void GlissDocumentController::timerCallback()
 {
-    if (! playheadState.read().valid)
+    const auto position = playheadState.read();
+    if (! position.valid)
         return;
+    if (position.playing && ! lastHostPlaying)
+    {
+        stopPreviewAudio();
+    }
+    lastHostPlaying = position.playing;
 
-    const auto event = describePlayhead();
+    const auto event = describePlayhead (position);
     auto json = juce::JSON::toString (event, true);
 
     if (json == lastPlayheadJson)
@@ -705,12 +970,17 @@ void GlissDocumentController::timerCallback()
 
 juce::var GlissDocumentController::describePlayhead() const
 {
+    return describePlayhead (playheadState.read());
+}
+
+juce::var GlissDocumentController::describePlayhead (const PlayheadSnapshot& position) const
+{
     std::vector<std::pair<juce::String, std::vector<RegionTimes>>> list;
 
     for (const auto& t : tracks)
         list.emplace_back (sync->getModStatus (t.araId).trackId, t.regions);
 
-    return playhead::describe (playheadState.read(), list);
+    return playhead::describe (position, list);
 }
 
 juce::var GlissDocumentController::describeSelection() const
@@ -724,47 +994,88 @@ juce::var GlissDocumentController::describeSelection() const
                      { "region", selectionRegion.toVar() } });
 }
 
-void GlissDocumentController::editorSelectionChanged (const juce::ARAViewSelection& selection)
+void GlissDocumentController::editorVisibilityChanged (const void* view, bool showing)
 {
-    const juce::ARAPlaybackRegion* chosen = nullptr;
+    selectionPolicy.setViewShowing (view, showing);
+    diag::logAlways ("selection: editor view " + juce::String::toHexString ((juce::pointer_sized_int) view)
+                     + (showing ? " shown" : " hidden") + " (showing editors " + juce::String (selectionPolicy.showingCount()) + ")");
+}
+
+void GlissDocumentController::editorSelectionChanged (const void* view, const juce::ARAViewSelection& selection)
+{
+    // 選択の中身を ARA の型を使わない形に写す。リージョン・リージョン列には persistentID が無いので、同じ文書の中で変わらない
+    // 識別（リージョン = regionId、リージョン列 = オブジェクトの番地）と、リージョンの修飾の persistentID を使う
+    SelectionPolicy::Input in;
+    in.view = view;
+    in.playheadSec = playheadState.read().songSec;
+    const auto toRegion = [] (const juce::ARAPlaybackRegion* r)
+    {
+        SelectionPolicy::Region out;
+        out.id = regionId (r);
+        out.songStart = r->getStartInPlaybackTime();
+        out.songEnd = r->getEndInPlaybackTime();
+
+        if (auto* m = r->getAudioModification())
+            out.modification = juce::String (m->getPersistentID());
+
+        return out;
+    };
+    std::map<juce::String, const juce::ARAPlaybackRegion*> byId;
 
     for (auto* region : selection.getPlaybackRegions<juce::ARAPlaybackRegion>())
     {
-        chosen = region;
-        break;
+        in.regions.push_back (toRegion (region));
+        byId[regionId (region)] = region;
     }
 
-    // リージョンを選んでいなければ、選んだ DAW のトラックの、再生位置に近いリージョン。
-    if (chosen == nullptr)
+    for (auto* sequence : selection.getRegionSequences<juce::ARARegionSequence>())
     {
-        const auto songSec = playheadState.read().songSec;
-        double best = std::numeric_limits<double>::max();
+        SelectionPolicy::Sequence s;
+        s.id = "q" + juce::String::toHexString ((juce::pointer_sized_int) sequence);
 
-        for (auto* sequence : selection.getRegionSequences<juce::ARARegionSequence>())
+        for (auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
         {
-            for (auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
-            {
-                const auto start = region->getStartInPlaybackTime();
-                const auto end = region->getEndInPlaybackTime();
-                const auto distance = songSec < start ? start - songSec : (songSec > end ? songSec - end : 0.0);
-
-                if (distance < best)
-                {
-                    best = distance;
-                    chosen = region;
-                }
-            }
-
-            if (chosen != nullptr)
-                break;
+            s.regions.push_back (toRegion (region));
+            byId[regionId (region)] = region;
         }
+
+        in.sequences.push_back (std::move (s));
     }
 
-    if (chosen == nullptr || chosen->getAudioModification() == nullptr)
+    const auto before = selectionPolicy.currentModification();
+    const auto decision = selectionPolicy.decide (in);
+
+    // 実機で Studio Pro が何を送ったかを後から調べるための行（常に書く。同じ行は省く。Diagnostics::logAlways）
+    juce::StringArray regionList, sequenceList;
+
+    for (const auto& r : in.regions)
+        regionList.add (r.id + "=" + (r.modification.isEmpty() ? juce::String ("-") : r.modification));
+
+    for (const auto& q : in.sequences)
+    {
+        juce::StringArray members;
+
+        for (const auto& r : q.regions)
+            members.add (r.id + "=" + (r.modification.isEmpty() ? juce::String ("-") : r.modification));
+
+        sequenceList.add (q.id + "[" + members.joinIntoString (" ") + "]");
+    }
+
+    diag::logAlways ("selection: view " + juce::String::toHexString ((juce::pointer_sized_int) view)
+                     + " regions [" + regionList.joinIntoString (" ") + "] sequences [" + sequenceList.joinIntoString (" ")
+                     + "] -> " + (decision.kind == SelectionPolicy::Kind::adopt ? "adopted " + decision.region.modification : juce::String ("ignored"))
+                     + " (" + decision.reason + "; was " + (before.isEmpty() ? juce::String ("none") : before) + ")");
+
+    if (decision.kind != SelectionPolicy::Kind::adopt)
         return;
 
-    selectionAraId = juce::String (chosen->getAudioModification()->getPersistentID());
-    selectionRegion = timesOf (chosen);
+    const auto found = byId.find (decision.region.id);
+
+    if (found == byId.end())
+        return;
+
+    selectionAraId = decision.region.modification;
+    selectionRegion = timesOf (found->second);
     hasSelection = true;
     sendEvent ("selection", describeSelection());
 }
@@ -779,10 +1090,20 @@ void GlissDocumentController::engineCall (const juce::String& tool, const juce::
         return;
     }
 
-    bridgePool.addJob ([this, token = std::weak_ptr<bool> (alive), tool, args, done = std::move (done)]
+    const auto requested = juce::Time::getMillisecondCounter();
+    if (tool == "render_audition")
+        diag::log ("audition-latency stage=request ms=" + juce::String (requested));
+    // 試聴（render_audition）は、長い呼び出し（再合成・描画データ）が bridgePool を埋めていても待たせない
+    auto& pool = tool == "render_audition" ? auditionPool : bridgePool;
+    pool.addJob ([this, token = std::weak_ptr<bool> (alive), tool, args, done = std::move (done), requested]
     {
         const auto started = juce::Time::getMillisecondCounter();
+        if (tool == "render_audition")
+            diag::log ("audition-latency stage=engine-call ms=" + juce::String (started)
+                       + " queueMs=" + juce::String ((int) (started - requested)));
         auto result = sync->callTool (tool, args, 300000);
+        if (tool == "render_audition")
+            diag::log ("audition-latency stage=engine-result ms=" + juce::String (juce::Time::getMillisecondCounter()));
         diag::log ("bridge: engineCall " + tool + (isFailure (result) ? " failed: " + failureReason (result) : juce::String (" ok"))
                    + " (" + juce::String ((int) (juce::Time::getMillisecondCounter() - started)) + " ms)");
 
@@ -826,7 +1147,8 @@ juce::var GlissDocumentController::bootstrap()
     for (const auto* key : { "keys", "grid", "view", "f0Estimator" })
         o->setProperty (key, state.getProperty (key, {}));
 
-    // preview は省く（つかんだノートの試聴は EditorRenderer が鳴らせるまで出さない。画面は省略をオフと読む）。
+    o->setProperty ("preview", previewAudio->hasRenderer() && (bool) state.getProperty ("preview", true));
+    o->setProperty ("hostCanPreview", previewAudio->hasRenderer());
     o->setProperty ("selection", describeSelection());
     o->setProperty ("compare", compare.load());
     o->setProperty ("hostCanTransport", getDocumentController()->getHostPlaybackController() != nullptr);
@@ -937,10 +1259,273 @@ juce::var GlissDocumentController::transport (const juce::String& op, const juce
     return object ({ { "ok", true } });
 }
 
-juce::var GlissDocumentController::preview (const juce::String&, const juce::var&)
+void GlissDocumentController::preview (const juce::String& op, const juce::var& arg, Completion done)
 {
-    // つかんだノートの試聴（EditorRenderer で DAW の出力に鳴らす）はまだ作っていない。bootstrap も preview を出さない。
-    return object ({ { "ok", false }, { "reason", "unsupported" } });
+    const auto result = [] (bool ok, const juce::String& reason = {})
+    {
+        return object ({ { "ok", ok }, { "reason", reason } });
+    };
+    if (op == "stop")
+    {
+        stopPreviewAudio();
+        done (result (true));
+        return;
+    }
+    if (op != "start") { done (result (false, "unknown-op")); return; }
+
+    const auto local = (bool) arg.getProperty ("local", false);
+
+    if (local)
+    {
+        // 断った理由を残す（画面は断られたらエンジンで作るので、画面からは見えない）。止められた（cancelled）のは断りではない
+        done = [done = std::move (done)] (juce::var answer)
+        {
+            const auto reason = answer.getProperty ("reason", {}).toString();
+
+            if (! (bool) answer.getProperty ("ok", false) && reason != "cancelled")
+                diag::logAlways ("preview: local refused reason=" + reason);
+
+            done (std::move (answer));
+        };
+    }
+
+    if (! previewAudio->hasRenderer()) { done (result (false, "no-editor-renderer")); return; }
+    if (playheadState.read().playing) { done (result (false, "host-playing")); return; }
+
+    if (local)
+    {
+        previewLocal (arg, std::move (done));
+        return;
+    }
+
+    const juce::File file (arg.getProperty ("path", {}).toString());
+    if (! isReadableByEditor (file) || ! file.hasFileExtension ("wav"))
+    {
+        done (result (false, "invalid-path"));
+        return;
+    }
+
+    targetPreview (arg, "engine");
+
+    const auto generation = previewGeneration.fetch_add (1) + 1;
+    diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
+    const auto audio = previewAudio;
+    const auto cancellationEpoch = audio->getCancellationEpoch();
+    auditionPool.addJob ([this, token = std::weak_ptr<bool> (alive), file, generation, cancellationEpoch, audio, done = std::move (done)]
+    {
+        diag::log ("audition-latency stage=decode-start ms=" + juce::String (juce::Time::getMillisecondCounter()));
+        std::unique_ptr<PreviewAudio::Clip> clip;
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::AudioFormatReader> reader (wav.createReaderFor (file.createInputStream().release(), true));
+        if (reader != nullptr && reader->sampleRate > 0 && reader->lengthInSamples > 1
+            && reader->lengthInSamples <= (juce::int64) (reader->sampleRate * maxPreviewSeconds)
+            && reader->numChannels > 0 && reader->numChannels <= 2)
+        {
+            juce::AudioBuffer<float> decoded ((int) reader->numChannels, (int) reader->lengthInSamples);
+            if (reader->read (&decoded, 0, decoded.getNumSamples(), 0, true, true))
+            {
+                clip = std::make_unique<PreviewAudio::Clip>();
+                clip->sampleRate = reader->sampleRate;
+                for (int ch = 0; ch < decoded.getNumChannels(); ++ch)
+                {
+                    const auto* pcm = decoded.getReadPointer (ch);
+                    clip->channels.emplace_back (pcm, pcm + decoded.getNumSamples());
+                }
+                PreviewAudio::fadeEdges (*clip);
+            }
+        }
+
+        diag::log ("audition-latency stage=decode-end ms=" + juce::String (juce::Time::getMillisecondCounter()));
+        deliverPreview (token, audio, generation, cancellationEpoch, std::move (clip), "invalid-audio", done);
+    });
+}
+
+void GlissDocumentController::deliverPreview (std::weak_ptr<bool> token, std::shared_ptr<PreviewAudio> audio,
+                                              std::uint64_t generation, std::uint64_t cancellationEpoch,
+                                              std::unique_ptr<PreviewAudio::Clip> clip, const juce::String& failure, Completion done)
+{
+    auto pending = std::make_shared<std::unique_ptr<PreviewAudio::Clip>> (std::move (clip));
+    juce::MessageManager::callAsync ([this, token, audio, generation, cancellationEpoch, pending, failure, done]() mutable
+    {
+        if (token.lock() == nullptr) return;
+        if (generation != previewGeneration.load() || cancellationEpoch != audio->getCancellationEpoch())
+        { done (object ({ { "ok", false }, { "reason", "cancelled" } })); return; }
+        if (*pending == nullptr) { done (object ({ { "ok", false }, { "reason", failure } })); return; }
+        if (playheadState.read().playing) { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
+        if (! audio->publish (std::move (*pending), cancellationEpoch))
+        { done (object ({ { "ok", false }, { "reason", "host-playing" } })); return; }
+        diag::log ("audition-latency stage=published ms=" + juce::String (juce::Time::getMillisecondCounter()));
+        done (object ({ { "ok", true } }));
+    });
+}
+
+/** ずらさない試聴（cents = 0）を、エンジンを呼ばずに、プラグインが持つ編集済みの音（EditedPcm）と DAW のソースから作って鳴らす。
+    ソースの範囲を読み、編集済みの窓が重なる所を置き換え、モノラルにして公開する（エンジンの render_audition の cents = 0 と同じ中身。
+    窓の中は再生と同じ PCM、窓の外は原音）。キャッシュが最新でない（同期の最中）ときは、allow_stale でなければ断る（画面がエンジンで作る）。 */
+void GlissDocumentController::previewLocal (const juce::var& arg, Completion done)
+{
+    const auto fail = [&done] (const juce::String& reason) { done (object ({ { "ok", false }, { "reason", reason } })); };
+    const auto araId = arg.getProperty ("ara_id", {}).toString();
+    const double startSec = arg.getProperty ("start_sec", 0.0);
+    const double endSec = arg.getProperty ("end_sec", 0.0);
+    const bool allowStale = (bool) arg.getProperty ("allow_stale", false);
+
+    if (araId.isEmpty() || ! std::isfinite (startSec) || ! std::isfinite (endSec) || ! (endSec > startSec)
+        || endSec - startSec > maxPreviewSeconds || getDocument() == nullptr)
+    {
+        fail ("unsupported");
+        return;
+    }
+
+    juce::ARAAudioSource* source = nullptr;
+    GlissAudioModification* modification = nullptr;
+
+    for (auto* candidate : getDocument()->getAudioSources<juce::ARAAudioSource>())
+        for (auto* m : candidate->getAudioModifications<GlissAudioModification>())
+            if (juce::String (m->getPersistentID()) == araId)
+            {
+                source = candidate;
+                modification = m;
+            }
+
+    const auto entry = source != nullptr ? sourceEntries.find (source) : sourceEntries.end();
+
+    if (modification == nullptr || entry == sourceEntries.end() || entry->second.samples == nullptr
+        || ! source->isSampleAccessEnabled() || source->getSampleRate() <= 0.0 || source->getChannelCount() < 1)
+    {
+        fail ("not-cached");
+        return;
+    }
+
+    if (! allowStale && sync->getModStatus (araId).state != "ready")
+    {
+        fail ("stale");
+        return;
+    }
+
+    const auto sampleRate = source->getSampleRate();
+    const auto channels = juce::jmin ((int) source->getChannelCount(), 8);
+    const auto first = juce::jlimit<juce::int64> (0, source->getSampleCount(), (juce::int64) std::llround (startSec * sampleRate));
+    const auto last = juce::jlimit<juce::int64> (0, source->getSampleCount(), (juce::int64) std::llround (endSec * sampleRate));
+
+    if (last - first < 2)
+    {
+        fail ("unsupported");
+        return;
+    }
+
+    targetPreview (arg, "local");
+
+    const auto generation = previewGeneration.fetch_add (1) + 1;
+    diag::log ("audition-latency stage=native-start ms=" + juce::String (juce::Time::getMillisecondCounter()) + " local=1");
+    const auto audio = previewAudio;
+    const auto cancellationEpoch = audio->getCancellationEpoch();
+    auditionPool.addJob ([this, token = std::weak_ptr<bool> (alive), samples = entry->second.samples, pcm = modification->getEditedPcm(),
+                          sampleRate, channels, first, last, generation, cancellationEpoch, audio, done = std::move (done)]
+    {
+        const auto frames = (int) (last - first);
+        juce::AudioBuffer<float> raw (channels, frames);
+        raw.clear();
+        std::vector<float*> pointers;
+
+        for (int ch = 0; ch < channels; ++ch)
+            pointers.push_back (raw.getWritePointer (ch));
+
+        std::unique_ptr<PreviewAudio::Clip> clip;
+
+        if (samples->read (pointers.data(), channels, first, frames))
+        {
+            if (pcm != nullptr)
+                if (const auto snapshot = pcm->getSnapshot(); snapshot != nullptr && snapshot->hasWindows()
+                                                              && std::abs (snapshot->getSampleRate() - sampleRate) < 1.0)
+                {
+                    const auto& windows = snapshot->getWindows();
+
+                    for (auto i = snapshot->findFirstWindowEndingAfter (first); i < windows.size() && windows[i].startFrame < last; ++i)
+                    {
+                        const auto& w = windows[i];
+                        const auto from = juce::jmax (first, w.startFrame);
+                        const auto to = juce::jmin (last, w.getEndFrame());
+
+                        if (to <= from || w.getNumChannels() < 1)
+                            continue;
+
+                        for (int ch = 0; ch < channels; ++ch)
+                        {
+                            const auto* src = w.getReadPointer (juce::jmin (ch, w.getNumChannels() - 1));
+                            std::copy (src + (from - w.startFrame), src + (to - w.startFrame), pointers[(size_t) ch] + (from - first));
+                        }
+                    }
+                }
+
+            clip = std::make_unique<PreviewAudio::Clip>();
+            clip->sampleRate = sampleRate;
+            auto& mono = clip->channels.emplace_back ((size_t) frames, 0.0f);
+
+            for (int ch = 0; ch < channels; ++ch)
+                for (int i = 0; i < frames; ++i)
+                    mono[(size_t) i] += raw.getSample (ch, i) / (float) channels;
+
+            PreviewAudio::fadeEdges (*clip);
+        }
+
+        deliverPreview (token, audio, generation, cancellationEpoch, std::move (clip), "not-cached", done);
+    });
+}
+
+void GlissDocumentController::targetPreview (const juce::var& arg, const char* mode)
+{
+    const auto araId = arg.getProperty ("ara_id", {}).toString();
+    const auto requester = (std::uint64_t) (juce::int64) arg.getProperty ("requester", 0);
+    std::vector<std::uint64_t> editorCovering, playbackCovering;
+    int renderers = 0;
+
+    if (araId.isNotEmpty())
+        for (auto* renderer : getDocumentController()->getEditorRenderers<GlissEditorRenderer>())
+        {
+            ++renderers;
+
+            if (renderer->coversModification (araId))
+                editorCovering.push_back (renderer->getRendererId());
+
+            if (renderer->playbackCoversModification (araId))
+                playbackCovering.push_back (renderer->getRendererId());
+        }
+
+    const auto previousOwner = previewAudio->getStats().owner;
+    const auto choice = previewAudio->beginPreview (editorCovering, playbackCovering, requester, juce::Time::getMillisecondCounter());
+    previewStarted = true;
+
+    const auto range = arg.hasProperty ("start_sec")
+        ? juce::String ((double) arg.getProperty ("start_sec", 0.0), 3) + "-" + juce::String ((double) arg.getProperty ("end_sec", 0.0), 3)
+        : juce::String ("-");
+
+    // どのトラックを選んでいて（ui-track）どのトラックを描いていたか（shown）は画面が添える。covered は、その修飾のリージョンが割り当たった
+    // EditorRenderer の数 / 全部の数、playback は、同じインスタンスの PlaybackRenderer がその修飾のリージョンを持つ EditorRenderer の数。
+    // by は絞れた手掛かり（editor → playback → requester → none の順）、candidates は足してよい renderer の数
+    diag::logAlways ("preview: start " + juce::String (mode) + " ara=" + araId + " note=" + arg.getProperty ("note", {}).toString()
+                     + " range=" + range + " cents=" + juce::String ((double) arg.getProperty ("cents", 0.0), 1)
+                     + " ui-track=" + arg.getProperty ("ui_track", {}).toString() + " shown=" + arg.getProperty ("shown_track", {}).toString()
+                     + " covered=" + juce::String ((int) editorCovering.size()) + "/" + juce::String (renderers)
+                     + " playback=" + juce::String ((int) playbackCovering.size())
+                     + " by=" + PreviewAudio::toString (choice.by) + " candidates=" + juce::String ((int) choice.ids.size())
+                     + " narrowed=" + juce::String (previewAudio->getStats().narrowed ? 1 : 0)
+                     + " requester=" + juce::String ((juce::int64) requester) + " owner=" + juce::String ((juce::int64) previousOwner));
+}
+
+void GlissDocumentController::stopPreviewAudio()
+{
+    previewGeneration.fetch_add (1);
+
+    if (previewStarted)
+    {
+        previewStarted = false;
+        const auto stats = previewAudio->getStats();
+        diag::logAlways ("preview: stop played-by=" + juce::String ((juce::int64) stats.playedBy) + " narrowed=" + juce::String (stats.narrowed ? 1 : 0)
+                         + " handovers=" + juce::String (stats.handovers));
+    }
+
+    previewAudio->stop();
 }
 
 void GlissDocumentController::setCompare (bool on)

@@ -6,10 +6,14 @@
 #include "ara/DocumentBridge.h"
 #include "ara/DocumentSync.h"
 #include "ara/PlayheadState.h"
+#include "ara/PreviewAudio.h"
+#include "ara/SelectionPolicy.h"
 #include "cache/EditedPcm.h"
 
 #include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 
 namespace gliss
 {
@@ -69,14 +73,16 @@ public:
     juce::var bootstrap() override;
     void saveState (const juce::var& patch) override;
     juce::var transport (const juce::String& op, const juce::var& arg) override;
-    juce::var preview (const juce::String& op, const juce::var& arg) override;
+    void preview (const juce::String& op, const juce::var& arg, Completion done) override;
     void setCompare (bool on) override;
     juce::var hostState() override;
     void restartEngine (Completion done) override;
     bool isReadableByEditor (const juce::File& file) override;
     void addListener (Listener*) override;
     void removeListener (Listener*) override;
-    void editorSelectionChanged (const juce::ARAViewSelection& selection) override;
+    void editorSelectionChanged (const void* view, const juce::ARAViewSelection& selection) override;
+    void editorVisibilityChanged (const void* view, bool showing) override;
+    bool hasEditorSelection() const override { return hasSelection; }
 
 protected:
     void willBeginEditing (juce::ARADocument*) override;
@@ -84,6 +90,7 @@ protected:
     void willDestroyDocument (juce::ARADocument*) override;
     void didEnableAudioSourceSamplesAccess (juce::ARAAudioSource*, bool enable) override;
     void doUpdateAudioSourceContent (juce::ARAAudioSource*, juce::ARAContentUpdateScopes) override;
+    void didUpdateAudioSourceProperties (juce::ARAAudioSource*) override;
     void willDestroyAudioSource (juce::ARAAudioSource*) override;
 
     juce::ARAAudioModification* doCreateAudioModification (juce::ARAAudioSource* audioSource,
@@ -115,6 +122,7 @@ protected:
 
 private:
     class AraSourceSamples;
+    class TestBridge;
 
     /** AudioSource ごとの読み出し（メッセージスレッドだけが触る）。 */
     struct SourceEntry
@@ -142,42 +150,79 @@ private:
     void pushModel();
     void ensureReader (juce::ARAAudioSource*, SourceEntry&);
     void dropSourceEntry (juce::ARAAudioSource*);
-    void notifyContentChanged (const juce::StringArray& araIds);
-    void notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds);
+    /** 再生のレンダラーの原音のリーダーを作り直す予約（メッセージスレッド。まとめて次のメッセージで行う）。
+        ARAAudioSourceReader は同じ知らせで無効になるので、知らせの中では作らず後に回す。 */
+    void scheduleReaderRefresh (juce::ARAAudioSource*, const char* reason);
+    void runReaderRefresh();
+    /** notifyHost が false なら、ARA のリスナーにだけ知らせる（ホストには知らせない）。 */
+    void notifyContentChanged (const juce::StringArray& araIds, bool notifyHost = true);
+    void notifyNotesChanged (const juce::StringArray& araIds, const juce::StringArray& sourceIds, bool firstContent);
+    /** 保存するもの（アーカイブ）だけが変わった: 修飾には音・ノートの変わらない知らせを、documentData なら文書の知らせも送る。 */
+    void notifyStateChanged (const juce::StringArray& araIds, bool documentData);
+    /** ホストに渡すノート（読めなければ nullptr。ホストに「まだ無い」と答えたことを覚える）。 */
     std::shared_ptr<const ModificationNotes> notesOf (const ARA::PlugIn::AudioModification*) const;
     std::shared_ptr<const ModificationNotes> sourceNotesOf (const ARA::PlugIn::AudioSource*) const;
+    std::shared_ptr<const ModificationNotes> readyNotes (const ARA::PlugIn::AudioModification*) const;
+    bool takeHostSawNoNotes (const juce::String& key);
     void postEvent (const juce::String& name, const juce::var& data);
     void sendEvent (const juce::String& name, const juce::var& data);
     void onSyncEvent (const juce::String& name, const juce::var& data);
     juce::var describeSelection() const;
     juce::var describePlayhead() const;
+    juce::var describePlayhead (const PlayheadSnapshot&) const;
     juce::var loadedState();
     const TrackView* findTrackByTrackId (const juce::String& trackId) const;
     std::optional<double> toSongSeconds (const juce::var& arg, const juce::String& secKey) const;
+    /** 試聴するノートの修飾（ara_id）を持つ EditorRenderer だけが試聴を足すようにする（空なら絞らない）。 */
+    /** 試聴を始めるとき: 足す EditorRenderer を絞って（修飾を持つ renderer → 求めた側 → 絞らない）、所有者を外し、preview: start の行を書く。 */
+    void targetPreview (const juce::var& arg, const char* mode);
+    /** 試聴を止める（世代を進めて音を止め、始めていたら preview: stop の行を書く）。 */
+    void stopPreviewAudio();
+    /** 準備した試聴のクリップを、取り消されていなければ EditorRenderer へ公開して done を呼ぶ（メッセージスレッドへ戻って行う）。 */
+    void deliverPreview (std::weak_ptr<bool> token, std::shared_ptr<PreviewAudio> audio, std::uint64_t generation,
+                         std::uint64_t cancellationEpoch, std::unique_ptr<PreviewAudio::Clip> clip, const juce::String& failure,
+                         Completion done);
+    /** preview('start', { local: true, ara_id, start_sec, end_sec, allow_stale })。エンジンを呼ばない試聴（上の previewLocal の説明）。 */
+    void previewLocal (const juce::var& arg, Completion done);
+    static constexpr double maxPreviewSeconds = 60.0;   // 試聴 1 回の長さの上限（これを超えるとエンジンの WAV は読まない）
 
     juce::ReadWriteLock processBlockLock;
     bool editing = false;
+    bool hostLogged = false;
 
     juce::String workKey;
     std::unique_ptr<DocumentSync> sync;
     PlayheadState playheadState;
+    std::shared_ptr<PreviewAudio> previewAudio = std::make_shared<PreviewAudio>();
+    std::atomic<std::uint64_t> previewGeneration { 0 };
+    bool previewStarted = false;      // preview: start を書いて、まだ preview: stop を書いていない（メッセージスレッドだけ）
     std::atomic<bool> compare { false };
+
+    // ホストにノートを「まだ無い」と答えた修飾（m:<ID>）・ソース（s:<ID>）。ホストの読み出しのスレッドとメッセージスレッドが触る
+    mutable std::mutex hostNotesMutex;
+    mutable std::set<juce::String> hostSawNoNotes;
 
     std::map<juce::ARAAudioSource*, SourceEntry> sourceEntries;
     std::vector<std::unique_ptr<juce::ARAAudioSourceReader>> retiredReaders;
     std::vector<TrackView> tracks;
 
     juce::ListenerList<Listener> listeners;
+    SelectionPolicy selectionPolicy;   // DAW の選択を採るかの判断（ARA の型を使わない）
     juce::String selectionAraId;
     RegionTimes selectionRegion;
     bool hasSelection = false;
     juce::String lastPlayheadJson;
+    bool lastHostPlaying = false;
 
     juce::var pluginState;
     bool pluginStateLoaded = false;
 
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
+    std::map<juce::ARAAudioSource*, const char*> pendingReaderRefresh;   // ソース → 理由（ログ用の定数）
+    bool readerRefreshScheduled = false;
+    std::unique_ptr<TestBridge> testBridge;   // GLISS_TEST_BRIDGE_DIR（試験用の画面の代わり。GLISS_TEST_HOOKS のビルドだけ）
     juce::ThreadPool bridgePool { 2 };   // engineCall・restartEngine・saveState の書き込み（メッセージスレッドで待たない）
+    juce::ThreadPool auditionPool { 2 }; // 試聴の render_audition の呼び出しと WAV の読み込み（bridgePool が埋まっていても待たない）
 };
 
 } // namespace gliss

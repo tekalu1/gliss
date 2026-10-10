@@ -269,6 +269,12 @@ def validate_params(kind, params):
     return params
 
 
+# 描画の版（保存した編集から音を作る仕組みの版。`Project.render_version`・アーカイブの `render_version`）。
+# 1: 0.1.0-beta.6 まで。2: ピッチ曲線を重ねたときのつなぎ目で、前後の Segment の点を切る（`pitch._clip_curve`。
+# 隣のノートのずらし量が漏れない）。曲は作ったときの版のまま鳴らし、上げるのは利用者が明示したとき（`set_render_version`）だけ
+RENDER_VERSION = 2
+
+
 @dataclass
 class Changeset:
     """取り消しの単位。ops は編集リストへの操作の列（追加・削除）。"""

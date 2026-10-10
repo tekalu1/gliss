@@ -7,8 +7,8 @@
 //        ショートカットだけがある。キーも割り当てない
 //   (A3) セッションが来る（session-changed）→ 編集対象を解析して描く。M・S は出さない
 //   (A4) 再生ボタン・Space は DAW の再生の制御（transport('toggle')）。Web Audio では鳴らさない
-//   (A5) playhead イベント: 再生位置（そのトラックの編集の秒 → タイムライン）・再生中・ループが画面に出る
-//   (A6) クリップの位置は動かせない（下半分のドラッグ）。右クリックのメニューは「ガイド」だけ・「ここを下に表示」だけ
+//   (A5) playhead イベント: 上段と時計はソング秒、下段は代表位置の編集秒で描き、再生中とループを表示する
+//   (A6) クリップの位置は動かせない（下半分のドラッグ）。右クリックのメニューは「ガイド」の 2 つだけ・「ここを下に表示」だけ
 //   (A7) ルーラーのクリック → seek、ドラッグ → loop（上下とも）。クリックはループを解除しない。メニューの「ループを解除」→ loop(null)
 //   (A8) selection イベント: DAW で選ばれたリージョンのトラックに切り替え、表示範囲をリージョンに寄せる。同じトラックなら表示範囲だけ
 //   (A9) リージョンの枠・キャッシュの状態の印と札・エンジンが落ちた箱とつなぎ直し
@@ -150,17 +150,76 @@ test('(A3) セッションが来ると、編集対象を解析して描く（M�
   expect(await current()).toBe(ts[0].id);
   const n = await win.evaluate(() => window.__app.notes().length);
   expect(n).toBeGreaterThanOrEqual(2);
-  // ミュート／ソロ・音量・パンは隠す（DAW が鳴らす）・ガイドのアイコンは残す
+  // ミュート／ソロ・音量・パンは隠す（DAW が鳴らす）・ガイドは空いた 2 段目に名前つきのボタン（track-guide.spec.js）
   const vis = await win.evaluate(() => {
     const shown = (el) => !!el && getComputedStyle(el).display !== 'none';
     const h = document.querySelector('#heads .th');
-    return { m: shown(h.querySelector('[data-act=m]')), s: shown(h.querySelector('[data-act=s]')), g: shown(h.querySelector('[data-act=guide]')),
+    return { m: shown(h.querySelector('[data-act=m]')), s: shown(h.querySelector('[data-act=s]')), g: shown(h.querySelector('[data-act=guide].wide')),
       mix: h.querySelectorAll('[data-mix]').length };
   });
   expect(vis).toEqual({ m: false, s: false, g: true, mix: 0 });
   // 初回の「解析中」の覆い・ポップアップは出さない（DAW の操作を止めない）
   const pop = await win.evaluate(() => ({ center: getComputedStyle(document.querySelector('#busyCenter')).display, dim: getComputedStyle(document.querySelector('.busy-scrim'), '::before').display }));
   expect(pop).toEqual({ center: 'none', dim: 'none' });
+});
+
+test('(A3f) 方式変更は現在の修飾だけで、Undo/Redoと起動時の既定変更に追従する', async () => {
+  const [a, b] = (await tracks()).map((t) => t.id);
+  const info = () => win.evaluate(() => window.api.call('engine_info', {}));
+  const before = await info();
+  const stateFile = path.join(ROOT, 'userdata', 'state.json');
+  const savedEstimator = () => fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')).f0Estimator ?? null : null;
+  const saved = savedEstimator();
+  await win.evaluate((id) => window.__app.selectTrack(id), b);
+  await idle();
+  const otherBefore = (await info()).f0_estimator_effective;
+  await win.evaluate((id) => window.__app.selectTrack(id), a);
+  await idle();
+  await app.evaluate(({ ipcMain }) => {
+    globalThis.__f0OriginalCall = ipcMain._invokeHandlers.get('engine.call');
+    globalThis.__f0Calls = [];
+    ipcMain.removeHandler('engine.call');
+    ipcMain.handle('engine.call', (event, name, args) => {
+      if (name === 'set_f0_estimator' || name === 'analyze_take') globalThis.__f0Calls.push({ name, args });
+      return globalThis.__f0OriginalCall(event, name, args);
+    });
+  });
+  try {
+    await win.evaluate(() => window.__app.runCommand('f0-praat'));
+    await idle();
+  } finally {
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler('engine.call');
+      ipcMain.handle('engine.call', globalThis.__f0OriginalCall);
+      globalThis.__f0OriginalCall = null;
+    });
+  }
+  const calls = await app.evaluate(() => globalThis.__f0Calls);
+  expect(calls.find((c) => c.name === 'set_f0_estimator')?.args).toMatchObject({ estimator: 'praat', scope: 'current' });
+  expect(calls.find((c) => c.name === 'analyze_take')?.args).toMatchObject({ background: false });
+  expect((await info()).f0_estimator_chosen).toBe(before.f0_estimator_chosen);
+  expect((await info()).f0_estimator_effective).toBe('praat');
+  expect((await win.evaluate(() => window.__app.f0())).effective).toBe('praat');
+  expect(savedEstimator()).toBe(saved);
+
+  await win.locator('#mock').focus();
+  await win.keyboard.press('Control+z'); await idle();
+  await expect.poll(async () => (await win.evaluate(() => window.__app.f0())).effective).toBe(before.f0_estimator_effective);
+  await win.keyboard.press('Control+y'); await idle();
+  await expect.poll(async () => (await win.evaluate(() => window.__app.f0())).effective).toBe('praat');
+
+  // プラグイン起動時の default 設定は解析済みの両修飾を変えない。
+  // Electron の ARA 画面テストはエンジンだけ app モードなので scope を明示する。
+  await win.evaluate(() => window.api.call('set_f0_estimator', { estimator: 'praat', scope: 'default' }));
+  expect((await info()).f0_estimator_effective).toBe('praat');
+  await win.evaluate((id) => window.__app.selectTrack(id), b); await idle();
+  expect((await info()).f0_estimator_effective).toBe(otherBefore);
+  expect((await win.evaluate(() => window.__app.f0())).effective).toBe(otherBefore);
+  await win.evaluate((id) => window.__app.selectTrack(id), a); await idle();
+  await win.evaluate(() => window.api.call('set_f0_estimator', { estimator: 'gliss', scope: 'default' }));
+  await win.locator('#mock').focus();
+  await win.keyboard.press('Control+z'); await idle();
+  expect((await info()).f0_estimator_effective).toBe(before.f0_estimator_effective);
 });
 
 test('(A3b) 解析中（止める処理）は札に出る。終わると「準備完了」が 1.5 秒出て消える', async () => {
@@ -191,17 +250,16 @@ test('(A4) 再生ボタン・Space は DAW の再生の制御へ（Web Audio で
   expect(await win.evaluate(() => window.__app.playState())).toBeNull();
 });
 
-test('(A5) playhead: 再生位置・再生中・ループが画面に出る', async () => {
-  const id = await current();
-  const off = await win.evaluate(() => window.__app.S.off);
-  await emit('playhead', { song_sec: 9.9, playing: true, loop: null, mapped: { [id]: 1.25 } });
-  await expect.poll(() => win.evaluate(() => window.__app.S.head)).toBeCloseTo(off + 1.25, 6);   // 鳴っているリージョンの中の編集の秒
+test('(A5) playhead: ソング秒・再生中・ループが画面に出る', async () => {
+  await emit('playhead', { song_sec: 1.25, playing: false, loop: null });
+  expect(await win.evaluate(() => window.__app.S.head)).toBeCloseTo(1.25, 6);
+  expect(await win.evaluate(() => document.querySelector('#clock').textContent)).toBe('0:01.250');
+  await emit('playhead', { song_sec: 1.25, playing: true, loop: null });
   expect(await win.evaluate(() => window.__app.S.playing)).toBe(true);
   expect(await win.evaluate(() => ({ stop: !document.querySelector('#icStop').hasAttribute('hidden'), play: !document.querySelector('#icPlay').hasAttribute('hidden') }))).toEqual({ stop: true, play: false });
-  expect(await win.evaluate(() => document.querySelector('#clock').textContent)).toBe('0:01.250');
-  // 鳴っていない（そのトラックに対応するリージョンが無い）ときはソングの秒のまま
-  await emit('playhead', { song_sec: 2.5, playing: true, loop: null, mapped: { [id]: null } });
-  await expect.poll(() => win.evaluate(() => window.__app.S.head)).toBeCloseTo(2.5, 6);
+  // リージョンがない位置でもソング秒を保持する
+  await emit('playhead', { song_sec: 2.5, playing: false, loop: null });
+  expect(await win.evaluate(() => window.__app.S.head)).toBeCloseTo(2.5, 6);
   // ループ（タイムラインの秒のまま）
   await emit('playhead', { song_sec: 1, playing: true, loop: [0.5, 2], mapped: {} });
   await expect.poll(() => win.evaluate(() => window.__app.S.loop)).toEqual([0.5, 2]);
@@ -209,6 +267,210 @@ test('(A5) playhead: 再生位置・再生中・ループが画面に出る', as
   await expect.poll(() => win.evaluate(() => window.__app.S.loop)).toBeNull();
   expect(await win.evaluate(() => window.__app.S.playing)).toBe(false);
   expect(await win.evaluate(() => ({ stop: !document.querySelector('#icStop').hasAttribute('hidden'), play: !document.querySelector('#icPlay').hasAttribute('hidden') }))).toEqual({ stop: false, play: true });
+});
+
+test('(A5b) 複製・伸縮リージョンでも下段ヘッドと追従は代表位置を使い、時計はソング秒を保つ', async () => {
+  const id = await current();
+  const original = await win.evaluate((trackId) => {
+    const s = window.__app.S;
+    return { off: s.off, trackOff: s.tracks.find((t) => t.id === trackId).offset_sec,
+      view: { ...s.view }, follow: window.__app.grid().follow };
+  }, id);
+  try {
+    await win.evaluate((trackId) => {
+      window.__app.S.tracks.find((t) => t.id === trackId).offset_sec = 1.25;
+      window.__app.S.off = 1.25;
+      window.api.__araSetHost({ tracks: [{ track_id: trackId, regions: [
+        { id: 'representative', song_start: 2, song_end: 4, mod_start: 0.5, mod_end: 2.5 },
+        { id: 'duplicate', song_start: 8, song_end: 12, mod_start: 0.5, mod_end: 2.5 },
+      ] }] });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, id);
+    await expect.poll(() => win.evaluate(() => document.querySelectorAll('#lanes [data-region]').length)).toBeGreaterThanOrEqual(2);
+    // 8.8 秒は伸縮率 2 の複製内で、代表位置 1.25 + 0.5 + 0.8 / 2 = 2.15 秒。
+    await emit('playhead', { song_sec: 8.8, playing: false, loop: null });
+    const first = await win.evaluate(async () => {
+      const { X } = await import('../renderer/draw.js');
+      const s = window.__app.S;
+      return { song: s.head, clock: document.querySelector('#clock').textContent,
+        x: Number(/translate\(([-\d.]+)/.exec(document.querySelector('#roll #ph').getAttribute('transform'))[1]),
+        expected: X(2.15 - s.off) };
+    });
+    expect(first.song).toBeCloseTo(8.8, 6);
+    expect(first.clock).toBe('0:08.800');
+    expect(first.x).toBeCloseTo(first.expected, 1);
+    await win.evaluate(() => { window.__app.S.view.t0 = 0; window.__app.S.view.span = 0.5; window.__app.setGrid({ follow: true }); });
+    await emit('playhead', { song_sec: 8.9, playing: false, loop: null });
+    const moved = await win.evaluate(async () => {
+      const { X } = await import('../renderer/draw.js');
+      const s = window.__app.S;
+      return { t0: s.view.t0, song: s.head, clock: document.querySelector('#clock').textContent,
+        x: Number(/translate\(([-\d.]+)/.exec(document.querySelector('#roll #ph').getAttribute('transform'))[1]),
+        expected: X(1.25 + 0.5 + 0.9 / 2 - s.off) };
+    });
+    expect(moved.t0).toBeGreaterThan(0.8);
+    expect(moved.x).toBeCloseTo(moved.expected, 1);
+    expect(moved.song).toBeCloseTo(8.9, 6);
+    expect(moved.clock).toBe('0:08.900');
+  } finally {
+    await win.evaluate((data) => {
+      const s = window.__app.S;
+      s.tracks.find((t) => t.id === data.id).offset_sec = data.trackOff;
+      s.off = data.off;
+      s.view = data.view;
+      window.api.__araSetHost({ tracks: [{ track_id: data.id, regions: [] }] });
+      document.dispatchEvent(new Event('visibilitychange'));
+      window.__app.setGrid({ follow: data.follow });
+    }, { ...original, id });
+  }
+});
+
+test('(A5path) 表示中の project_dir は区切り文字と大小文字の差があっても現在選択より優先する', async () => {
+  const matched = await win.evaluate(async () => {
+    const { araEditorTrack } = await import('../renderer/ara.js');
+    const s = window.__app.S;
+    const shown = s.tracks.find((t) => t.id === s.session.current);
+    const other = s.tracks.find((t) => t.id !== shown.id);
+    const saved = { projectDir: s.projectDir, trackDir: shown.project_dir, current: s.session.current };
+    try {
+      s.projectDir = 'C:\\Gliss\\CLIP';
+      shown.project_dir = 'c:/gliss/clip';
+      s.session.current = other.id;
+      return araEditorTrack()?.id === shown.id;
+    } finally {
+      s.projectDir = saved.projectDir;
+      shown.project_dir = saved.trackDir;
+      s.session.current = saved.current;
+    }
+  });
+  expect(matched).toBe(true);
+});
+
+test('(A5c) 移動後の実PCM時刻へ下段ヘッドとグリッドを合わせ、複製イベントへのシークを保つ', async () => {
+  const id = await current();
+  const before = await win.evaluate(() => ({ note: window.__app.notes()[0], view: { ...window.__app.S.view },
+    tempo: window.__app.S.session.tempo, fmt: window.__app.grid().fmt, head: window.__app.S.head }));
+  const moved = await win.evaluate(async (noteId) => {
+    const r = await window.api.call('move_note', { ms: 300, note_id: noteId, author: 'human' });
+    if (!r.ok) throw new Error(r.error);
+    await window.__app.refresh({ keepView: true });
+    return window.__app.notes().find((n) => n.id === noteId);
+  }, before.note.id);
+  expect(moved.editedStart - before.note.editedStart).toBeCloseTo(0.3, 2);
+  const wav = await win.evaluate(() => window.api.call('render_region',
+    { start_sec: 0, end_sec: 1.4, backend: 'praat', channels: 'mono' }));
+  expect(wav.ok).toBe(true);
+  const bytes = fs.readFileSync(wav.path);
+  let dataAt = 12;
+  while (dataAt + 8 < bytes.length && bytes.toString('ascii', dataAt, dataAt + 4) !== 'data') {
+    dataAt += 8 + bytes.readUInt32LE(dataAt + 4) + (bytes.readUInt32LE(dataAt + 4) & 1);
+  }
+  expect(bytes.toString('ascii', dataAt, dataAt + 4)).toBe('data');
+  dataAt += 8;
+  const rms = (a, b) => {
+    let sum = 0; let count = 0;
+    for (let i = Math.round(a * wav.sr); i < Math.round(b * wav.sr); i++) {
+      const v = bytes.readFloatLE(dataAt + i * 4); sum += v * v; count++;
+    }
+    return Math.sqrt(sum / count);
+  };
+  expect(rms(0.51, 0.56)).toBeLessThan(0.005);
+  expect(rms(0.86, 0.91)).toBeGreaterThan(0.02);
+  try {
+    await win.evaluate((trackId) => {
+      const s = window.__app.S;
+      s.session.tempo = { bpm: 120, num: 4, den: 4, start_sec: 8 };
+      s.view = { t0: 0, span: 2.5 };
+      window.__app.setGrid({ fmt: 'bars', follow: false });
+      window.api.__araSetHost({ tracks: [{ track_id: trackId, regions: [
+        { id: 'first', song_start: 2, song_end: 4, mod_start: 0, mod_end: 2 },
+        { id: 'copy', song_start: 8, song_end: 13, mod_start: 0, mod_end: 2.5 },
+      ] }] });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, id);
+    await expect.poll(() => win.evaluate(() => document.querySelectorAll('#lanes [data-region]').length)).toBeGreaterThanOrEqual(2);
+    const song = 8 + moved.editedStart * 2;
+    await emit('playhead', { song_sec: song, playing: false, loop: null });
+    const shown = await win.evaluate(async ([noteId, editedStart]) => {
+      const { X } = await import('../renderer/draw.js');
+      const s = window.__app.S;
+      const ph = document.querySelector('#roll #ph');
+      const note = document.querySelector(`#roll rect[data-note="${noteId}"]:not([data-edge])`);
+      return { x: +/translate\(([-\d.]+)/.exec(ph.getAttribute('transform'))[1],
+        noteX: +note.getAttribute('x'), expected: X(editedStart),
+        doubleMapped: X((await import('../renderer/state.js')).toEdited(editedStart)),
+        grids: [...document.querySelectorAll('#roll [data-grid]')].map((e) => +e.getAttribute('x1')),
+        gridAtSong9: Math.round(X(.5)) + .5, head: s.head, clock: document.querySelector('#clock').textContent };
+    }, [moved.id, moved.editedStart]);
+    expect(shown.x).toBeCloseTo(shown.expected, 1);
+    expect(shown.noteX).toBeCloseTo(shown.expected, 1);
+    expect(Math.abs(shown.x - shown.doubleMapped)).toBeGreaterThan(15);
+    expect(shown.grids.some((x) => Math.abs(x - shown.gridAtSong9) < 1)).toBe(true);
+    expect(shown.head).toBeCloseTo(song, 6);
+    expect(shown.clock).toBe(`0:0${song.toFixed(3)}`);
+    await clearCalls();
+    const point = await win.evaluate(async () => {
+      const { X } = await import('../renderer/draw.js');
+      return { x: X(0.8), y: 10 };
+    });
+    const roll = await win.locator('#roll').boundingBox();
+    const headBeforeSeek = await win.evaluate(() => window.__app.S.head);
+    await win.mouse.click(roll.x + point.x, roll.y + point.y);
+    await expect.poll(transports).toHaveLength(1);
+    const [seekOp, seekArg] = (await transports())[0];
+    expect(seekOp).toBe('seek');
+    expect(seekArg.song_sec).toBeCloseTo(9.6, 2);
+    expect(await win.evaluate(() => window.__app.S.head)).toBe(headBeforeSeek);
+    await emit('playhead', { song_sec: 9.6, playing: false, loop: null });
+    expect(await win.evaluate(() => window.__app.S.head)).toBeCloseTo(9.6, 6);
+    await clearCalls();
+    const loopX = await win.evaluate(async () => {
+      const { X } = await import('../renderer/draw.js');
+      return { a: X(1.2), b: X(1.4) };
+    });
+    await win.mouse.move(roll.x + loopX.a, roll.y + point.y);
+    await win.mouse.down();
+    await win.mouse.move(roll.x + loopX.b, roll.y + point.y, { steps: 4 });
+    await win.mouse.up();
+    await expect.poll(transports).toHaveLength(1);
+    const [loopOp, loopArg] = (await transports())[0];
+    expect(loopOp).toBe('loop');
+    expect(loopArg.a).toBeCloseTo(10.4, 2);
+    expect(loopArg.b).toBeCloseTo(10.8, 2);
+    expect(await win.evaluate(() => window.__app.S.loop)).toBeNull();
+    await emit('playhead', { song_sec: 9.6, playing: false, loop: [loopArg.a, loopArg.b] });
+    expect(await win.evaluate(() => window.__app.S.loop)).toEqual([loopArg.a, loopArg.b]);
+    const noteCount = await win.evaluate(() => window.__app.notes().length);
+    const cutAt = moved.editedStart + 0.2;
+    await win.evaluate(([noteId, t]) => window.__app.runCommand('split', { noteId, t }), [moved.id, cutAt]);
+    await idle();
+    const cut = await win.evaluate(() => window.__app.notes());
+    expect(cut).toHaveLength(noteCount + 1);
+    expect(cut.some((n) => Math.abs(n.start - (before.note.start + 0.2)) < 0.025)).toBe(true);
+    await win.evaluate(() => window.__app.undo());
+    await idle();
+    const unplaced = await win.evaluate(() => window.__app.notes().find((n) => n.start > 1.5));
+    await win.evaluate((noteId) => window.__app.runCommand('split', { noteId, t: 2.65 }), unplaced.id);
+    await idle();
+    expect(await win.evaluate(() => window.__app.notes().length)).toBe(noteCount);
+    await emit('playhead', { song_sec: 6, playing: false, loop: null });
+    expect(await win.evaluate(() => document.querySelector('#roll #ph').style.display)).toBe('none');
+    expect(await win.evaluate(() => document.querySelector('#clock').textContent)).toBe('0:06.000');
+    await win.evaluate(() => window.__app.runCommand('split'));
+    await idle();
+    expect(await win.evaluate(() => window.__app.notes().length)).toBe(noteCount);
+  } finally {
+    await win.evaluate(async (data) => {
+      const s = window.__app.S;
+      s.view = data.view; s.session.tempo = data.tempo;
+      window.__app.setGrid({ fmt: data.fmt, follow: true });
+      window.api.__araSetHost({ tracks: [{ track_id: data.id, regions: [] }] });
+      document.dispatchEvent(new Event('visibilitychange'));
+      const r = await window.api.call('undo', {});
+      if (!r.ok) throw new Error(r.error);
+      await window.__app.refresh({ keepView: true });
+    }, { ...before, id });
+  }
 });
 
 test('(A6) クリップの位置は動かせない・右クリックのメニューは DAW が決めないものだけ', async () => {
@@ -233,7 +495,7 @@ test('(A6) クリップの位置は動かせない・右クリックのメニュ
   await win.keyboard.press('Escape');
   await win.locator('#heads .th').first().click({ button: 'right' });
   const head = await win.evaluate(() => window.__app.menuItems().map((i) => i.label));
-  expect(head).toEqual(['このトラックをガイドにする']);
+  expect(head).toEqual(['ガイドを選ぶ…', 'このトラックを共通のガイドにする']);
   await win.keyboard.press('Escape');
   // はさみ・ミュートのツールは、トラックビューではクリップを分けない・消さない（クリップは DAW のリージョン）
   for (const tool of ['tool-cut', 'tool-mute']) {
@@ -250,6 +512,19 @@ test('(A6) クリップの位置は動かせない・右クリックのメニュ
 });
 
 test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリックはループを解除しない', async () => {
+  const id = await current();
+  await win.evaluate((trackId) => {
+    const t = window.__app.S.tracks.find((x) => x.id === trackId);
+    const off = t.offset_sec || 0;
+    window.api.__araSetHost({ tracks: [{ track_id: trackId, regions: [
+      { id: 'whole', song_start: off, song_end: off + 5, mod_start: 0, mod_end: 5 },
+    ] }] });
+    document.dispatchEvent(new Event('visibilitychange'));
+  }, id);
+  await expect.poll(() => win.evaluate(() => document.querySelectorAll('#lanes [data-region]').length)).toBeGreaterThan(0);
+  const inside = await win.evaluate((trackId) => (window.__app.S.tracks.find((t) => t.id === trackId).offset_sec || 0) + 1, id);
+  await emit('playhead', { song_sec: inside, playing: false, loop: null });
+  await expect.poll(() => win.evaluate(() => document.querySelector('#roll #ph')?.style.display)).not.toBe('none');
   await clearCalls();
   const r = await win.locator('#tvRuler').boundingBox();
   const range = await win.evaluate(() => window.__app.tracksState().range);
@@ -279,17 +554,19 @@ test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリ�
   await expect.poll(transports).toHaveLength(1);
   expect((await transports())[0][0]).toBe('seek');
   expect(await win.evaluate(() => window.__app.S.loop)).toEqual([larg.a, larg.b]);
-  // 下のルーラー: seek は編集の秒（track_id つき）、loop も
+  // 下のルーラーは出力秒を対象リージョンの song 秒へ写す。ホスト通知まで S.head/S.loop は不変。
   await clearCalls();
-  const id = await current();
   const sc = await win.locator('#roll rect[data-scale]').first().boundingBox();
   const off = await win.evaluate(() => window.__app.S.off);
+  const headBefore = await win.evaluate(() => window.__app.S.head);
   await win.mouse.click(sc.x + sc.width * 0.6, sc.y + sc.height / 2);
   await expect.poll(transports).toHaveLength(1);
   const [eop, earg] = (await transports())[0];
   expect(eop).toBe('seek');
-  expect(earg.track_id).toBe(id);
-  expect(await win.evaluate((o) => window.__app.S.head - o, off)).toBeCloseTo(earg.sec, 6);
+  expect(earg.song_sec - off).toBeGreaterThan(0);
+  expect(await win.evaluate(() => window.__app.S.head)).toBe(headBefore);
+  await emit('playhead', { song_sec: earg.song_sec, playing: false, loop: [larg.a, larg.b] });
+  expect(await win.evaluate(() => window.__app.S.head)).toBeCloseTo(earg.song_sec, 6);
   await clearCalls();
   await win.mouse.move(sc.x + sc.width * 0.3, sc.y + sc.height / 2);
   await win.mouse.down();
@@ -298,9 +575,10 @@ test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリ�
   await expect.poll(transports).toHaveLength(1);
   const [eop2, earg2] = (await transports())[0];
   expect(eop2).toBe('loop');
-  expect(earg2.track_id).toBe(id);
   expect(earg2.a).toBeLessThan(earg2.b);
-  expect(await win.evaluate((o) => window.__app.S.loop.map((v) => +(v - o).toFixed(6)), off)).toEqual([+earg2.a.toFixed(6), +earg2.b.toFixed(6)]);
+  expect(await win.evaluate(() => window.__app.S.loop)).toEqual([larg.a, larg.b]);
+  await emit('playhead', { song_sec: earg.song_sec, playing: false, loop: [earg2.a, earg2.b] });
+  expect(await win.evaluate(() => window.__app.S.loop)).toEqual([earg2.a, earg2.b]);
   // ルーラーの右クリック →「ループを解除」→ loop(null)
   await clearCalls();
   await win.locator('#tvRuler').click({ button: 'right', position: { x: 40, y: 8 } });

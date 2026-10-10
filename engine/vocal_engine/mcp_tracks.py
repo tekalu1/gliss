@@ -12,9 +12,13 @@
 変更を、セッションの 1 本の履歴（`session.py`）に足す。`undo` / `redo`（引数なし）はこの履歴を戻す
 （別のトラックの操作なら、そのトラックを編集対象にしてから戻す）。
 """
+import copy
 import hashlib
 import json
 import os
+import shutil
+import tempfile
+from contextlib import ExitStack, contextmanager
 
 import numpy as np
 import soundfile as sf
@@ -23,8 +27,9 @@ from . import log
 from . import mcp_server as _srv
 from . import prep
 from .project import Project, ProjectError
+from .project.store import replace_file
 from .project.session import (CUT_EPS, CUT_MIN_EDGE, MUTE_MIN, SessionError, covered, norm_gain_db, norm_mutes,
-                              norm_pan, pieces_of, subtract_range)
+                              norm_pan, pieces_of, set_guide_id, subtract_range)
 
 _ok = _srv._ok
 _tool = _srv._tool
@@ -61,24 +66,97 @@ def reschedule_prep():
         _schedule(s)
 
 
-def remember_estimator(p, est):
+EXPLICIT_KEY = "estimator_explicit"   # session.json のトラック: 方式を利用者が明示した（アーカイブ・方式探しで決まったものでない）
+
+
+def _session_track_of(p, target=None):
+    """プロジェクト p のトラック (セッション, トラック id)。target = (セッション, トラック) を渡せばそれ
+    （ジョブの終わりなど、編集対象が別のトラックへ戻った後でも、頼まれたときのトラックへ書く）。"""
+    if target is not None:
+        s, t = target
+        if (s is not None and t is not None and p is not None and t.get("project_dir")
+                and _norm(p.dir) == _norm(s.project_dir_of(t))):
+            s.reload_if_changed()
+            try:
+                s.track(t["id"])
+            except ProjectError:
+                return None, None
+            return s, t["id"]
+    return _session_of(p)
+
+
+def remember_estimator(p, est, target=None):
     """analyze_take で明示した F0 の方式を、そのトラックの方式として覚える（選んでいる方式と同じなら外す）。
     session.json のトラックに `estimator` として保存し、裏の準備の署名・解析もそれを使う（準備が既定の方式で
-    解析し直して差し替えない）。セッションのトラックでなければ（単独のプロジェクト）メモリの上だけ。"""
+    解析し直して差し替えない）。セッションのトラックでなければ（単独のプロジェクト）メモリの上だけ。
+    target: 頼まれたときの (セッション, トラック)（`prep_target`）。中継が編集対象を一時的に切り替えて呼んだ
+    ジョブは、終わるときには編集対象が戻っているので、編集対象からはトラックが引けない。"""
     from .analysis import f0 as f0mod
     pref = None if est == f0mod.resolve_estimator() else est
     p.estimator_pref = pref
-    s, tid = _session_of(p)
+    s, tid = _session_track_of(p, target)
     if s is None:
         return
     t = s.track(tid)
-    if s.estimator_of(t) != pref:
+    if s.estimator_of(t) != pref or not t.get(EXPLICIT_KEY):
         if pref is None:
             t.pop("estimator", None)
         else:
             t["estimator"] = pref
+        t[EXPLICIT_KEY] = True                   # 利用者が明示した: ara_render_dirty の方式探し（_fit_estimator）で戻さない
         s.save()
         reschedule_prep()
+
+
+def mark_explicit(p, target=None):
+    """トラックの今の方式を、利用者が明示した方式として印を付ける（`analyze_take(estimator=…)` が今の方式と同じとき）。"""
+    s, tid = _session_track_of(p, target)
+    if s is None:
+        return
+    t = s.track(tid)
+    if not t.get(EXPLICIT_KEY):
+        t[EXPLICIT_KEY] = True
+        s.save()
+
+
+def estimators_now(s, p, track_ids=None):
+    """方式を替える前後で比べる、トラックごとの (Project, 実効の F0 の方式)。{トラック id: (q, 方式)}。
+    セッションが無ければ開いている曲だけ（鍵 "project"）。まだ解析していない・プロジェクトの無いトラックは入れない。"""
+    out = {}
+    if s is None:
+        if p is not None:
+            out["project"] = (p, p.f0_estimator())
+        return out
+    for t in s.vocal_tracks():
+        if track_ids is not None and t["id"] not in track_ids:
+            continue
+        q, _ = _track_project(s, t)
+        if q is None or not (q.analysis or {}).get("take"):
+            continue
+        q.estimator_pref = t.get("estimator")
+        try:
+            out[t["id"]] = (q, q.f0_estimator())
+        except Exception:                            # noqa: BLE001  使えない方式（重みが無い）: 比べない
+            continue
+    return out
+
+
+def retarget_switched(s, p, before, track_ids=None):
+    """方式を替えた後: 実効の方式が替わったトラックの、ノートの ID を対象にした編集を、替える前の解析での区間の
+    範囲対象に付け替える（`Project.retarget_note_targets`。音は変わらない。次の解析で同じ番号の別のノートに当たらない）。
+    before = 替える前の `estimators_now`。{トラック id: 付け替えの結果}（付け替える編集の無いトラックは入れない）。"""
+    after = estimators_now(s, p, track_ids)
+    res = {}
+    for key, (_q, old) in before.items():
+        if key not in after:
+            continue
+        q, new = after[key]
+        if new == old:
+            continue
+        r = q.retarget_note_targets(basis=old)
+        if r["retargeted"] or r["history"] or r["unresolved"] or r["skipped"]:
+            res[key] = r
+    return res
 
 
 def forget_track_estimators():
@@ -90,12 +168,157 @@ def forget_track_estimators():
     if s is None:
         return False
     s.reload_if_changed()
-    had = [t for t in s.tracks if s.estimator_of(t)]
+    had = [t for t in s.tracks if s.estimator_of(t) or t.get(EXPLICIT_KEY)]
     for t in had:
         t.pop("estimator", None)
+        t.pop(EXPLICIT_KEY, None)
     if had:
         s.save()
     return bool(had)
+
+
+def estimator_snapshot(s, track_ids=None):
+    """方式変更前後の明示方式と、各トラックに必要な解析方式を保存する。"""
+    from .analysis import f0 as F
+
+    rows = {}
+    for t in s.vocal_tracks():
+        if track_ids is not None and t["id"] not in track_ids:
+            continue
+        q, _ = _track_project(s, t)
+        if q is None:
+            rows[t["id"]] = {"pref": t.get("estimator"), "explicit": bool(t.get(EXPLICIT_KEY)),
+                             "effective": None, "analyzed": False}
+            continue
+        q.estimator_pref = t.get("estimator")
+        effective = q.f0_estimator()
+        take = (q.analysis or {}).get("take") or {}
+        model_version = (q.f0_model_version or
+                         (take.get("estimator_version") if take.get("estimator") == "gliss" else None) or
+                         F.estimator_version("gliss")) if effective == "gliss" else None
+        rows[t["id"]] = {"pref": t.get("estimator"), "explicit": bool(t.get(EXPLICIT_KEY)), "effective": effective,
+                         "analyzed": bool(take), "model_version": model_version}
+    return {"chosen": F.chosen_estimator(), "tracks": rows}
+
+
+@contextmanager
+def _recover_projects(paths):
+    """解析・アーカイブ復元が失敗したら、履歴が指す前のディスク状態に戻す。"""
+    with tempfile.TemporaryDirectory(prefix="gliss-history-") as temp:
+        saved = []
+        for i, path in enumerate(dict.fromkeys(paths)):
+            if os.path.isdir(path):
+                backup = os.path.join(temp, str(i))
+                shutil.copytree(path, backup, symlinks=True)
+                saved.append((path, backup))
+        try:
+            yield
+        except BaseException:
+            for path, backup in saved:
+                shutil.copytree(backup, path, dirs_exist_ok=True, symlinks=True)
+            raise
+
+
+@contextmanager
+def _estimator_exclusive(s, track_ids=None):
+    """方式の履歴とプロジェクトを保存し終えるまで、対象の裏準備を止める。"""
+    paths = [s.project_dir_of(t) for t in s.vocal_tracks()
+             if track_ids is None or t["id"] in track_ids]
+    with ExitStack() as guard:
+        for path in dict.fromkeys(paths):
+            guard.enter_context(prep.exclusive(path))
+        yield
+
+
+def _restore_estimator_history(s, state):
+    """方式名を戻すだけで終わらせず、保存された方式で解析を復元する。"""
+    from .analysis import f0 as F
+
+    rows = state["tracks"]
+    for tid, row in rows.items():
+        est = row.get("effective")
+        if est == "rmvpe" and not F.rmvpe_available():
+            raise ProjectError("ピッチ検出の方式を復元できない: rmvpe の重みが無い")
+    F.set_preferred_estimator(state.get("chosen"))
+    for tid, row in rows.items():
+        try:
+            t = s.track(tid)
+        except ProjectError:
+            continue
+        q, _ = _track_project(s, t)
+        if q is not None and (q.analysis or {}).get("take") and row.get("effective"):
+            # 方式が替わる: 今の解析のうちにノート対象の編集を区間の範囲対象へ付け替える（音は変わらない）
+            q.estimator_pref = t.get("estimator")
+            try:
+                if q.f0_estimator() != row["effective"]:
+                    q.retarget_note_targets()
+            except Exception as e:                   # noqa: BLE001  使えない方式: 付け替えずに戻す
+                log.get().warning("方式の履歴を戻す前の付け替えを飛ばした: %s", e)
+        pref = row.get("pref")
+        if pref is None:
+            t.pop("estimator", None)
+        else:
+            t["estimator"] = pref
+        if row.get("explicit"):
+            t[EXPLICIT_KEY] = True
+        else:
+            t.pop(EXPLICIT_KEY, None)
+        q, is_cur = _track_project(s, t)
+        if q is None:
+            continue
+        q.estimator_pref = pref
+        est = row.get("effective")
+        old_version = q.f0_model_version
+        if est == "gliss":
+            # 旧履歴には版が無い。その履歴が作られたときの同梱モデルは v2。
+            q.f0_model_version = row.get("model_version", F.GLISS_F0_V2_VERSION)
+        else:
+            q.f0_model_version = None
+        if est and (row.get("analyzed") or (q.analysis or {}).get("take")) and not q.analysis_cached(est):
+            q.analyze(estimator=est)
+        elif q.f0_model_version != old_version:
+            q.save()
+        if is_cur:
+            _srv._invalidate_renderer()
+
+
+def _commit_estimator_history(s, e, state, undone):
+    """解析・方式・履歴印を同時に確定し、保存失敗時はすべて戻す。"""
+    from .analysis import f0 as F
+
+    rows = state["tracks"]
+    paths = [s.project_dir_of(t) for t in s.tracks if t["id"] in rows]
+    with _estimator_exclusive(s, set(rows)):
+        old_chosen = F.chosen_estimator()
+        old_tracks = copy.deepcopy(s.tracks)
+        old_history = copy.deepcopy(s.history)
+        old_marks = dict(s.history_marks)
+        with open(s.path, "rb") as f:
+            old_session = f.read()
+        cur = _srv._state.get("project")
+        try:
+            with _recover_projects(paths):
+                _restore_estimator_history(s, state)
+                e["undone"] = undone
+                s.save()
+                _schedule(s)
+        except BaseException:
+            F.set_preferred_estimator(old_chosen)
+            s.tracks, s.history, s.history_marks = old_tracks, old_history, old_marks
+            with open(s.path, "rb") as f:
+                changed = f.read() != old_session
+            if changed:
+                with tempfile.NamedTemporaryFile(dir=s.dir, prefix="session-rollback-",
+                                                 suffix=".tmp", delete=False) as f:
+                    f.write(old_session)
+                    tmp = f.name
+                replace_file(tmp, s.path)
+            s._sig = s._stat()
+            if cur is not None:
+                cur.load()
+                cur._forget_analysis()
+            _srv._invalidate_renderer()
+            raise
 
 
 def prep_target(p):
@@ -189,7 +412,7 @@ def summary(s=None, extra=None):
         # 画面はこれをステータス行と「ガイドに合わせる」の使えない理由に出す（issue #32）
         try:
             t = s.track(tid)
-            out["guide_note"] = (s.guide_clip_for(t)[1] if s.guide
+            out["guide_note"] = (s.guide_clip_for(t)[1] if t.get("guide_id") or s.guide
                                  else "ガイドが指定されていない" if t["kind"] == "vocal" else None)
         except ProjectError:
             out["guide_note"] = None
@@ -292,6 +515,9 @@ def list_tracks() -> dict:
     kind: "vocal"（ボーカルのテイク。編集できる。1 本をガイドに指定できる）/ "inst"（伴奏。聴くだけ）。
     offset_sec: **タイムライン上の位置**（音源全体をずらした量。既定 0 = 曲頭 0:00 起点）。
     編集の秒（list_notes などの秒）は、そのトラックの頭が 0（タイムラインの秒 = offset_sec + 編集の秒）。
+    guide / guide_id / effective_guide_id / is_guide: guide = 共通のガイド（set_guide_track）、guide_id = そのトラックに明示した
+      ガイド（set_track_guide。null なら共通のガイド）、effective_guide_id = 実際に使うガイド、is_guide = どれかのトラックの
+      実効のガイドになっている（guide_for = それを使うトラックの id）。
     guide_stale: 編集対象のプロジェクトのガイドが古い（外部でガイド・位置を変えた。select_track で開き直す）。
     cuts: クリップを分けた切れ目（トラックの頭が 0 の秒。split_track / join_track）。
     mutes: クリップで消している区間 [[始め, 終わり]…]（同じ秒。mute_track_range。再生・書き出しで鳴らさない）。
@@ -339,7 +565,7 @@ def add_track(path: str, kind: str = None, name: str = None, offset_sec: float =
     elif kind is not None and kind != t["kind"]:
         if kind == "inst" and t["id"] == current_track_id():
             raise SessionError("編集中のトラックは伴奏にできない")
-        t["kind"] = kind
+        s.set_kind(t, kind)
     if guide:
         if t["kind"] != "vocal":
             raise SessionError("伴奏のトラックはガイドにできない（kind を vocal にする）")
@@ -395,7 +621,8 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
               solo: bool = None, offset_sec: float = None, index: int = None,
               gain_db: float = None, pan: float = None, author: str = "ai") -> dict:
     """トラックの名前・種類・ミュート／ソロ・**音量・パン**・**位置**・**並び順**を変える（渡したものだけ）。
-    名前・種類・位置・並び順は取り消せる（undo）。ミュート／ソロ・音量・パンは取り消しの対象外（聴き比べの操作。DAW と同じ）。
+    単体版では名前・種類・位置・並び順・ミュート／ソロ・音量・パンを取り消せる（undo）。
+    ARA のミキサーは DAW が所有するため、Gliss の履歴には入れない。
 
     gain_db: トラックの音量（dB。既定 0。−60〜+6 に丸め、−60 以下は無音 = −∞）。**再生（画面）だけに効く**
       （書き出し・render_tracks の音のファイルには入らない）。session（.gliss）には保存する
@@ -433,9 +660,7 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
             raise SessionError("編集中のトラックは伴奏にできない（先に別のトラックを選ぶ）")
         if kind == "inst" and t["kind"] == "vocal" and len(s.vocal_tracks()) <= 1:
             raise SessionError("ボーカルのトラックが無くなるので伴奏にできない")
-        t["kind"] = kind
-        if kind == "inst" and s.guide == track_id:
-            s.guide = None
+        s.set_kind(t, kind)                      # 伴奏にしたら、このトラックの指定と、これを指していた指定を外す
     if name is not None:
         t["name"] = str(name).strip() or t["name"]
     if mute is not None:
@@ -455,8 +680,13 @@ def set_track(track_id: str, name: str = None, kind: str = None, mute: bool = No
                                ("kind", "伴奏／ボーカルの扱い")) if old.get(k) != t.get(k)]
     if moved:
         what.append("トラックの順番")
+    if not s.ara:
+        what.extend(lab for k, lab in (("mute", "トラックのミュート"), ("solo", "トラックのソロ"),
+                                        ("gain_db", "トラックの音量"), ("pan", "トラックのパン"))
+                    if old.get(k) != t.get(k))
     if what:
-        _record_session(s, "・".join(what), track_id, before, cur0, cur0, author)
+        _record_session(s, "・".join(what), track_id, before, cur0, cur0, author,
+                        include_mixer=not s.ara)
     s.save()
     reopened = _reopen_if_stale(s)
     _schedule(s)                                 # 位置が変わればガイドとの組み合わせも変わる
@@ -579,6 +809,44 @@ def set_guide_track(track_id: str = None, author: str = "ai") -> dict:
     reopened = _reopen_if_stale(s)
     _schedule(s)                                 # 古い組み合わせの準備はやめ、新しいガイドで入れ直す
     return _ok(guide=s.guide, reopened=reopened, session=summary(s),
+               next=("analyze_take を呼ぶ" if reopened else None))
+
+
+@_tool
+@_guarded
+def set_track_guide(track_id: str = None, guide_track_id: str = None, author: str = "ai") -> dict:
+    """トラックごとのガイドを指定する。guide_track_id を省略（null）すると共通のガイド（set_guide_track）に戻す。取り消せる（undo）。
+
+    1 つの曲で、主旋律・ハモリ・囁きなどが別々のガイドへ合わせるときに使う（それぞれのトラックにガイドのトラックを指定する）。
+    track_id: 指定されるトラック（省略時は編集対象）。ボーカルのトラックだけ。guide_track_id: ガイドにするボーカルのトラック
+    （track_id 自身は不可）。実効のガイド = そのトラックの guide_id、無ければ共通のガイド。
+    list_deviations / correct_to_guide / measure_against_guide / plan_edit(op="guide") / 画面のガイドの表示は、
+    編集対象のトラックの実効のガイドを見る。編集対象のトラックを変えたら（返り値の reopened）analyze_take を呼ぶ
+    （ガイドの解析と対応付けが走る）。
+    """
+    s = _session()
+    before, cur0 = s.snapshot(), current_track_id()
+    tid = track_id or cur0
+    if not tid:
+        raise SessionError("track_id が要る（編集対象のトラックが無い）")
+    t = s.track(tid)
+    if t["kind"] != "vocal":
+        raise SessionError("伴奏のトラックにはガイドを指定できない: %s" % t["name"])
+    if guide_track_id:
+        g = s.track(guide_track_id)
+        if g["id"] == t["id"]:
+            raise SessionError("トラック自身はガイドにできない: %s" % t["name"])
+        if g["kind"] != "vocal":
+            raise SessionError("伴奏のトラックはガイドにできない: %s" % g["name"])
+        set_guide_id(t, g["id"])
+    else:
+        set_guide_id(t, None)
+    _record_session(s, "ガイドの指定", t["id"], before, cur0, cur0, author)
+    s.save()
+    reopened = _reopen_if_stale(s)
+    _schedule(s)                                 # 古い組み合わせの準備はやめ、新しいガイドで入れ直す
+    return _ok(track=t["id"], guide_id=t.get("guide_id"), effective_guide_id=s.effective_guide_id(t),
+               reopened=reopened, session=summary(s),
                next=("analyze_take を呼ぶ" if reopened else None))
 
 
@@ -780,9 +1048,10 @@ def mark_changeset(p, changeset_id, undone):
     s.save()
 
 
-def _record_session(s, label, track_id, before, cur_before, cur_after, author, group=None):
+def _record_session(s, label, track_id, before, cur_before, cur_after, author, group=None,
+                    include_mixer=False):
     e, dropped = s.record_session(label, track_id, before, s.snapshot(), cur_before, cur_after,
-                                  author=author, group=group)
+                                  author=author, group=group, include_mixer=include_mixer)
     _discard_dropped(s, dropped)
     return e
 
@@ -871,6 +1140,60 @@ def _skip_stale(s, undo):
         s.save()
 
 
+def _restore_archive_history(s, e, side):
+    """明示的な ARA 取り込みの前後へ戻す。補正と解析方式を一緒に復元する。"""
+    from . import mcp_ara as ara
+
+    t = s.track(e["track"])
+    arc = e[side]
+    est = arc.get("f0_estimator")
+    if arc.get("changesets") and est:
+        why = ara._estimator_problem(est)
+        if why:
+            raise ProjectError("補正を復元できない: %s" % why)
+    cur = _srv._state.get("project")
+    old_pref = t.get("estimator")
+    old_explicit = t.get(EXPLICIT_KEY)
+    old_mark = s.history_marks.get(t["id"])
+    try:
+        with _recover_projects([s.project_dir_of(t)]):
+            p = ara._restore_into(s, t, arc, forget_history=False)
+            pref = e.get("estimator_" + side)
+            if pref is None:
+                t.pop("estimator", None)
+            else:
+                t["estimator"] = pref
+            t.pop(EXPLICIT_KEY, None)            # 取り込んだアーカイブの方式（利用者の明示ではない）
+            p.estimator_pref = pref or est
+            if p.edits and not p.analysis_cached(est):
+                with prep.exclusive(p.dir):
+                    p.analyze(estimator=est)
+            s.history_marks[t["id"]] = int(e.get("mark_" + side) or 0)
+    except BaseException:
+        if old_pref is None:
+            t.pop("estimator", None)
+        else:
+            t["estimator"] = old_pref
+        if old_explicit:
+            t[EXPLICIT_KEY] = old_explicit
+        if old_mark is None:
+            s.history_marks.pop(t["id"], None)
+        else:
+            s.history_marks[t["id"]] = old_mark
+        if cur is not None and _norm(cur.dir) == _norm(s.project_dir_of(t)):
+            cur.load()
+            cur._forget_analysis()
+        raise
+    if cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
+        cur.load()
+        cur._forget_analysis()
+        cur.estimator_pref = pref or est
+    _srv._invalidate_renderer()
+    ara._drop_render(t["ara_id"])
+    _schedule(s)
+    return t["id"]
+
+
 def history_undo():
     """曲の履歴の最後の操作を取り消す。別のトラックの操作なら、そのトラックを編集対象にしてから。"""
     s, tid = _session_of(_srv._state.get("project"))
@@ -883,7 +1206,15 @@ def history_undo():
     if e is None:
         raise ProjectError("取り消せる変更が無い")
     switched, reopened = None, False
-    if e.get("kind") == "edit":
+    if e.get("kind") == "estimator":
+        _commit_estimator_history(s, e, e["before"], True)
+    elif e.get("kind") == "archive":
+        tid = _restore_archive_history(s, e, "before")
+        e["undone"] = True
+        s.save()
+        if tid != current_track_id():
+            switched = _history_switch(s, e, None)
+    elif e.get("kind") == "edit":
         t = s.track(e["track"])
         if t["id"] != current_track_id():
             _open_track(s, t)
@@ -901,7 +1232,7 @@ def history_undo():
         e["undone"] = True
         s.save()
     else:
-        s.restore(e["before"])
+        s.restore(e["before"], include_mixer=bool(e.get("include_mixer")), other=e.get("after"))
         e["undone"] = True
         s.save()
         switched = _history_switch(s, e, e.get("current_before"))
@@ -923,7 +1254,15 @@ def history_redo():
     if e is None:
         raise ProjectError("やり直せる変更が無い")
     switched, reopened = None, False
-    if e.get("kind") == "edit":
+    if e.get("kind") == "estimator":
+        _commit_estimator_history(s, e, e["after"], False)
+    elif e.get("kind") == "archive":
+        tid = _restore_archive_history(s, e, "after")
+        e["undone"] = False
+        s.save()
+        if tid != current_track_id():
+            switched = _history_switch(s, e, None)
+    elif e.get("kind") == "edit":
         t = s.track(e["track"])
         if t["id"] != current_track_id():
             _open_track(s, t)
@@ -941,7 +1280,7 @@ def history_redo():
         e["undone"] = False
         s.save()
     else:
-        s.restore(e["after"])
+        s.restore(e["after"], include_mixer=bool(e.get("include_mixer")), other=e.get("before"))
         e["undone"] = False
         s.save()
         switched = _history_switch(s, e, e.get("current_after"))
@@ -1178,5 +1517,5 @@ def render_tracks(track_ids: list = None, backend: str = "praat", background: bo
     return _ok(**work())
 
 
-TOOLS = [list_tracks, select_track, add_track, remove_track, set_track, set_guide_track, make_score_guide,
+TOOLS = [list_tracks, select_track, add_track, remove_track, set_track, set_guide_track, set_track_guide, make_score_guide,
          split_track, join_track, mute_track_range, set_tempo, track_overview, render_tracks]

@@ -3,46 +3,40 @@
 
 ## 考え方（Melodyne と同じ）
 
-ノートを短くしても、**そのノートと隣以外は 1 サンプルも動かさない**。
-隣り合う 2 つのノートの境目ごとに「接続 / 切り離し」の状態を持つ:
+ノートを短くしても、**そのノートと隣以外は 1 サンプルも動かさない**。規則は 1 つだけ:
 
-- **接続**: 境目を 2 つのノートで共有する。片方が短くなった分、隣がそのまま長くなる。
-  境目に挟まった子音（無声の短い区間）は長さを保ったまま一緒に動く。
-- **切り離し**: 自分だけ伸び縮みし、**隙間**が増減する。縮めてできた隙間は無音
-  （`silence`）、隙間へ伸ばしたぶんは隙間の音を切り取る（`crop`）。隙間の中身は
-  **元の位置のまま**（隙間の端が動くだけ）。次のノートの頭の子音（アタック）は
-  そのノートと一緒に動く。
+> 接している隣とは境目を共有、離れていれば隙間が変わる、Alt で自分だけ。
 
-既定の判定（`default_connected`）: 間に何も無い（ノート分割で隣接）か、
-間が無声（`unvoiced`）だけで 0.30 秒未満なら接続。息・無音を挟めば切り離し。
-状態を変えたものだけ `connection` 編集として編集リストに入る（undo で戻る）。
+画面に見える区間（音程のあるノート・子音（無声 `unvoiced`）・息 `breath`。**種類によらず同じ扱い**。以下「区間」）は、
+どれも対等な時間の単位で、隣り合う 2 つの区間の境目ごとに「接続 / 切り離し」の状態を持つ。無音（`silence`）は区間ではなく隙間。
 
-## 音程の無い区間の幅とタイミング（issues #35, #44）
+- **接続**: 境目を 2 つの区間で共有する。端を動かすと両側が動く（片方が短くなった分、隣がそのまま長くなる）。
+- **切り離し**: 自分だけ伸び縮みし、**隙間**が増減する。縮めてできた隙間は無音（`silence`）、隙間へ伸ばしたぶんは隙間の音を
+  切り取る（`crop`）。隙間の中身は **元の位置のまま**（隙間の端が動くだけ）。
+- 区間を横に動かす（`plan_move`）ときも同じ: 接した隣は伸び縮み、離れた隣は動かず隙間が吸収する。
 
-無声（`unvoiced`。歌詞のある区間の子音など）・息（`breath`）・無音（`silence`）も、**それ自身を操作するとき**
-（`plan_edge` / `plan_move` / `plan_reset_timing` の対象にしたとき）だけ、音程のあるノートと同じく骨組みの
-ノートにする（`timing_notes`）。分割した片は同じ計画へ入れる。ほかの操作の骨組みは今までどおり音程のあるノートだけ（境目の子音は
-接続なら長さを保って一緒に動き、切り離しなら隙間の中身として元の位置のまま）。
-
-子音・息を含む組 x → y の接続（`extra_default`）は、音程ノートどうしと同じ既定（`default_connected`:
-接していれば接続。子音の端を動かすと、接した隣のノートが伸び縮みする）。ただし挟んでいる音程ノートの組 (a, b)
-の接続をユーザーが変えていれば（`connection` 編集。Alt の切り離し・右クリックの「切り離す」「つなぐ」）それに従う:
-- (a, b) を**つないだ**なら、子音・息の両側も接続
-- (a, b) を**切り離した**なら、両側とも切り離し。ただし次のノートの頭に接した短い無声（0.30 秒以下 = アタックの
-  子音）は、そのノートと接続（切り離しの組の骨組みと同じく、アタックは次のノートと一緒に動く）
-子音・息の組そのものの Alt の切り離し・吸着の接続は、音程ノートどうしと同じく `connection` 編集（既定と違う
-ものだけ）に入り、それが最優先。
+既定の判定（`block_default_connected`）: **接している（隙間 1e-6 秒以下）ときだけ接続**。間に何かを挟めば、隙間の長さによらず切り離し。
+子音・息だけの特別な規則（アタックが次のノートと一緒に動く・境目の子音が長さを保って滑る・挟んでいる音程ノートの組の接続を
+引き継ぐ）は無い。たとえばノート 1・子音 x・ノート 3 が互いに接しているとき、ノート 1 の端（か x の頭）を後ろへ動かすと x が縮み、
+ノート 3 は動かない。x の尻を動かすと x とノート 3 が動く。Alt なら動かした区間だけ。
+状態を変えたものだけ `connection` 編集として編集リストに入る（undo で戻る）。**組（隣り合う区間の ID の対）ごとに**
+覚える。編集リストの `connection` は今後の編集の動き方を決めるだけで、確定済みの時間の編集（`stretch` / `crop` / `silence`）の
+音は変えない。間に子音が挟まって隣り合わなくなった音程ノートの組に付いた古い `connection` は、タイミングの骨組みでは使わない
+（ピッチのつなぎ `pitch.transitions` だけは、これまでの曲の音を変えないよう beta.10 までの既定と上書きで決める）。
 
 ## 時間の骨組み（structure）
 
-音程のあるノートの頭・尻、ノートの中の音素境界、アタックの頭を **knot**（節）にして、
-節と節の間を **piece** に分ける。piece の種類:
+区間の頭・尻、音程のあるノートの中の音素境界を **knot**（節）にして、節と節の間を **piece** に分ける。
+piece の種類:
 
 | mode | 中身 | 伸び縮み |
 |---|---|---|
-| `stretch` | ノートの中の母音・息・無音（歌詞が無ければノート全体） | 同じ比で伸縮 |
-| `keep` | ノートの中の子音・接続の境目の子音・アタック | 長さを保つ（位置だけ動く） |
+| `stretch` | 区間の中の母音など（歌詞が無い・子音・息の区間はその全体） | 同じ比で伸縮 |
+| `keep` | 音程のあるノートの中の子音（音素）。接続した境目の隙間 | 長さを保つ（位置だけ動く） |
 | `gap` | 切り離された隙間 | 端が動くだけ（無音を足す／切り取る） |
+
+ノートの中の音素境界は内部の構造で、画面に見える区間ではない。「ガイドに合わせる」（`plan_guide`）の骨組みだけは、従来どおり
+音程のあるノートだけで、頭に付く子音（アタック）を一緒に動かす（`build_structure(guide=True)`）。
 
 ## 計画（plan）
 
@@ -69,7 +63,7 @@ from .model import Target
 
 MIN_BODY_SEC = 0.02          # ノートの最短（画面の MIN_SEG と同じ）
 F_MIN, F_MAX = 0.05, 20.0    # 伸縮の比（元の長さに対して）の範囲
-CONNECT_MAX_GAP_SEC = 0.30   # 無声だけを挟む隣同士を「接続」とみなす隙間の上限
+CONNECT_MAX_GAP_SEC = 0.30   # （ピッチのつなぎだけ）無声だけを挟む隣同士にもつなぎを作る隙間の上限。タイミングの接続には使わない
 ATTACK_MAX_SEC = 0.30        # ノートの頭に付く子音（アタック）の上限
 ATTACK_TOL_SEC = 0.02        # 子音と母音・ノート頭の食い違いの許容
 EPS = 1e-7                   # これより小さい長さの差は「変わっていない」
@@ -132,7 +126,7 @@ def current_map(project):
 
 
 # ================================================================ 接続
-EXTRA_KINDS = ("unvoiced", "breath", "silence")   # 音程の無い区間も幅・タイミングを動かす
+BLOCK_KINDS = ("note", "unvoiced", "breath")      # 画面に見える区間。タイミングの単位（無音 silence は区間ではなく隙間）
 
 
 def pitched_notes(project):
@@ -140,91 +134,110 @@ def pitched_notes(project):
                   key=lambda n: n.start_sec)
 
 
-def timing_notes(project, extra=()):
-    """骨組みに入れるノート: 音程のあるノート＋ extra（操作する音程のない区間）。"""
-    ids = set(extra or ())
-    return sorted([n for n in project.take_notes
-                   if n.kind == "note" or (n.id in ids and n.kind in EXTRA_KINDS)],
+def blocks(project):
+    """タイミングの単位（音程のあるノート・子音・息）を時刻順に。"""
+    return sorted([n for n in project.take_notes if n.kind in BLOCK_KINDS],
                   key=lambda n: n.start_sec)
 
 
-def extra_ids(project, note_ids):
-    """音程の無い対象と、同じ区間を分割してできた兄弟の id。"""
-    kinds = {n.id: n.kind for n in project.take_notes}
-    roots = {i.split("@")[0] for i in note_ids if kinds.get(i) in EXTRA_KINDS}
-    return [i for i, kind in kinds.items() if kind in EXTRA_KINDS and i.split("@")[0] in roots]
+def block_default_connected(a, b):
+    """隣り合う区間 a → b の既定の接続: 接している（隙間 1e-6 秒以下）ときだけ。種類によらない。"""
+    return b.start_sec - a.end_sec <= 1e-6
 
 
-def extra_default(project, x, y, ov=None):
-    """音程のない区間を含む隣り合う組 x → y の既定の接続。ov: `connection_overrides`。"""
-    if x.kind == y.kind and x.kind in EXTRA_KINDS and x.id.split("@")[0] == y.id.split("@")[0]:
-        return default_connected(project, x, y)  # はさみで分けた同一区間の境目
-    ov = connection_overrides(project) if ov is None else ov
-    ps = pitched_notes(project)
-    a = x if x.kind == "note" else next((n for n in reversed(ps) if n.end_sec <= x.start_sec + 1e-6), None)
-    b = y if y.kind == "note" else next((n for n in ps if n.start_sec >= y.end_sec - 1e-6), None)
-    c = ov.get((a.id, b.id)) if a is not None and b is not None else None
-    if c is None:
-        return default_connected(project, x, y)      # 音程ノートどうしと同じ既定
-    if c:
-        return True
-    return (y is b and x.kind == "unvoiced" and b.start_sec - x.end_sec <= 1e-6
-            and x.end_sec - x.start_sec <= ATTACK_MAX_SEC)
+def default_connected(project, a, b, legacy=False, notes=None):
+    """隣り合う音程ノート a → b の既定の接続（接している = 接続）。
 
-
-def timing_connections(project, ns, conn=None):
-    """骨組みのノートの並び ns の隣り合う組ごとの接続 {(a, b): bool}（子音・息を含む組は、その組の
-    `connection` 編集か extra_default）。"""
-    conn = connection_map(project) if conn is None else conn
-    ov = connection_overrides(project)
-    out = dict(conn)
-    for x, y in zip(ns[:-1], ns[1:]):
-        if x.kind == "note" and y.kind == "note":
-            continue
-        k = (x.id, y.id)
-        out[k] = ov[k] if k in ov else extra_default(project, x, y, ov)
-    return out
-
-
-def default_connected(project, a, b):
-    """隣り合う音程ノート a → b の既定の接続。"""
+    legacy=True: 0.1.0-beta.10 までの既定（無声だけを挟む 0.30 秒未満の組も接続）。ピッチのつなぎ（`pitch.transitions`）だけが使う
+    （子音をはさんだ音程の段差をなだらかにする。これまでの曲の音を変えないため。タイミングの編集の相手は決めない）。
+    notes: 組ごとに引き直さないための project.take_notes（`connections` が 1 度だけ引いて渡す）。"""
     gap = b.start_sec - a.end_sec
     if gap <= 1e-6:
         return True
-    if gap >= CONNECT_MAX_GAP_SEC:
+    if not legacy or gap >= CONNECT_MAX_GAP_SEC:
         return False
-    between = [n for n in project.take_notes
+    between = [n for n in (project.take_notes if notes is None else notes)
                if n.start_sec >= a.end_sec - 1e-6 and n.end_sec <= b.start_sec + 1e-6
                and n.kind != "note"]
     return all(n.kind == "unvoiced" for n in between)
 
 
+PAIR_TIME_TOL_SEC = 0.06   # 付け替えた connection の境目と、今の解析の組の境目のずれの許し
+
+
+def connection_pair(project, e, notes=None):
+    """`connection` の編集が指す組 (a, b)。F0 の方式を替える前に付け替えたもの（params.by_time）は、記録した境目の
+    区間（target = a の終わり〜b の始まり）に両端が最も近い、今の解析の隣り合う組（許し PAIR_TIME_TOL_SEC。
+    無ければ None = 当てない）。notes: 引く相手のノートの並び（省くと params.pair で選ぶ）。"""
+    if not e.params.get("by_time"):
+        return (e.params["a"], e.params["b"])
+    t0, t1 = float(e.target.start_sec), float(e.target.end_sec)
+    if notes is None:
+        notes = pitched_notes(project) if e.params.get("pair") == "note" else blocks(project)
+    best = None
+    for x, y in zip(notes[:-1], notes[1:]):
+        dx, dy = abs(x.end_sec - t0), abs(y.start_sec - t1)
+        if dx <= PAIR_TIME_TOL_SEC and dy <= PAIR_TIME_TOL_SEC and (best is None or dx + dy < best[0]):
+            best = (dx + dy, x.id, y.id)
+    return (best[1], best[2]) if best is not None else None
+
+
 def connection_overrides(project):
-    """編集リストの `connection`（後勝ち）。{(a, b): bool}"""
+    """編集リストの `connection`（後勝ち）。{(a, b): bool}。組ごと。今後の編集の動き方だけを決める（確定済みの音は変えない）。"""
     out = {}
+    lists = {}
     for e in project.edits:
         if e.kind == "connection":
-            out[(e.params["a"], e.params["b"])] = bool(e.params["connected"])
+            notes = None
+            if e.params.get("by_time"):
+                kind = "note" if e.params.get("pair") == "note" else "any"
+                if kind not in lists:
+                    lists[kind] = pitched_notes(project) if kind == "note" else blocks(project)
+                notes = lists[kind]
+            key = connection_pair(project, e, notes)
+            if key is not None:
+                out[key] = bool(e.params["connected"])
     return out
 
 
-def connections(project, overrides=None):
-    """隣り合う音程ノートの組ごとの状態 [(a, b, connected, default)]。
+def block_connections(project, overrides=None):
+    """隣り合う区間（音程ノート・子音・息。種類によらない）の組ごとの状態 [(a, b, connected, default)]。タイミングの規則の状態。
 
-    overrides: {(a, b): bool} を編集リストの上に重ねる（計画の「確定したらこうなる」を測るため）。"""
+    既定は接しているときだけ接続（`block_default_connected`）。編集リストの `connection`（その組のもの）が優先。
+    overrides: {(a, b): bool} をその上に重ねる（計画の「確定したらこうなる」を測るため）。
+    間に子音が挟まって隣り合わなくなった音程ノートの組の古い `connection` は、ここでは使わない。"""
+    bs = blocks(project)
+    ov = connection_overrides(project)
+    if overrides:
+        ov = {**ov, **overrides}
+    rows = []
+    for a, b in zip(bs[:-1], bs[1:]):
+        d = block_default_connected(a, b)
+        rows.append((a, b, ov.get((a.id, b.id), d), d))
+    return rows
+
+
+def connections(project, overrides=None, legacy=False):
+    """隣り合う**音程ノート**の組ごとの状態 [(a, b, connected, default)]。ピッチのつなぎ（`pitch.transitions`）が使う。
+    タイミングの編集の接続は `block_connections`（子音・息も同じ扱い）。
+
+    overrides: {(a, b): bool} を編集リストの上に重ねる（計画の「確定したらこうなる」を測るため）。
+    legacy: 既定を 0.1.0-beta.10 までのもの（`default_connected(legacy=True)`）にする（ピッチのつなぎ用）。"""
     ns = pitched_notes(project)
     ov = connection_overrides(project)
     if overrides:
         ov = {**ov, **overrides}
     rows = []
+    all_notes = project.take_notes if legacy else None     # 組ごとに take_notes（解析の確認つき）を引かない
     for a, b in zip(ns[:-1], ns[1:]):
-        d = default_connected(project, a, b)
+        d = default_connected(project, a, b, legacy=legacy, notes=all_notes)
         rows.append((a, b, ov.get((a.id, b.id), d), d))
     return rows
 
 
 def connection_map(project):
-    return {(a.id, b.id): c for a, b, c, _ in connections(project)}
+    """隣り合う区間の組 {(a, b): connected}（タイミングの規則の状態）。"""
+    return {(a.id, b.id): c for a, b, c, _ in block_connections(project)}
 
 
 # ================================================================ 骨組み
@@ -276,7 +289,8 @@ def _phoneme_list(project, confirmed_only=False):
 
 
 def _attack_start(project, phs, note, lo):
-    """ノートの頭に付く子音（アタック）の頭。無ければ note.start_sec。"""
+    """ノートの頭に付く子音（アタック）の頭。無ければ note.start_sec。**「ガイドに合わせる」の骨組みだけ**が使う
+    （ふつうのタイミング編集の骨組みには、アタックの規則は無い）。"""
     s = note.start_sec
     near = [p for p in phs if p.end_sec > s - 0.05 and p.start_sec < s + 0.01]
     c = s
@@ -302,19 +316,20 @@ def _attack_start(project, phs, note, lo):
     return max(lo, min(c, s))
 
 
-def build_structure(project, overrides=None, attacks=None, extra=None, confirmed_only=False):
-    """ノートと音素から節と piece を組む。overrides = {(a, b): connected} で状態を上書き。
-    extra: 骨組みのノートに入れる音程のない区間の id（それ自身を操作するとき）。
+def build_structure(project, overrides=None, attacks=None, confirmed_only=False, guide=False):
+    """区間と音素から節と piece を組む。overrides = {(a, b): connected} で状態を上書き。
 
-    attacks = {note id: 秒}: 切り離されたノートのアタックの頭をそこまで前に広げる
-    （「ガイドに合わせる」: 音程の付く少し前の隙間にある発音の頭を、ノートと一緒に動かす）。"""
+    骨組みの区間は、音程のあるノート・子音・息のすべて（種類によらず同じ規則。隣り合う組は、接していれば接続、離れていれば
+    隙間。上書きはその組のもの）。ノートの中の音素境界だけが内部の piece（子音の音素は keep）。
+
+    guide=True: 「ガイドに合わせる」（`plan_guide`）専用の骨組み。音程のあるノートだけで、切り離されたノートの頭に付く子音
+    （アタック。音素から見つける）を一緒に動かす。attacks = {note id: 秒}: そのアタックの頭をそこまで前に広げる
+    （音程の付く少し前の隙間にある発音の頭を、ノートと一緒に動かす）。ふつうの編集では使わない。"""
     tm = current_map(project)
-    ns = timing_notes(project, extra)
+    ns = pitched_notes(project) if guide else blocks(project)
     phs = _phoneme_list(project, confirmed_only=confirmed_only)
     dur = project.duration_sec
-    conn = connection_map(project)
-    if extra:
-        conn = timing_connections(project, ns, conn)
+    conn = ({(a.id, b.id): c for a, b, c, _ in connections(project)} if guide else connection_map(project))
     if overrides:
         conn.update(overrides)
     st = Structure(pairs=dict(conn))
@@ -353,9 +368,8 @@ def build_structure(project, overrides=None, attacks=None, extra=None, confirmed
     for n in ns:
         if prev is None or not conn.get((prev.id, n.id), True):
             lo = prev.end_sec if prev is not None else 0.0
-            # 子音・息のノート自身にはアタックを付けない（頭 = ノートの頭）
-            c = _attack_start(project, phs, n, lo) if n.kind == "note" else n.start_sec
-            if attacks and n.id in attacks:
+            c = _attack_start(project, phs, n, lo) if guide and n.kind == "note" else n.start_sec   # アタックは guide だけ
+            if guide and attacks and n.id in attacks:
                 c = max(lo, min(c, float(attacks[n.id])))
             u = new_unit()
             add_knot(c, "right", "attack" if c < n.start_sec else "note_start", u, n.id)
@@ -370,9 +384,9 @@ def build_structure(project, overrides=None, attacks=None, extra=None, confirmed
             add_knot(n.start_sec, "right", "note_start", carry_unit, n.id)
             add_piece("keep")                 # 境目に挟まった子音（長さ 0 もある）
             start_k = len(st.knots) - 1
-        # ---- ノートの中（音素境界で切る。子音は keep）
-        inner = sorted({round(b, 9) for p in phs for b in (p.start_sec, p.end_sec)
-                        if n.start_sec + 1e-5 < b < n.end_sec - 1e-5})
+        # ---- 音程のあるノートの中（音素境界で切る。子音の音素は keep）。子音・息の区間は全体で 1 つの stretch
+        inner = (sorted({round(b, 9) for p in phs for b in (p.start_sec, p.end_sec)
+                         if n.start_sec + 1e-5 < b < n.end_sec - 1e-5}) if n.kind == "note" else [])
         edges = [n.start_sec] + inner + [n.end_sec]
         modes = []
         for a, b in zip(edges[:-1], edges[1:]):
@@ -593,36 +607,34 @@ def _note_or_raise(st, nid):
     return st.note_knots[nid]
 
 
-def _neighbour(project, nid, side, extra=None):
-    ns = timing_notes(project, extra)
+def _neighbour(project, nid, side):
+    """区間 nid の side（"start" = 前・"end" = 後ろ）の隣の区間（種類によらない）。"""
+    ns = blocks(project)
     i = next(i for i, n in enumerate(ns) if n.id == nid)
     j = i + (1 if side == "end" else -1)
     return ns[j] if 0 <= j < len(ns) else None
 
 
 def plan_edge(project, note_id, side="end", detach=False):
-    """ノートの端（side = "start" / "end"）を動かす計画。x = 秒（+ が後ろ）。
+    """区間（音程のあるノート・子音・息）の端（side = "start" / "end"）を動かす計画。x = 秒（+ が後ろ）。
 
-    接続された端は隣と共有して動く（Alt = detach=True で切り離して自分だけ動く）。
-    切り離された端は自分だけ動き、隙間が増減する。隣にぶつかる位置が `snap_x`。"""
+    接している隣とは境目を共有して動く（Alt = detach=True なら切り離して自分だけ動く）。
+    離れていれば自分だけ動き、隙間が増減する。隣にぶつかる位置が `snap_x`。"""
     if side not in ("start", "end"):
         raise TimingError("side は start か end")
-    extra = extra_ids(project, [note_id])
-    if not extra and note_id not in {n.id for n in pitched_notes(project)}:
+    if note_id not in {n.id for n in blocks(project)}:
         _note_or_raise(Structure(), note_id)
-    nb = _neighbour(project, note_id, side, extra)
+    nb = _neighbour(project, note_id, side)
     pair = None
     if nb is not None:
         pair = (note_id, nb.id) if side == "end" else (nb.id, note_id)
     conn = connection_map(project)
-    if extra:
-        conn = timing_connections(project, timing_notes(project, extra), conn)
     overrides = {}
     set_conn = []
     if detach and pair and conn.get(pair, False):
         overrides[pair] = False
         set_conn.append((pair[0], pair[1], False))
-    st, _ = build_structure(project, overrides, extra=extra)
+    st, _ = build_structure(project, overrides)
     ks, ke = _note_or_raise(st, note_id)
     k = ke if side == "end" else ks
     plan = _finish(project, "edge", {"note_id": note_id, "side": side, "detach": bool(detach)},
@@ -655,8 +667,8 @@ def _would_be_transition(project, pair):
 
 
 def plan_move(project, note_ids):
-    """ノート（複数可。子音・息・無音も可）を横に動かす計画。x = 秒。接続側の隣は伸び縮み、切り離し側は隙間が吸収。"""
-    st, _ = build_structure(project, extra=extra_ids(project, note_ids))
+    """区間（音程のあるノート・子音・息。複数可）を横に動かす計画。x = 秒。接している隣は伸び縮み、離れた隣は動かず隙間が吸収。"""
+    st, _ = build_structure(project)
     anchors = {}
     for nid in note_ids:
         ks, ke = _note_or_raise(st, nid)
@@ -666,14 +678,14 @@ def plan_move(project, note_ids):
 
 
 def plan_reset_timing(project, note_ids):
-    """ノートのタイミングを元に戻す計画（x = 1 で元どおり）。接続された隣は伸び縮みで合わせる。"""
-    st, _ = build_structure(project, extra=extra_ids(project, note_ids))
+    """区間のタイミングを元に戻す計画（x = 1 で元どおり）。接続された隣は伸び縮みで合わせる。"""
+    st, _ = build_structure(project)
     anchors = {}
     for nid in note_ids:
         ks, ke = _note_or_raise(st, nid)
         for k in range(ks, ke + 1):
             anchors[k] = st.knots[k].src - st.knots[k].cur
-        # アタックも元の位置へ
+        # 頭の節と同じ組（接続した前の区間の尻）も元の位置へ
         u = st.knots[ks].unit
         for k in st.units.get(u, []):
             anchors[k] = st.knots[k].src - st.knots[k].cur
@@ -1006,7 +1018,7 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
     gt = GT.of_project(project)
     tn = {n.id: n for n in pitched_notes(project)}
     sel = set(note_ids) if note_ids else set(tn)
-    st, tm = build_structure(project, attacks=_gap_attacks(project, gt, sel),
+    st, tm = build_structure(project, guide=True, attacks=_gap_attacks(project, gt, sel),
                              confirmed_only=True)
     pairs, pitch_target, gspan = note_correspondence(project)
     many = _one_to_many(project, tn, sel, gspan)
@@ -1284,7 +1296,7 @@ def _gap_attacks(project, gt, sel):
     if gt is None:
         return {}
     ns = pitched_notes(project)
-    conn = connection_map(project)
+    conn = {(a.id, b.id): c for a, b, c, _ in connections(project)}      # 「ガイドに合わせる」の骨組みは音程ノートの組
     out = {}
     for pr in gt.pairs:
         t = pr.take_sec
@@ -1647,41 +1659,110 @@ def realize(project, plan, x):
     info = {"x": x, "moved_knots": len(moving)}
     if moving:
         tm = current_map(project)
-        kL = max(0, moving[0] - 1)
-        kR = min(len(ks) - 1, moving[-1] + 1)
-        # 変わる piece
-        pc = [p for p in st.pieces if p.a >= kL and p.b <= kR]
-        W0, W1 = ks[kL].src, ks[kR].src
+        timing = [(e, project.edit_span(e)) for e in project.edits if e.kind in TIMING_KINDS]
         legacy = any(e.kind == "move" for e in project.edits)
         if legacy:
-            W0, W1 = 0.0, project.duration_sec
-        ids = set()
-        while True:
-            grow = False
-            for e in project.edits:
-                if e.kind not in TIMING_KINDS or e.id in ids:
-                    continue
-                a, b = project.edit_span(e)
-                if b >= W0 - 1e-9 and a <= W1 + 1e-9:
-                    ids.add(e.id)
-                    if a < W0:
-                        W0, grow = float(a), True
-                    if b > W1:
-                        W1, grow = float(b), True
-            if not grow:
-                break
-        removes = [e.id for e in project.edits if e.id in ids]
-        W0 = min(W0, ks[kL].src)
-        W1 = max(W1, ks[kR].src)
-        pts = tm.points(W0, "left", ks[kL].src, ks[kL].side)
-        for p in pc:
-            pts += _piece_points(tm, st, p, new, force=p.note in plan.force_notes)
-        pts += tm.points(ks[kR].src, ks[kR].side, W1, "right")
-        pts = _dedup(pts)
-        specs = _emit(pts)
-        info.update(window_sec=[round(W0, 4), round(W1, 4)], removed=len(removes),
+            wins = [[0.0, project.duration_sec, max(0, moving[0] - 1), min(len(ks) - 1, moving[-1] + 1)]]
+        else:
+            wins = _windows(ks, moving, timing)
+        rm = set()
+        for W0, W1, kL, kR in wins:
+            rm |= _window_edits(timing, W0, W1)
+            pc = [p for p in st.pieces if p.a >= kL and p.b <= kR]
+            pts = tm.points(W0, "left", ks[kL].src, ks[kL].side)
+            pts += _pieces_points(tm, st, pc, new, plan.force_notes)
+            pts += tm.points(ks[kR].src, ks[kR].side, W1, "right")
+            specs += _emit(_dedup(pts))
+        removes = [e.id for e in project.edits if e.id in rm]
+        info.update(window_sec=[round(wins[0][0], 4), round(wins[-1][1], 4)], removed=len(removes),
                     pieces=len(specs))
+        if len(wins) > 1:
+            info["windows_sec"] = [[round(w[0], 4), round(w[1], 4)] for w in wins]
     return removes, specs, info
+
+
+def _window_edits(timing, W0, W1):
+    """組み直す窓 [W0, W1] の中のタイミング編集の id。窓と重なるもの・窓の端の時刻の無音の挿入（長さ 0）。
+    端で**接しているだけ**の編集（窓の外の区間の伸縮）は入れない（入れると、窓が隣の編集を伝って曲の端まで
+    広がり、動かしていないノートの編集まで組み直す）。"""
+    out = set()
+    for e, (a, b) in timing:
+        if b - a <= 1e-9:
+            if W0 - 1e-9 <= a <= W1 + 1e-9:
+                out.add(e.id)
+        elif a < W1 - 1e-9 and b > W0 + 1e-9:
+            out.add(e.id)
+    return out
+
+
+def _windows(ks, moving, timing):
+    """動く節の塊ごとの組み直す窓 [[W0, W1, kL, kR], ...]（時刻順・重ならない）。
+
+    塊 = 動く節の並び。窓はその両隣の動かない節まで（そのノートと隣）を、窓の端にまたがる編集の端まで広げる。
+    離れた 2 か所を 1 回で動かしても、間の動かないノートの編集は組み直さない（組み直すと編集の切れ目が
+    変わり、別々に再合成してつなぐ所が変わって、動かしていないノートの音が変わる）。窓が重なる・接するなら 1 つにする。"""
+    n = len(ks)
+    groups = []
+    for i in moving:
+        kL, kR = max(0, i - 1), min(n - 1, i + 1)
+        if groups and kL <= groups[-1][1]:
+            groups[-1][1] = max(groups[-1][1], kR)
+        else:
+            groups.append([kL, kR])
+    wins = [[ks[kL].src, ks[kR].src, kL, kR] for kL, kR in groups]
+    while True:
+        for w in wins:                                   # 窓の端にまたがる編集の端まで広げる
+            while True:
+                grow = False
+                for _e, (a, b) in timing:
+                    if b - a > 1e-9 and a < w[1] - 1e-9 and b > w[0] + 1e-9:
+                        if a < w[0]:
+                            w[0], grow = float(a), True
+                        if b > w[1]:
+                            w[1], grow = float(b), True
+                if not grow:
+                    break
+        wins.sort(key=lambda w: w[0])
+        merged = [wins[0]]
+        for w in wins[1:]:
+            last = merged[-1]
+            if w[0] <= last[1] + 1e-9:                   # 重なる・接する（端の無音を 2 つの窓で組み直さない）
+                last[1] = max(last[1], w[1])
+                last[2], last[3] = min(last[2], w[2]), max(last[3], w[3])
+            else:
+                merged.append(w)
+        if len(merged) == len(wins):
+            return merged
+        wins = merged
+
+
+def _pieces_points(tm, st, pc, new, force_notes):
+    """窓の中の piece の折れ点。動かない piece が続くところは今の時間写像の折れ点をそのまま使う
+    （piece ごとに区切ると節の時刻で編集が切れ、別々に再合成する所が増えて音が変わる）。"""
+    ks = st.knots
+    pts = []
+    i = 0
+    while i < len(pc):
+        p = pc[i]
+        if p.mode != "gap" and p.note not in force_notes and _still(tm, ks, p, new):
+            j = i
+            while (j + 1 < len(pc) and pc[j + 1].mode != "gap" and pc[j + 1].note not in force_notes
+                   and _still(tm, ks, pc[j + 1], new)):
+                j += 1
+            ka, kb = ks[pc[i].a], ks[pc[j].b]
+            pts += tm.points(ka.src, ka.side, kb.src, kb.side)
+            i = j + 1
+            continue
+        pts += _piece_points(tm, st, p, new, force=p.note in force_notes)
+        i += 1
+    return pts
+
+
+def _still(tm, ks, p, new):
+    """piece の両端の節が動かない（今の時間写像の位置のまま）。"""
+    ka, kb = ks[p.a], ks[p.b]
+    return (abs(float(new[p.a]) - tm.at(ka.src, ka.side)) < 1e-12
+            and abs(float(new[p.b]) - tm.at(kb.src, kb.side)) < 1e-12)
 
 
 def _piece_points(tm, st, p, new, force=False):
@@ -1786,19 +1867,19 @@ def connection_specs(project, changes):
 
     編集リストに置くのは**既定と違うものだけ**。既定に戻すときは上書きを外すだけにする。"""
     removes, out = [], []
-    ns = {n.id: n for n in project.take_notes if n.kind == "note" or n.kind in EXTRA_KINDS}
+    bs = blocks(project)
+    ns = {n.id: n for n in bs}
+    adjacent = {(x.id, y.id) for x, y in zip(bs[:-1], bs[1:])}
     last = {}
     for a, b, c in changes:                  # 同じ組は最後の値だけ（Alt で切って吸着で戻す、など）
         last[(a, b)] = c
     for (a, b), c in last.items():
-        if a not in ns or b not in ns:
+        if (a, b) not in adjacent:               # 隣り合う区間の組だけ（間に区間が挟まった組は覚えない）
             continue
         removes += [e.id for e in project.edits if e.kind == "connection"
-                    and e.params.get("a") == a and e.params.get("b") == b]
+                    and connection_pair(project, e) == (a, b)]
         x, y = ns[a], ns[b]
-        # 子音・息を含む組（issue #35）の既定は、挟んでいる音程ノートの組の接続から
-        dflt = (default_connected(project, x, y) if x.kind == "note" and y.kind == "note"
-                else extra_default(project, x, y))
+        dflt = block_default_connected(x, y)         # 既定は種類によらず、接しているときだけ接続
         if bool(c) == dflt:
             continue
         out.append({"kind": "connection",

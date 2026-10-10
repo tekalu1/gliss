@@ -6,13 +6,17 @@
 #include "ara/FloatWavWriter.h"
 #include "ara/PlayheadState.h"
 #include "ara/PluginState.h"
+#include "ara/PreviewAudio.h"
+#include "ara/PreviewRequest.h"
 #include "ara/RegionMapping.h"
+#include "ara/SelectionPolicy.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_core/juce_core.h>
 
 #include <cmath>
 #include <cstdio>
+#include <thread>
 
 namespace gliss
 {
@@ -114,6 +118,40 @@ public:
             juce::String error;
             expect (archive::read (archive::write (a), b, error));
             expect (b.guide.isEmpty() && b.modifications.empty());
+        }
+
+        beginTest ("archive keeps the per-track guides and an old archive without them reads empty");
+        {
+            DocumentArchive a;
+            a.workKey = "k";
+            a.guide = "shared";
+            a.guides["mod A"] = "mod \"B\"";
+            a.guides["mod C"] = "mod \"B\"";
+            const auto json = archive::write (a);
+            const auto guides = juce::JSON::parse (json).getProperty ("document", {}).getProperty ("guides", {});
+            expectEquals (guides.getProperty ("mod A", {}).toString(), juce::String ("mod \"B\""));
+            DocumentArchive b;
+            juce::String error;
+            expect (archive::read (json, b, error), error);
+            expect (b.guides == a.guides);
+            expectEquals (b.guide, juce::String ("shared"));
+
+            expect (b.hasGuides);
+
+            // 修飾が 1 つでもあれば guides は空でも書く（読んだ側は「アーカイブが正」と分かる）。修飾も指定も無ければ書かない
+            a.guides.clear();
+            expect (! juce::JSON::parse (archive::write (a)).getProperty ("document", {}).hasProperty ("guides"));
+            a.modifications["mod A"] = { "Vocal 1", {} };
+            const auto plain = archive::write (a);
+            expect (juce::JSON::parse (plain).getProperty ("document", {}).getProperty ("guides", {}).getDynamicObject() != nullptr);
+            DocumentArchive c;
+            expect (archive::read (plain, c, error), error);
+            expect (c.guides.empty() && c.hasGuides);
+
+            // guides の無い古いアーカイブは空として読み、hasGuides は false（作業場所の指定をそのまま使う）
+            DocumentArchive d;
+            expect (archive::read (R"({"format":"gliss-ara","version":1,"document":{"work_key":"k","guide":null},"modifications":{}})", d, error), error);
+            expect (d.guides.empty() && d.guide.isEmpty() && ! d.hasGuides);
         }
 
         beginTest ("archive refuses other formats and newer versions");
@@ -343,6 +381,433 @@ public:
             s.loopEndSec = 2.0;
             const auto loop = playhead::describe (s, {}).getProperty ("loop", {});
             expect (loop.isArray() && loop.size() == 2 && (double) loop[1] == 2.0);
+        }
+
+        beginTest ("one source owns the coherent position while playing");
+        {
+            PlayheadState state;
+            juce::AudioPlayHead::PositionInfo first, other;
+            first.setTimeInSeconds (4.0); first.setIsPlaying (true);
+            other.setTimeInSeconds (100.0); other.setIsPlaying (true);
+            state.write (first, 1);
+            const auto version = state.read().sequence;
+            state.write (other, 2);
+            expectWithinAbsoluteError (state.read().songSec, 4.0, 1.0e-12);
+            expectEquals (state.read().sequence, version);
+            first.setIsPlaying (false);
+            state.write (first, 1);
+            state.write (other, 2);
+            expectWithinAbsoluteError (state.read().songSec, 100.0, 1.0e-12);
+            expect (state.read().sequence > version);
+        }
+
+        beginTest ("concurrent reads never mix song and loop from different blocks");
+        {
+            PlayheadState state;
+            std::atomic<bool> done { false };
+            std::thread writer ([&]
+            {
+                for (int n = 2; n < 4002; ++n)
+                {
+                    juce::AudioPlayHead::PositionInfo info;
+                    info.setTimeInSeconds ((double) n);
+                    info.setPpqPosition ((double) n);
+                    info.setBpm (60.0);
+                    info.setIsPlaying (true);
+                    info.setIsLooping (true);
+                    info.setLoopPoints (juce::AudioPlayHead::LoopPoints { (double) n - 1.0, (double) n + 1.0 });
+                    state.write (info, 1);
+                }
+                done.store (true);
+            });
+            bool coherent = true;
+            while (! done.load())
+            {
+                const auto s = state.read();
+                if (s.valid && s.looping && (std::abs (s.loopStartSec - (s.songSec - 1.0)) > 1.0e-12
+                                           || std::abs (s.loopEndSec - (s.songSec + 1.0)) > 1.0e-12))
+                { coherent = false; break; }
+            }
+            writer.join();
+            expect (coherent);
+        }
+    }
+};
+
+class AraPreviewTests final : public juce::UnitTest
+{
+public:
+    AraPreviewTests() : juce::UnitTest ("ARA preview audio", "Gliss") {}
+
+    void runTest() override
+    {
+        const ScopedStdoutLogger logger;
+        PreviewAudio audio;
+        PreviewAudio::Cursor cursor;
+        const auto makeClip = [] (float value)
+        {
+            auto clip = std::make_unique<PreviewAudio::Clip>();
+            clip->sampleRate = 48000.0;
+            clip->channels.push_back (std::vector<float> (4800, value));
+            return clip;
+        };
+        juce::AudioBuffer<float> buffer (2, 480);
+        const auto render = [&] (PreviewAudio::RenderStats* stats = nullptr)
+        {
+            buffer.clear();
+            audio.render (buffer, 48000.0, cursor, stats);
+        };
+
+        beginTest ("start makes actual samples and fades in");
+        audio.publish (makeClip (0.4f));
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.0f, 1.0e-6f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), 0.4f, 1.0e-6f);
+        expectWithinAbsoluteError (buffer.getSample (1, 400), 0.4f, 1.0e-6f);
+
+        beginTest ("loop edges fade to zero before the PCM wraps");
+        {
+            PreviewAudio loop;
+            PreviewAudio::Cursor loopCursor;
+            auto clip = makeClip (0.4f);
+            PreviewAudio::fadeEdges (*clip);
+            loop.publish (std::move (clip));
+            juce::AudioBuffer<float> oneLoop (1, 5000);
+            oneLoop.clear();
+            loop.render (oneLoop, 48000.0, loopCursor);
+            expectWithinAbsoluteError (oneLoop.getSample (0, 4500), 0.4f, 1.0e-6f);
+            expect (std::abs (oneLoop.getSample (0, 4799)) < 0.005f);
+            expectWithinAbsoluteError (oneLoop.getSample (0, 4800), 0.0f, 1.0e-6f);
+        }
+
+        beginTest ("a changed pitch clip crossfades without a sample jump");
+        audio.publish (makeClip (-0.4f));
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.4f, 1.0e-6f);
+        expect (std::abs (buffer.getSample (0, 144)) < 0.01f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), -0.4f, 1.0e-6f);
+
+        beginTest ("release in the middle of a nonzero sample fades to silence");
+        audio.stop();
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), -0.4f, 1.0e-6f);
+        expect (buffer.getSample (0, 100) < -0.2f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), 0.0f, 1.0e-6f);
+        render();
+        expectWithinAbsoluteError (buffer.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+
+        beginTest ("trace statistics measure contributed samples and silence after release");
+        audio.publish (makeClip (0.4f));
+        PreviewAudio::RenderStats sounded;
+        render (&sounded);
+        expect (sounded.frames == 480 && sounded.nonZeroFrames > 0 && sounded.energy > 0.0 && sounded.active);
+        audio.stop();
+        PreviewAudio::RenderStats fading;
+        render (&fading);
+        expect (fading.release && fading.nonZeroFrames > 0 && fading.energy > 0.0);
+        PreviewAudio::RenderStats silent;
+        render (&silent);
+        expect (silent.frames == 480 && silent.nonZeroFrames == 0 && silent.energy == 0.0 && ! silent.active);
+        buffer.setSample (0, 0, 0.25f);
+        PreviewAudio::RenderStats mixed;
+        audio.render (buffer, 48000.0, cursor, &mixed);
+        expect (mixed.nonZeroFrames == 0 && mixed.energy == 0.0);
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.25f, 1.0e-6f);
+
+        beginTest ("a new note during the release crossfades from the releasing clip");
+        audio.publish (makeClip (0.4f));
+        render();
+        audio.stop();
+        juce::AudioBuffer<float> shortRelease (1, 100);
+        shortRelease.clear(); audio.render (shortRelease, 48000.0, cursor);
+        audio.publish (makeClip (-0.4f));
+        render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.4f, 1.0e-6f);
+        expectWithinAbsoluteError (buffer.getSample (0, 400), -0.4f, 1.0e-6f);
+
+        beginTest ("a finished release never resurrects the old note");
+        audio.stop(); render();
+        audio.publish (makeClip (0.4f)); render();
+        expectWithinAbsoluteError (buffer.getSample (0, 0), 0.0f, 1.0e-6f);
+
+        beginTest ("cancelled preview stays silent until a new clip is published");
+        audio.stop();
+        render();
+        render();
+        expectWithinAbsoluteError (buffer.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+
+        beginTest ("brief host playback cancels a pending and an existing preview");
+        {
+            PreviewAudio host;
+            PreviewAudio::Cursor hostCursor;
+            juce::AudioBuffer<float> samples (1, 480);
+            const auto pendingEpoch = host.getCancellationEpoch();
+            host.publish (makeClip (0.4f));
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expect (samples.getSample (0, 400) > 0.3f);
+            host.cancelFromAudioThread();
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expectWithinAbsoluteError (samples.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+            expect (! host.publish (makeClip (0.4f), pendingEpoch));
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expectWithinAbsoluteError (samples.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+            expect (host.publish (makeClip (-0.4f), host.getCancellationEpoch()));
+            samples.clear(); host.render (samples, 48000.0, hostCursor);
+            expect (samples.getSample (0, 400) < -0.3f);
+        }
+
+        beginTest ("one document feeds only one live EditorRenderer");
+        {
+            PreviewAudio shared;
+            const auto firstId = shared.addRenderer();
+            const auto secondId = shared.addRenderer();
+            PreviewAudio::Cursor firstCursor, secondCursor;
+            juce::AudioBuffer<float> firstOutput (1, 480), secondOutput (1, 480);
+            shared.publish (makeClip (0.4f));
+            firstOutput.clear(); secondOutput.clear();
+            expect (shared.renderForRenderer (firstOutput, 48000.0, firstCursor, firstId, 1000));
+            expect (! shared.renderForRenderer (secondOutput, 48000.0, secondCursor, secondId, 1000));
+            expect (firstOutput.getSample (0, 400) > 0.3f);
+            expectWithinAbsoluteError (secondOutput.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+
+            shared.removeRenderer (firstId);
+            secondOutput.clear();
+            expect (shared.renderForRenderer (secondOutput, 48000.0, secondCursor, secondId, 1001));
+            expect (secondOutput.getSample (0, 400) > 0.3f);
+            shared.removeRenderer (secondId);
+
+            const auto thirdId = shared.addRenderer();
+            const auto fourthId = shared.addRenderer();
+            PreviewAudio::Cursor thirdCursor, fourthCursor;
+            firstOutput.clear(); secondOutput.clear();
+            expect (shared.renderForRenderer (firstOutput, 48000.0, thirdCursor, thirdId, 2000));
+            expect (shared.renderForRenderer (secondOutput, 48000.0, fourthCursor, fourthId, 2251));
+            firstOutput.clear();
+            expect (! shared.renderForRenderer (firstOutput, 48000.0, thirdCursor, thirdId, 2251));
+            expectWithinAbsoluteError (firstOutput.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+            shared.removeRenderer (thirdId);
+            shared.removeRenderer (fourthId);
+        }
+
+        beginTest ("only the EditorRenderer that holds the auditioned modification adds the preview");
+        {
+            // 17 トラックの曲: 試聴するノートの修飾を持つのは 1 つの renderer だけ。ほかはミュートのトラックなどで先に呼ばれる。
+            PreviewAudio shared;
+            std::vector<std::uint64_t> ids;
+            for (int i = 0; i < 17; ++i) ids.push_back (shared.addRenderer());
+            const auto mine = ids[11];
+            std::vector<PreviewAudio::Cursor> cursors (ids.size());
+            juce::AudioBuffer<float> out (1, 480);
+            const auto renderAt = [&] (size_t index, std::uint32_t nowMs)
+            {
+                out.clear();
+                return shared.renderForRenderer (out, 48000.0, cursors[index], ids[index], nowMs);
+            };
+            shared.publish (makeClip (0.4f));
+            shared.setEligibleRenderers ({ mine }, 1000);
+
+            // 持たない renderer が先に毎ブロック呼ばれても、持つ renderer が足す
+            for (std::uint32_t t = 1000; t < 1100; t += 10)
+            {
+                for (size_t i = 0; i < ids.size(); ++i)
+                {
+                    if (i == 11) continue;
+                    expect (! renderAt (i, t), "ineligible " + juce::String ((int) i) + " at " + juce::String ((int) t));
+                    expectWithinAbsoluteError (out.getRMSLevel (0, 0, 480), 0.0f, 1.0e-6f);
+                }
+                expect (renderAt (11, t), "eligible renderer adds");
+                expect (out.getSample (0, 400) > 0.3f);
+            }
+
+            // 持つ renderer が 250 ms 呼ばれなくなったら（持つトラックが止まっている）、持たない renderer が足す
+            expect (! renderAt (3, 1200), "ineligible waits while the eligible renderer is alive");
+            expect (renderAt (3, 1400), "ineligible takes over when the eligible one stopped");
+            expect (out.getSample (0, 400) > 0.3f);
+            // 持つ renderer が戻ったら、持たない側の所有を奪って足す
+            expect (renderAt (11, 1410), "the eligible renderer takes the preview back");
+            expect (out.getSample (0, 400) > 0.3f);
+            expect (! renderAt (3, 1410), "ineligible stays out again");
+
+            // 試聴するノートの修飾が別の renderer に移ったら、所有者を外して新しい持ち主が足す
+            shared.setEligibleRenderers ({ ids[5] }, 2000);
+            expect (! renderAt (11, 2000), "old owner is out after retargeting");
+            expect (renderAt (5, 2000), "new eligible renderer takes the preview");
+            expect (out.getSample (0, 400) > 0.3f);
+            expect (! renderAt (11, 2010), "old owner stays out");
+
+            // 持つ renderer が無ければ（ホストが領域を渡さない）絞らない: 先に呼ばれた 1 つが足す
+            shared.setEligibleRenderers ({}, 3000);
+            expect (renderAt (2, 3000), "not narrowed: the first renderer adds");
+            expect (out.getSample (0, 400) > 0.3f);
+            expect (! renderAt (7, 3000), "not narrowed: the second one does not");
+
+            for (auto id : ids) shared.removeRenderer (id);
+        }
+
+        beginTest ("a renderer added while narrowed does not take the preview");
+        {
+            PreviewAudio shared;
+            const auto first = shared.addRenderer();
+            shared.publish (makeClip (0.4f));
+            shared.setEligibleRenderers ({ first }, 500);
+            const auto late = shared.addRenderer();
+            PreviewAudio::Cursor lateCursor;
+            juce::AudioBuffer<float> out (1, 480);
+            expect (! shared.renderForRenderer (out, 48000.0, lateCursor, late, 500));
+            shared.removeRenderer (first);
+            shared.removeRenderer (late);
+        }
+
+        beginTest ("a new preview drops the previous owner and narrows to the requester when no renderer holds the modification");
+        {
+            // 前の試聴の所有者（A）は、次の試聴が絞れなくても持ち越さない。求めた側（B）があればそこに絞る
+            PreviewAudio shared;
+            const auto a = shared.addRenderer();
+            const auto b = shared.addRenderer();
+            PreviewAudio::Cursor cursorA, cursorB;
+            juce::AudioBuffer<float> out (1, 480);
+            const auto renderAt = [&] (std::uint64_t id, PreviewAudio::Cursor& c, std::uint32_t nowMs)
+            {
+                out.clear();
+                return shared.renderForRenderer (out, 48000.0, c, id, nowMs);
+            };
+            shared.publish (makeClip (0.4f));
+
+            shared.beginPreview ({}, {}, 0, 1000);                                    // 絞れない・求めた側も分からない
+            expect (renderAt (a, cursorA, 1000), "A owns the first preview");
+            expect (! shared.getStats().narrowed);
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) a);
+
+            shared.beginPreview ({}, {}, b, 2000);                                     // 持つ renderer は無い。求めたのは B
+            expect (shared.getStats().narrowed, "narrowed to the requester");
+            expect (shared.getStats().owner == 0, "the previous owner is dropped");
+            expect (! renderAt (a, cursorA, 2000), "the previous owner does not keep adding");
+            expect (renderAt (b, cursorB, 2000), "the requester adds");
+            expect (out.getSample (0, 400) > 0.3f);
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) b);
+            expect (! renderAt (a, cursorA, 2100), "A stays out while the requester is alive");
+
+            // 求めた側が呼ばれなくなったら（ミュートのトラックなど）、別の renderer が引き継ぐ（動作は変えない。回数だけ数える）
+            expect (renderAt (a, cursorA, 2400), "A takes over when the requester stopped");
+            expectEquals (shared.getStats().handovers, 1);
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) a);
+
+            expect (renderAt (a, cursorA, 2950), "A is the live owner of the previous preview");
+            shared.beginPreview ({}, {}, 0, 3000);                                     // 求めた側も分からない: 絞らず、先に呼ばれた renderer が足す
+            expect (! shared.getStats().narrowed);
+            expectEquals (shared.getStats().handovers, 0);
+            expect (renderAt (b, cursorB, 3000), "not narrowed: the first caller adds");
+            expect (! renderAt (a, cursorA, 3000), "not narrowed: the second does not");
+
+            shared.beginPreview ({ a }, {}, b, 4000);                                  // 持つ renderer があれば、それが先（求めた側より）
+            expect (renderAt (a, cursorA, 4000), "the renderer that holds the modification adds");
+            expect (! renderAt (b, cursorB, 4000), "the requester does not, when another renderer holds the modification");
+
+            shared.beginPreview ({}, {}, 999, 5000);                                   // 登録されていない requester は無いものとする
+            expect (! shared.getStats().narrowed, "an unknown requester does not narrow");
+
+            expect (shared.chooseEligible ({}, {}, 0).ids.empty());
+            expect (shared.chooseEligible ({}, {}, b).ids == std::vector<std::uint64_t> { b });
+            expect (shared.chooseEligible ({ a }, {}, b).ids == std::vector<std::uint64_t> { a });
+
+            shared.removeRenderer (a);
+            shared.removeRenderer (b);
+        }
+
+        beginTest ("the preview narrows by the editor renderer's regions, then the same instance's playback renderer, then the requester");
+        {
+            // Studio Pro は EditorRenderer にリージョンを割り当てない（editorCovering が空）が、PlaybackRenderer には必ず割り当てる。
+            // 窓を開いたインスタンス（requester = A）が、プレビューする修飾（B のインスタンスの PlaybackRenderer が持つ）を持たないとき、B から鳴る
+            PreviewAudio shared;
+            const auto a = shared.addRenderer();
+            const auto b = shared.addRenderer();
+            const auto c = shared.addRenderer();
+            PreviewAudio::Cursor cursorA, cursorB, cursorC;
+            juce::AudioBuffer<float> out (1, 480);
+            const auto renderAt = [&] (std::uint64_t id, PreviewAudio::Cursor& cursor, std::uint32_t nowMs)
+            {
+                out.clear();
+                return shared.renderForRenderer (out, 48000.0, cursor, id, nowMs);
+            };
+            shared.publish (makeClip (0.4f));
+
+            // 1. EditorRenderer の割り当てがあればそれ（PlaybackRenderer・requester より先）
+            auto choice = shared.beginPreview ({ c }, { b }, a, 1000);
+            expect (choice.by == PreviewAudio::NarrowedBy::editor && choice.ids == std::vector<std::uint64_t> { c });
+            expect (! renderAt (a, cursorA, 1000) && ! renderAt (b, cursorB, 1000), "neither the requester nor the playback holder adds");
+            expect (renderAt (c, cursorC, 1000), "the editor renderer with the region adds");
+            expectEquals (juce::String (PreviewAudio::toString (choice.by)), juce::String ("editor"));
+
+            // 2. EditorRenderer の割り当てが空なら、同じインスタンスの PlaybackRenderer がリージョンを持つ EditorRenderer（窓を開いた A ではなく B）
+            choice = shared.beginPreview ({}, { b }, a, 2000);
+            expect (choice.by == PreviewAudio::NarrowedBy::playback && choice.ids == std::vector<std::uint64_t> { b });
+            expect (! renderAt (a, cursorA, 2000), "the window owner (requester) does not add");
+            expect (renderAt (b, cursorB, 2000), "the instance whose playback renderer has the modification adds");
+            expect (out.getSample (0, 400) > 0.3f);
+            expectEquals (juce::String (PreviewAudio::toString (choice.by)), juce::String ("playback"));
+            expectEquals ((juce::int64) shared.getStats().playedBy, (juce::int64) b);
+
+            // 3. どちらも空なら求めた側
+            choice = shared.beginPreview ({}, {}, a, 3000);
+            expect (choice.by == PreviewAudio::NarrowedBy::requester && choice.ids == std::vector<std::uint64_t> { a });
+            expect (renderAt (a, cursorA, 3000) && ! renderAt (b, cursorB, 3000));
+
+            // 4. 求めた側も分からなければ絞らない
+            choice = shared.beginPreview ({}, {}, 0, 4000);
+            expect (choice.by == PreviewAudio::NarrowedBy::none && choice.ids.empty());
+            expectEquals (juce::String (PreviewAudio::toString (choice.by)), juce::String ("none"));
+
+            // 複数のインスタンスの PlaybackRenderer が持つなら、それらが候補（先に呼ばれた 1 つが足す）
+            choice = shared.beginPreview ({}, { b, c }, a, 5000);
+            expect (choice.by == PreviewAudio::NarrowedBy::playback && choice.ids.size() == 2);
+            expect (renderAt (c, cursorC, 5000) && ! renderAt (b, cursorB, 5000) && ! renderAt (a, cursorA, 5000));
+
+            shared.removeRenderer (a);
+            shared.removeRenderer (b);
+            shared.removeRenderer (c);
+        }
+
+        beginTest ("the editor adds its EditorRenderer id to the preview arguments as the requester");
+        {
+            auto* object = new juce::DynamicObject();
+            object->setProperty ("note", "n1");
+            const juce::var original (object);
+            const auto withId = withRequester (original, 7);
+            expectEquals ((juce::int64) withId.getProperty ("requester", 0), (juce::int64) 7);
+            expectEquals (withId.getProperty ("note", {}).toString(), juce::String ("n1"));
+            expect (! original.hasProperty ("requester"), "the caller's object is not changed");
+            expect (! withRequester (original, 0).hasProperty ("requester"), "no id, nothing added");
+            expect (withRequester (juce::var(), 7).isVoid(), "not an object: returned as it is");
+        }
+
+        beginTest ("new audition PCM changes the actual output pitch");
+        {
+            PreviewAudio pitched;
+            PreviewAudio::Cursor phase;
+            juce::AudioBuffer<float> sound (1, 4800);
+            const auto sine = [] (double hz)
+            {
+                auto clip = std::make_unique<PreviewAudio::Clip>();
+                clip->sampleRate = 48000.0;
+                auto& ch = clip->channels.emplace_back (48000);
+                for (int i = 0; i < 48000; ++i)
+                    ch[(size_t) i] = (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / 48000.0);
+                return clip;
+            };
+            const auto crossings = [&]
+            {
+                int count = 0;
+                for (int i = 1001; i < sound.getNumSamples(); ++i)
+                    if (sound.getSample (0, i - 1) <= 0.0f && sound.getSample (0, i) > 0.0f) ++count;
+                return count;
+            };
+            pitched.publish (sine (220.0));
+            sound.clear(); pitched.render (sound, 48000.0, phase);
+            const auto low = crossings();
+            pitched.publish (sine (440.0));
+            sound.clear(); pitched.render (sound, 48000.0, phase);
+            const auto high = crossings();
+            expect (low >= 15 && high > low * 1.8, juce::String (low) + " -> " + juce::String (high));
         }
     }
 };
@@ -586,6 +1051,11 @@ public:
             expectEquals (juce::JSON::toString (sync.getArchiveForStore ("mod"), true), juce::JSON::toString (archive, true));
             expect (sync.getArchiveForStore ("other").isVoid());
             expectEquals (sync.getGuideForStore(), juce::String ("guide-mod"));
+            expect (sync.getGuidesForStore().empty());
+            sync.setPendingGuides ({ { "mod", "guide-mod" } });
+            expect (sync.getGuidesForStore() == (std::map<juce::String, juce::String> { { "mod", "guide-mod" } }));
+            sync.setPendingGuides ({ { "mod", "" } });   // 空 = アーカイブにその修飾の指定が無い（保存には載せない）
+            expect (sync.getGuidesForStore().empty());
 
             // エンジンが動いていなければ、取り直しは何もしない（待たない）
             const auto start = juce::Time::getMillisecondCounter();
@@ -628,11 +1098,134 @@ public:
     }
 };
 
+class AraSelectionTests final : public juce::UnitTest
+{
+public:
+    AraSelectionTests() : juce::UnitTest ("ARA selection policy", "Gliss") {}
+
+    using P = SelectionPolicy;
+
+    static P::Region reg (const char* id, const char* mod, double a = 0.0, double b = 10.0)
+    {
+        P::Region r;
+        r.id = id;
+        r.modification = mod;
+        r.songStart = a;
+        r.songEnd = b;
+        return r;
+    }
+
+    static P::Input input (const void* view, std::vector<P::Region> regions, std::vector<P::Sequence> sequences = {}, double playhead = 0.0)
+    {
+        P::Input in;
+        in.view = view;
+        in.regions = std::move (regions);
+        in.sequences = std::move (sequences);
+        in.playheadSec = playhead;
+        return in;
+    }
+
+    void runTest() override
+    {
+        int viewA = 0, viewB = 0;
+
+        beginTest ("the first selection is adopted; a click on another region switches");
+        {
+            P p;
+            auto d = p.decide (input (&viewA, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modA" && d.reason == "first-selection", d.reason);
+            d = p.decide (input (&viewA, { reg ("r2", "modB") }));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modB", "clicking another track's region must switch");
+            expect (p.currentModification() == "modB");
+        }
+
+        beginTest ("the same selection again (or a selection that still holds the current modification) changes nothing");
+        {
+            P p;
+            p.decide (input (&viewA, { reg ("r1", "modA") }));
+            auto d = p.decide (input (&viewA, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::ignore && d.reason == "unchanged", d.reason);
+            // 別のリージョンも選ばれたが、今の修飾のリージョンが残っている: 最初のリージョンへ行かない
+            d = p.decide (input (&viewA, { reg ("r9", "modC"), reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::ignore && d.reason == "same-region" && p.currentModification() == "modA", d.reason);
+            // 今の修飾の別のリージョンが選ばれた: 修飾は同じ、リージョンだけ更新（画面へ知らせる）
+            d = p.decide (input (&viewA, { reg ("r5", "modA", 20.0, 30.0) }));
+            expect (d.kind == P::Kind::adopt && d.region.id == "r5" && d.region.modification == "modA", d.reason);
+            // リージョン列（トラック）を選んだ: 今の修飾のリージョンがその中にあれば保つ
+            P::Sequence q;
+            q.id = "q1";
+            q.regions = { reg ("r7", "modZ", 0.0, 5.0), reg ("r5", "modA", 20.0, 30.0) };
+            d = p.decide (input (&viewA, {}, { q }, 1.0));
+            expect (d.kind == P::Kind::ignore && p.currentModification() == "modA", d.reason);
+        }
+
+        beginTest ("an empty selection changes nothing and is not remembered as the last selection");
+        {
+            P p;
+            p.decide (input (&viewA, { reg ("r1", "modA") }));
+            auto d = p.decide (input (&viewA, {}));
+            expect (d.kind == P::Kind::ignore && d.reason == "empty");
+            expect (p.currentModification() == "modA");
+            d = p.decide (input (&viewA, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::ignore);                 // 同じ選択に戻っただけ
+            // リージョンの無い（修飾の無い）選択も変えない
+            d = p.decide (input (&viewA, { reg ("r3", "") }));
+            expect (d.kind == P::Kind::ignore && d.reason == "no-modification" && p.currentModification() == "modA", d.reason);
+        }
+
+        beginTest ("a track selection picks the region nearest the playhead only when the current modification is not in it");
+        {
+            P p;
+            P::Sequence q;
+            q.id = "q1";
+            q.regions = { reg ("r1", "modA", 0.0, 10.0), reg ("r2", "modB", 20.0, 30.0), reg ("r3", "modC", 40.0, 50.0) };
+            auto d = p.decide (input (&viewA, {}, { q }, 42.0));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modC" && d.reason == "first-selection", d.reason);
+            P::Sequence other;
+            other.id = "q2";
+            other.regions = { reg ("r8", "modX", 0.0, 10.0), reg ("r9", "modY", 100.0, 110.0) };
+            d = p.decide (input (&viewA, {}, { other }, 99.0));
+            expect (d.kind == P::Kind::adopt && d.region.modification == "modY" && d.reason == "nearest-in-sequence", d.reason);
+        }
+
+        beginTest ("hidden or other editors do not overwrite the selection while an editor is showing");
+        {
+            P p;
+            p.decide (input (&viewA, { reg ("r1", "modA") }));
+            p.setViewShowing (&viewA, true);
+            auto d = p.decide (input (&viewB, { reg ("r2", "modB") }));      // 隠れた別のエディタの選択
+            expect (d.kind == P::Kind::ignore && d.reason == "hidden-editor" && p.currentModification() == "modA", d.reason);
+            // 見えているエディタの選択は受ける
+            d = p.decide (input (&viewA, { reg ("r2", "modB") }));
+            expect (d.kind == P::Kind::adopt && p.currentModification() == "modB");
+            // 別のエディタが見えるようになれば、そちらも受ける（見えているエディタが 1 つも無ければ全部受ける）
+            p.setViewShowing (&viewB, true);
+            p.setViewShowing (&viewA, false);
+            d = p.decide (input (&viewB, { reg ("r1", "modA") }));
+            expect (d.kind == P::Kind::adopt && p.currentModification() == "modA");
+            p.setViewShowing (&viewB, false);
+            expect (p.showingCount() == 0);
+            d = p.decide (input (&viewA, { reg ("r4", "modD") }));
+            expect (d.kind == P::Kind::adopt && p.currentModification() == "modD", "with no showing editor every view is accepted");
+        }
+
+        beginTest ("signature lists regions and sequences in the order the DAW sent them");
+        {
+            P::Sequence q;
+            q.id = "q1";
+            expectEquals (P::signatureOf (input (&viewA, { reg ("r1", "a"), reg ("r2", "b") }, { q })), juce::String ("r:r1,r:r2,s:q1"));
+            expectEquals (P::signatureOf (input (&viewA, {})), juce::String());
+        }
+    }
+};
+
 static AraArchiveTests araArchiveTests;
 static AraRegionTests araRegionTests;
 static AraPlayheadTests araPlayheadTests;
+static AraPreviewTests araPreviewTests;
 static AraEngineCallTests araEngineCallTests;
 static AraFilesTests araFilesTests;
 static AraDocumentSyncTests araDocumentSyncTests;
+static AraSelectionTests araSelectionTests;
 
 } // namespace gliss

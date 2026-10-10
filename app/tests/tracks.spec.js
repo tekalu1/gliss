@@ -183,13 +183,13 @@ async function xAt(t) {
   return b.x + await win.evaluate((tt) => window.__app.tvX(tt), t);
 }
 
-test('(V1) 上下に分割。見出しは 名前・ガイド・M・S、白枠は下の表示範囲', async () => {
+test('(V1) 上下に分割。見出しは 名前・ガイドのボタン・M・S、白枠は下の表示範囲', async () => {
   await settle();
   const st = await tstate();
   expect(st.height).toBe(st.fit);                          // 既定は全トラックが入る高さ
   expect(st.fit).toBe(20 + 3 * TH + 1);
   expect(st.heads.map((h) => [h.cur, h.guide])).toEqual([[true, false], [false, true], [false, false]]);
-  // 伴奏にはガイドのアイコンが無い。見出しのボタンは ガイド・M・S の 3 つだけ
+  // 伴奏にはガイドのボタンが無い。見出しのボタンは ガイド・M・S の 3 つだけ
   const btns = await win.evaluate(() => [...document.querySelectorAll('#heads .th')]
     .map((el) => [...el.querySelectorAll('button')].map((b) => b.dataset.act)));
   expect(btns).toEqual([['guide', 'm', 's'], ['guide', 'm', 's'], ['m', 's']]);
@@ -277,24 +277,27 @@ test('(V5) 伴奏のクリックは再生位置が動くだけ・ルーラーは
   expect((await tstate()).headX).toBeCloseTo(await win.evaluate((t) => window.__app.tvX(t), h), 0);
 });
 
-test('(V6) ガイドのアイコンで 1 本だけ指定（もう一度押すと外れる）', async () => {
+test('(V6) 共通のガイドはガイドのプルダウンの最後で 1 本だけ指定（もう一度で外れる）', async () => {
   const ts = await tracks();
-  // テイクのアイコン（ホバーで出る）を押す → ガイドがテイクに移る（編集中のトラック自身なので重ねない）
+  // テイクのガイドのボタン（プルダウン）の「このトラックを共通のガイドにする」→ 共通のガイドがテイクに移る
+  // （編集中のトラック自身なので重ねない）。トラックごとのガイドは track-guide.spec.js
   const th0 = win.locator(`#heads .th[data-id="${ts[0].id}"]`);
-  await th0.hover();
   await th0.locator('.g').click();
+  await expect(win.locator('#menu [data-item="guide"]')).toHaveText('このトラックを共通のガイドにする');
+  await win.locator('#menu [data-item="guide"]').click();
   await win.waitForFunction((id) => window.__app.S.session.guide === id, ts[0].id);
   await settle();
   let st = await tstate();
   expect(st.heads.map((h) => h.guide)).toEqual([true, false, false]);
   expect(await win.evaluate(() => window.__app.S.guide)).toBeNull();
-  // もう一度押すと外れる
-  await th0.hover();
+  // もう一度選ぶと外れる
   await th0.locator('.g').click();
+  await expect(win.locator('#menu [data-item="guide"]')).toHaveText('共通のガイドから外す');
+  await win.locator('#menu [data-item="guide"]').click();
   await win.waitForFunction(() => window.__app.S.session.guide === null);
   // 右クリックのメニューからも指定できる
   await win.locator(`#heads .th[data-id="${ts[1].id}"]`).click({ button: 'right' });
-  await expect(win.locator('#menu [data-item="guide"]')).toHaveText('このトラックをガイドにする');
+  await expect(win.locator('#menu [data-item="guide"]')).toHaveText('このトラックを共通のガイドにする');
   await win.locator('#menu [data-item="guide"]').click();
   await win.waitForFunction((id) => window.__app.S.session.guide === id, ts[1].id);
   await settle();

@@ -319,7 +319,7 @@ export function focusFirstUtterance() {
   if (voiced > total * 0.5) return false;          // ほぼ全部歌っているなら触らない
   const last = us[us.length - 1];
   focusRange(toEdited(us[0][0]), toEdited(Math.min(last[1], us[0][1] + 12)));
-  S.head = toEdited(us[0][0]) + S.off;
+  if (!ARA) S.head = toEdited(us[0][0]) + S.off;
   return true;
 }
 
@@ -703,6 +703,7 @@ async function boot() {
   savedView = (b.view && b.view.span > 0) ? b.view : null;   // 前回のズーム・スクロール位置
   if (savedView?.trackH) setTrackHeight(savedView.trackH);
   if (b.view?.headW) setHeadWidth(b.view.headW, { save: false });   // 見出しの幅（全体で 1 つ）
+  onAnalyzed(adoptAnalysis);      // ARA でも修飾ごとの実効方式を選択表示へ反映する
   if (ARA) {
     // プラグイン: 開く操作は DAW が持つ。DAW の選択のトラックを選んで解析し、描く（ara.js の araBoot）
     onF0Change(syncAppMenu);
@@ -717,7 +718,6 @@ async function boot() {
     return;
   }
   onF0Change(syncAppMenu);
-  onAnalyzed(adoptAnalysis);      // 曲ごとの方式（前に解析した方式のまま）をメニューのチェックへ
   await refreshF0();              // ピッチ検出の方式（エンジンが実際に使うもの・RMVPE の重みの有無）をメニューのチェックへ
   const { take, guide } = b;
   try {

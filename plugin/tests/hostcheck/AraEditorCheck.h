@@ -29,9 +29,13 @@ public:
     using Report = std::function<void (const juce::String&)>;
     using Check = std::function<bool (bool, const juce::String&)>;
 
-    AraEditorCheck (Report reportIn, Check checkIn, juce::File pluginIn, juce::File traceDirIn, int timeoutSecIn)
+    AraEditorCheck (Report reportIn, Check checkIn, juce::File pluginIn, juce::File traceDirIn, int timeoutSecIn,
+                    bool measureAuditionIn = false, int modificationCountIn = 1, int voiceSecondsIn = 6,
+                    int auditionCountIn = 1)
         : report (std::move (reportIn)), check (std::move (checkIn)), plugin (std::move (pluginIn)),
-          traceDir (std::move (traceDirIn)), timeoutMs (timeoutSecIn * 1000)
+          traceDir (std::move (traceDirIn)), timeoutMs (timeoutSecIn * 1000), measureAudition (measureAuditionIn),
+          modificationCount (juce::jlimit (1, 34, modificationCountIn)), voiceSeconds (voiceSecondsIn >= 180 ? 180 : 6),
+          auditionCount (juce::jlimit (1, 3, auditionCountIn))
     {
         makeVoice();
     }
@@ -146,9 +150,17 @@ private:
     {
         // engine/tests/test_ara_tools.py の _voice と同じ作り（倍音 8 本・5.5 Hz ±30 セントのビブラート・5 ノート、44.1 kHz・モノラル）
         struct Note { double start, length; int midi; };
-        const Note notes[] { { 0.5, 0.55, 60 }, { 1.65, 0.55, 64 }, { 2.8, 0.55, 67 }, { 3.95, 0.55, 65 }, { 5.1, 0.55, 62 } };
+        std::vector<Note> notes;
+        if (voiceSeconds == 180)
+        {
+            notes.reserve (300);
+            for (int i = 0; i < 300; ++i)
+                notes.push_back ({ 0.15 + i * 0.6, 0.32, 60 + (i % 5) });
+        }
+        else
+            notes = { { 0.5, 0.55, 60 }, { 1.65, 0.55, 64 }, { 2.8, 0.55, 67 }, { 3.95, 0.55, 65 }, { 5.1, 0.55, 62 } };
         voice.rate = voiceRate;
-        voice.samples.assign ((size_t) (6.2 * voiceRate), 0.0f);
+        voice.samples.assign ((size_t) ((voiceSeconds == 180 ? 180.0 : 6.2) * voiceRate), 0.0f);
 
         for (const auto& n : notes)
         {
@@ -192,11 +204,17 @@ private:
             mc.orderIndex = 0;
             musicalContext = std::make_unique<juce::ARAHostModel::MusicalContext> (hostRef<ARA::ARAMusicalContextHostRef> (&voice), dc, mc);
 
-            auto rs = juce::ARAHostModel::RegionSequence::getEmptyProperties();
-            rs.name = "Vocal";
-            rs.orderIndex = 0;
-            rs.musicalContextRef = musicalContext->getPluginRef();
-            regionSequence = std::make_unique<juce::ARAHostModel::RegionSequence> (hostRef<ARA::ARARegionSequenceHostRef> (&voice), dc, rs);
+            const auto sequenceCount = modificationCount > 1 ? 2 : 1;
+            for (int i = 0; i < sequenceCount; ++i)
+            {
+                auto rs = juce::ARAHostModel::RegionSequence::getEmptyProperties();
+                const auto sequenceName = "Vocal " + juce::String (i + 1);
+                rs.name = sequenceName.toRawUTF8();
+                rs.orderIndex = i;
+                rs.musicalContextRef = musicalContext->getPluginRef();
+                regionSequences.push_back (std::make_unique<juce::ARAHostModel::RegionSequence> (
+                    hostRef<ARA::ARARegionSequenceHostRef> (&sequenceRefs[(size_t) i]), dc, rs));
+            }
 
             auto as = juce::ARAHostModel::AudioSource::getEmptyProperties();
             as.name = "hostcheck voice";
@@ -207,25 +225,38 @@ private:
             as.merits64BitSamples = false;
             audioSource = std::make_unique<juce::ARAHostModel::AudioSource> (hostRef<ARA::ARAAudioSourceHostRef> (&voice), dc, as);
 
-            auto am = juce::ARAHostModel::AudioModification::getEmptyProperties();
-            am.name = "Vocal take";
-            am.persistentID = "hostcheck-modification";
-            audioModification = std::make_unique<juce::ARAHostModel::AudioModification> (hostRef<ARA::ARAAudioModificationHostRef> (&voice), dc, *audioSource, am);
+            modificationRefs.resize ((size_t) modificationCount);
+            regionRefs.resize ((size_t) modificationCount);
+            for (int i = 0; i < modificationCount; ++i)
+            {
+                auto am = juce::ARAHostModel::AudioModification::getEmptyProperties();
+                const auto modificationName = "Vocal take " + juce::String (i + 1);
+                am.name = modificationName.toRawUTF8();
+                const auto persistentID = i == 0 ? juce::String ("hostcheck-modification")
+                                                  : juce::String ("hostcheck-modification-") + juce::String (i + 1);
+                am.persistentID = persistentID.toRawUTF8();
+                audioModifications.push_back (std::make_unique<juce::ARAHostModel::AudioModification> (
+                    hostRef<ARA::ARAAudioModificationHostRef> (&modificationRefs[(size_t) i]), dc, *audioSource, am));
 
-            auto pr = juce::ARAHostModel::PlaybackRegion::getEmptyProperties();
-            pr.transformationFlags = ARA::kARAPlaybackTransformationNoChanges;
-            pr.startInModificationTime = 0.0;
-            pr.durationInModificationTime = duration;
-            pr.startInPlaybackTime = 2.0;
-            pr.durationInPlaybackTime = duration;
-            pr.musicalContextRef = musicalContext->getPluginRef();
-            pr.regionSequenceRef = regionSequence->getPluginRef();
-            pr.name = "Vocal take";
-            playbackRegion = std::make_unique<juce::ARAHostModel::PlaybackRegion> (hostRef<ARA::ARAPlaybackRegionHostRef> (&voice), dc, *audioModification, pr);
+                auto pr = juce::ARAHostModel::PlaybackRegion::getEmptyProperties();
+                pr.transformationFlags = ARA::kARAPlaybackTransformationNoChanges;
+                pr.startInModificationTime = 0.0;
+                pr.durationInModificationTime = duration;
+                pr.startInPlaybackTime = 2.0 + i * 5.1;
+                pr.durationInPlaybackTime = duration;
+                pr.musicalContextRef = musicalContext->getPluginRef();
+                pr.regionSequenceRef = regionSequences[(size_t) (i % sequenceCount)]->getPluginRef();
+                const auto regionName = "Vocal take " + juce::String (i + 1);
+                pr.name = regionName.toRawUTF8();
+                playbackRegions.push_back (std::make_unique<juce::ARAHostModel::PlaybackRegion> (
+                    hostRef<ARA::ARAPlaybackRegionHostRef> (&regionRefs[(size_t) i]), dc, *audioModifications.back(), pr));
+            }
         }
 
         audioSource->enableAudioSourceSamplesAccess (true);
-        report ("document: 1 source (" + juce::String (duration, 2) + " s, " + juce::String (voice.rate) + " Hz), 1 modification, 1 region at 2.0 s");
+        report ("document: 1 source (" + juce::String (duration, 2) + " s, " + juce::String (voice.rate)
+                + " Hz), " + juce::String (modificationCount) + " modifications/regions across "
+                + juce::String (2.0 + (modificationCount - 1) * 5.1 + duration, 2) + " song seconds");
 
         const auto roles = ARA::kARAPlaybackRendererRole | ARA::kARAEditorRendererRole | ARA::kARAEditorViewRole;
         extension = document->bindDocumentToPluginInstance (*instance, roles, roles);
@@ -235,7 +266,8 @@ private:
 
         // DAW と同じく、描画の役は再生のリージョンを持たせて準備する（エディタは描画しなくても開ける）。
         playbackRenderer = extension.getPlaybackRendererInterface();   // 持っている間だけ登録が続く（RAII）
-        playbackRenderer.add (*playbackRegion);
+        for (const auto& region : playbackRegions)
+            playbackRenderer.add (*region);
         instance->setPlayConfigDetails (0, 1, voice.rate, 512);
         instance->prepareToPlay (voice.rate, 512);
 
@@ -252,6 +284,7 @@ private:
     //==============================================================================
     void timerCallback() override
     {
+        if (auditionStarted) return tickAudition();
         juce::String log;
 
         for (const auto& file : traceDir.findChildFiles (juce::File::findFiles, false, "gliss-ara-*.log"))
@@ -293,17 +326,94 @@ private:
 
         report ("engine calls that failed (reported, not checked): " + (failedCalls.isEmpty() ? juce::String ("none") : failedCalls.joinIntoString (" | ")));
         report ("waited " + juce::String (elapsed) + " ms");
-        finish();
+        if (measureAudition && all) startAudition();
+        else finish();
+    }
+
+    void startAudition()
+    {
+        auditionStarted = true;
+        report ("audition ready for external pointer input");
+        startTimer (10);
+    }
+
+    juce::File auditionSignal (const juce::String& name) const
+    {
+        return traceDir.getChildFile (name + (auditionIndex == 0 ? juce::String()
+            : "-" + juce::String (auditionIndex + 1)) + ".signal");
+    }
+
+    void tickAudition()
+    {
+        const auto now = juce::Time::getMillisecondCounter();
+        if (auditionStart == 0 && auditionSignal ("audition-down").existsAsFile())
+        {
+            auditionStart = now;
+            report ("audition down signal ms=" + juce::String (now));
+        }
+        auditionOutput.clear();
+        auditionMidi.clear();
+        instance->processBlock (auditionOutput, auditionMidi);
+        float peak = auditionOutput.getMagnitude (0, auditionOutput.getNumSamples());
+        if (auditionStart != 0 && firstNonzero == 0 && peak > 1.0e-6f)
+        {
+            firstNonzero = now;
+            const auto heardWall = juce::Time::currentTimeMillis();
+            const auto sentWall = auditionSignal ("audition-down").getLastModificationTime().toMilliseconds();
+            const auto ack = auditionSignal ("audition-down-ack");
+            const auto upperMs = heardWall - sentWall;
+            report ("audition first nonzero: " + juce::String ((int) (now - auditionStart))
+                    + " ms peak=" + juce::String (peak, 7)
+                    + " signal-created upper-bound-ms=" + juce::String (upperMs)
+                    + (ack.existsAsFile() ? " press-ack lower-bound-ms="
+                        + juce::String (heardWall - ack.getLastModificationTime().toMilliseconds()) : juce::String()));
+            check (upperMs >= 0 && upperMs <= 500, "synthetic audition first output within 500 ms of pre-press marker");
+        }
+        if (auditionStop == 0 && auditionSignal ("audition-up").existsAsFile())
+        {
+            auditionStop = now;
+            report ("audition up signal ms=" + juce::String (now));
+        }
+        if (firstNonzero != 0 && auditionStop != 0 && peak <= 1.0e-6f && now - auditionStop > 20)
+        {
+            check (true, "audition output stops after pointerup");
+            report ("audition stop zero: " + juce::String ((int) (now - auditionStop)) + " ms");
+            if (++auditionIndex < auditionCount)
+            {
+                auditionStart = firstNonzero = auditionStop = 0;
+                report ("audition ready for next pointer input");
+            }
+            else
+            {
+                stopTimer();
+                finish();
+            }
+        }
+        else if (now - waitStart > (juce::uint32) timeoutMs)
+        {
+            check (false, "audition output became nonzero and then stopped");
+            stopTimer();
+            finish();
+        }
     }
 
     void finish()
     {
         // DAW と同じく、エディタを閉じてもメッセージループを回し、少し待ってからインスタンス → モデル → ドキュメントの順に手放す
+        const auto editorWasOpen = editor != nullptr;
         window.reset();
         editor.reset();
 
-        juce::Timer::callAfterDelay (1500, [this]
+        juce::Timer::callAfterDelay (1500, [this, editorWasOpen]
         {
+            if (editorWasOpen)
+            {
+                juce::String trace;
+                for (const auto& file : traceDir.findChildFiles (juce::File::findFiles, false, "gliss-ara-*.log"))
+                    trace << file.loadFileAsString();
+                check (document != nullptr && trace.contains ("editor: preview stopped on close"),
+                       "native editor close stops preview while the ARA document remains");
+            }
             releaseAll();
             report ("teardown: document released");
 
@@ -323,10 +433,10 @@ private:
         playbackRenderer = {};   // インスタンスを準備していない間に外す
         extension = {};
         instance.reset();
-        playbackRegion.reset();
-        audioModification.reset();
+        playbackRegions.clear();
+        audioModifications.clear();
         audioSource.reset();
-        regionSequence.reset();
+        regionSequences.clear();
         musicalContext.reset();
         document.reset();
         factory = {};
@@ -357,6 +467,13 @@ private:
     Check check;
     juce::File plugin, traceDir;
     int timeoutMs = 120000;
+    bool measureAudition = false, auditionStarted = false;
+    int modificationCount = 1;
+    int voiceSeconds = 6;
+    int auditionCount = 1, auditionIndex = 0;
+    juce::uint32 auditionStart = 0, firstNonzero = 0, auditionStop = 0;
+    juce::AudioBuffer<float> auditionOutput { 1, 512 };
+    juce::MidiBuffer auditionMidi;
     std::function<void()> onFinished;
     Voice voice;
 
@@ -365,10 +482,12 @@ private:
     juce::ARAFactoryWrapper factory;
     std::unique_ptr<juce::ARAHostDocumentController> document;
     std::unique_ptr<juce::ARAHostModel::MusicalContext> musicalContext;
-    std::unique_ptr<juce::ARAHostModel::RegionSequence> regionSequence;
+    int sequenceRefs[2] {};
+    std::vector<int> modificationRefs, regionRefs;
+    std::vector<std::unique_ptr<juce::ARAHostModel::RegionSequence>> regionSequences;
     std::unique_ptr<juce::ARAHostModel::AudioSource> audioSource;
-    std::unique_ptr<juce::ARAHostModel::AudioModification> audioModification;
-    std::unique_ptr<juce::ARAHostModel::PlaybackRegion> playbackRegion;
+    std::vector<std::unique_ptr<juce::ARAHostModel::AudioModification>> audioModifications;
+    std::vector<std::unique_ptr<juce::ARAHostModel::PlaybackRegion>> playbackRegions;
     juce::ARAHostModel::PlugInExtensionInstance extension;
     juce::ARAHostModel::PlaybackRendererInterface playbackRenderer;
     std::unique_ptr<juce::AudioProcessorEditor> editor;

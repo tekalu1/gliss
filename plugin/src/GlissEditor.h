@@ -23,6 +23,8 @@ public:
 
     void paint (juce::Graphics&) override;
     void resized() override;
+    void visibilityChanged() override;
+    void parentHierarchyChanged() override;
 
     juce::AudioProcessorEditorARAExtension* getARAClientExtensions() override { return this; }
 
@@ -33,7 +35,10 @@ private:
     // ARAEditorView::Listener
     void onNewSelection (const juce::ARAViewSelection& selection) override;
 
+    void reportVisibility();
+
     DocumentBridge* bridge = nullptr;
+    bool reportedShowing = false;   // ドキュメントに最後に知らせた「見えている」
     std::unique_ptr<editor::EditorWebView> webView;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (GlissEditor)

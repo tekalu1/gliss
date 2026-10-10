@@ -211,7 +211,7 @@ test('(U3) 1 曲 1 本の履歴: 別のトラックの操作を戻すと、そ�
   await showRange(2.2, 3.5);
 });
 
-test('(U4) トラックの名前・ガイドの指定も戻せる、ミュート／ソロは履歴に入らない', async () => {
+test('(U4) トラックの名前・ガイド・ミュートを順に戻せる', async () => {
   const [t1, t2] = (await win.evaluate(() => window.__app.tracks())).map((t) => t.id);
   const tr = async (id) => (await win.evaluate(() => window.__app.tracks())).find((t) => t.id === id);
   const name0 = (await tr(t2)).name;
@@ -224,11 +224,11 @@ test('(U4) トラックの名前・ガイドの指定も戻せる、ミュート
   await settle();
   expect((await tr(t2)).name).toBe('ガイドの声');
   expect((await hist()).undo.label).toBe('トラックの名前');
-  // ミュートは履歴に入らない（Ctrl+Z は名前に届く）
+  // 単体版のミュートも履歴に入る
   await win.locator(`#heads .th[data-id="${t2}"] button[data-act="m"]`).click();
   await settle();
   expect((await tr(t2)).mute).toBe(true);
-  expect((await hist()).undo.label).toBe('トラックの名前');
+  await expect.poll(async () => (await hist()).undo.label).toBe('トラックのミュート');
   // ガイドを外す → 戻す
   await win.locator(`#heads .th[data-id="${t2}"] button[data-act="guide"]`).click();
   await settle();
@@ -238,13 +238,17 @@ test('(U4) トラックの名前・ガイドの指定も戻せる、ミュート
   await win.keyboard.press('Control+z');
   await settle();
   expect((await tr(t2)).guide).toBe(true);
+  expect((await hist()).undo.label).toBe('トラックのミュート');
   // ガイドの指定を戻すと、操作したトラック（t2）が編集対象になる（何が戻ったか見える）
   expect(await current()).toBe(t2);
   await win.keyboard.press('Control+z');
   await settle();
+  expect((await tr(t2)).mute).toBe(false);
+  expect((await tr(t2)).name).toBe('ガイドの声');
+  await win.keyboard.press('Control+z');
+  await settle();
   expect((await tr(t2)).name).toBe(name0);
-  expect((await tr(t2)).mute).toBe(true);                    // ミュートは今のまま
-  await win.locator(`#heads .th[data-id="${t2}"] button[data-act="m"]`).click();
+  expect((await tr(t2)).mute).toBe(false);
   await win.evaluate((id) => window.__app.selectTrack(id), t1);
   await settle();
   await showRange(2.2, 3.5);

@@ -54,6 +54,7 @@ const LABELS = {
   import_lyrics: '譜面と照合している…', set_tempo: 'テンポを反映している…', set_track: 'トラックを変えている…',
   split_track: 'クリップを分けている…', join_track: 'クリップをつないでいる…', mute_track_range: '部分を反映している…',
   add_track: 'トラックを足している…', remove_track: 'トラックを外している…', set_guide_track: 'ガイドを変えている…',
+  set_track_guide: 'ガイドを変えている…',
   select_track: 'トラックを切り替えている…', save_project: '保存している…', undo: '元に戻している…', redo: 'やり直している…',
   render_tracks: '再生の音を作っている…', export_wav: '書き出している…',
 };
@@ -178,10 +179,10 @@ export function analyzed(r) { analyzedHook?.(r); }
  * hold（`laterBusy()`）を渡すと、終わった後もそのまま（描き直してから呼び出し側が finish する）。
  * 渡さなければ label・target で作り、ここで終わらせる。cancel: false で取り消しを出さない。 */
 export async function analyzeTake({ hold = null, label = 'トラックを準備している', target = '', cancel = false,
-  onProgress = null } = {}) {
+  onProgress = null, background = true } = {}) {
   const h = hold || laterBusy({ label, target });
   try {
-    const r = await callJob('analyze_take', { background: true }, onProgress,
+    const r = await callJob('analyze_take', { background }, onProgress,
       { busy: h, stage: 'トラックの解析', cancel });
     S.awaitPrep = null;              // 解析が済んだ: 待つのをやめて空にしていた表示を描いてよい
     analyzed(r);
@@ -198,6 +199,9 @@ export async function analyzeTake({ hold = null, label = 'トラックを準備�
 export async function viewData(range) {
   const r = await call('export_view_data', range || {});
   const vd = await window.api.readJson(r.path);
+  // The view file name also includes export range arguments; the unqualified
+  // revision is returned explicitly by both export_view_data and render_audition.
+  vd.view_rev = r.view_rev || null;
   // 曲の取り消しの履歴（セッション。issue #16）は結果に付いてくる。プロジェクトの changeset の一覧はそのまま
   if (r.history) vd.history = { ...(vd.history || {}), ...r.history };
   // 書き出しの既定のパスは結果の値が今のもの（描画データは前に作ったものを使い回すことがある。issue #63）

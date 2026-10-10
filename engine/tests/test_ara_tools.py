@@ -250,6 +250,27 @@ def test_render_dirty_per_edit_matches_the_full_render(ara, tmp_path):
     assert revs["revs"]["mod-A"] == c.rev and revs["track_ids"]["mod-A"] == tid
 
 
+def test_zero_cent_audition_reads_the_ara_pcm_after_noop_sync(ara, tmp_path):
+    m, a = ara
+    src = _wav(tmp_path / "src" / "a.wav", _voice(stereo=True))
+    _open(a)
+    tid = _add(a, "mod-A", src)["track"]["id"]
+    notes = _select_and_analyze(m, tid)
+    _ok(m.shift_pitch(150, note_id=notes[0]))
+    c = Cache(src)
+    first = c.sync(a, "mod-A")
+    assert first["path"] and first["windows"]
+    again = c.sync(a, "mod-A")
+    assert again["path"] is None and not again["windows"]
+    r = _ok(m.render_audition(note_id=notes[0]))
+    assert r["timing_sec"]["ara_pcm_reused"]
+    note = m._state["project"].note(notes[0])
+    ia, ib = round(note.start_sec * SR), round(note.end_sec * SR)
+    got = sf.read(r["path"], dtype="float32")[0]
+    expected = c.buf[ia:ib].mean(axis=1).astype("float32")
+    np.testing.assert_array_equal(got, expected)
+
+
 def test_render_dirty_of_a_track_that_is_not_being_edited(ara, tmp_path):
     """編集対象でないトラックも、編集対象を変えずに音を作れる（ディスクのプロジェクトを読む）。"""
     m, a = ara

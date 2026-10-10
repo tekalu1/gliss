@@ -21,4 +21,10 @@ int forcedReadTimeoutMs();
 /** traceEnabled() のときだけ 1 行を追記する。どのスレッドからでもよいが、オーディオスレッドでは呼ばない。 */
 void log (const juce::String& line);
 
+/** 常に書く小さなログ（DAW の選択の判断など、実機で何が起きたかを後から調べるための行）。%APPDATA%\Gliss\plugin.log
+    （GLISS_PLUGIN_STATE_FILE があればその隣。GLISS_PLUGIN_LOG_FILE で直接指定。1 MB を超えたら plugin.log.1 に回す）。
+    同じ行が 2 秒以内に続いたら省き、1 秒に 20 行までにする。GLISS_ARA_TRACE_DIR が有効ならそちらにも書く。
+    どのスレッドからでもよいが、オーディオスレッドでは呼ばない。 */
+void logAlways (const juce::String& line);
+
 } // namespace gliss::diag

@@ -3,6 +3,8 @@
 //   GlissHostCheck <結果を書くファイル> <Gliss.vst3 のバイナリ> [<GLISS_ARA_TRACE_DIR と同じフォルダ、または ->] [--no-editor]
 //   GlissHostCheck --editor <結果を書くファイル> [--expect-web-dir] [--cycles <回数>]
 //   GlissHostCheck --ara-editor <結果を書くファイル> <Gliss.vst3 のバイナリ> <GLISS_ARA_TRACE_DIR と同じフォルダ> [--timeout <秒>]
+//   GlissHostCheck --ara-playback <結果を書くファイル> <Gliss.vst3 のバイナリ> <GLISS_PLUGIN_LOG_FILE と同じファイル> [--timeout <秒>]
+//   GlissHostCheck --ara-preview <結果を書くファイル> <Gliss.vst3 のバイナリ> <GLISS_TEST_BRIDGE_DIR と同じフォルダ> <GLISS_ARA_TRACE_DIR と同じフォルダ>
 //
 // 確かめること:
 //   1. VST3 として見つかり、PluginDescription が ARA の拡張を持つと言う
@@ -14,8 +16,15 @@
 // 確かめる（EditorCheck.h の冒頭）。
 // --ara-editor は JUCE の ARA ホストで Gliss.vst3 に本物のドキュメントを作り、エディタの役で結び付けて画面を開き、
 // 本物のエンジンまで engineCall が通ることを確かめる（AraEditorCheck.h の冒頭）。
+// --ara-playback は同じく ARA のドキュメントを作り、再生の役で準備した後に起きる変化（サンプルへのアクセスの切り替え・内容の更新・リージョンの追加）の
+// あとも原音が鳴り続けることを確かめる（AraPlaybackCheck.h の冒頭。エンジンは GLISS_ENGINE_DISABLED=1 で止めて呼ぶ）。
+// --ara-preview は 2 つのインスタンスを同じドキュメントに結び付け、試聴を求めたインスタンスの EditorRenderer だけが試聴の音を足すことを確かめる
+// （AraPreviewCheck.h の冒頭。GLISS_TEST_HOOKS のビルドと GLISS_TEST_BRIDGE_DIR が要る）。--ara-preview-playback は、EditorRenderer にリージョンを
+// 割り当てないホスト（Studio Pro）の変種で、リージョンを持つ PlaybackRenderer のインスタンスから鳴ることを確かめる。
 // 窓は画面の外に置き、SW_SHOWNA（前面にも入力の対象にもならない）で出す。結果は 0（全部通った）か 1 で返す。
 #include "AraEditorCheck.h"
+#include "AraPlaybackCheck.h"
+#include "AraPreviewCheck.h"
 #include "EditorCheck.h"
 
 #include <juce_audio_processors/juce_audio_processors.h>
@@ -61,14 +70,23 @@ public:
         if (args.size() >= 2 && args[0] == "--editor")
             return runEditorCheck (args);
 
-        if (args.size() >= 4 && args[0] == "--ara-editor")
+        if (args.size() >= 5 && (args[0] == "--ara-preview" || args[0] == "--ara-preview-playback"))
+            return runAraPreviewCheck (args);
+
+        if (args.size() >= 4 && args[0] == "--ara-playback")
+            return runAraPlaybackCheck (args);
+
+        if (args.size() >= 4 && (args[0] == "--ara-editor" || args[0] == "--ara-audition"))
             return runAraEditorCheck (args);
 
         if (args.size() < 2)
         {
             std::fprintf (stderr, "usage: GlissHostCheck <report file> <Gliss.vst3> [<trace dir> or -] [--no-editor]\n"
                                   "       GlissHostCheck --editor <report file> [--expect-web-dir] [--cycles <n>]\n"
-                                  "       GlissHostCheck --ara-editor <report file> <Gliss.vst3> <trace dir> [--timeout <s>]\n");
+                                  "       GlissHostCheck --ara-editor <report file> <Gliss.vst3> <trace dir> [--timeout <s>]\n"
+                                  "       GlissHostCheck --ara-playback <report file> <Gliss.vst3> <plugin log file> [--timeout <s>]\n"
+                                  "       GlissHostCheck --ara-preview <report file> <Gliss.vst3> <test bridge dir> <trace dir>\n"
+                                  "       GlissHostCheck --ara-preview-playback <report file> <Gliss.vst3> <test bridge dir> <trace dir>\n");
             setApplicationReturnValue (2);
             quit();
             return;
@@ -143,10 +161,17 @@ private:
 
         const auto timeoutIndex = args.indexOf ("--timeout");
         const auto timeoutSec = timeoutIndex >= 0 ? args[timeoutIndex + 1].getIntValue() : 180;
+        const auto modsIndex = args.indexOf ("--mods");
+        const auto mods = modsIndex >= 0 ? args[modsIndex + 1].getIntValue() : 1;
+        const auto voiceIndex = args.indexOf ("--voice-sec");
+        const auto voiceSec = voiceIndex >= 0 ? args[voiceIndex + 1].getIntValue() : 6;
+        const auto auditionsIndex = args.indexOf ("--auditions");
+        const auto auditions = auditionsIndex >= 0 ? args[auditionsIndex + 1].getIntValue() : 1;
 
         araEditorCheck = std::make_unique<AraEditorCheck> ([this] (const juce::String& line) { report (line); },
                                                            [this] (bool ok, const juce::String& what) { return check (ok, what); },
-                                                           juce::File (args[2]), juce::File (args[3]), timeoutSec);
+                                                           juce::File (args[2]), juce::File (args[3]), timeoutSec,
+                                                           args[0] == "--ara-audition", mods, voiceSec, auditions);
         araEditorCheck->start ([this]
         {
             report (failures == 0 ? "RESULT OK" : "RESULT FAILED (" + juce::String (failures) + ")");
@@ -155,6 +180,54 @@ private:
             juce::Timer::callAfterDelay (teardownWaitMs, [this]
             {
                 araEditorCheck.reset();
+                report ("teardown: quit");
+                quit();
+            });
+        });
+    }
+
+    void runAraPlaybackCheck (const juce::StringArray& args)
+    {
+        reportFile = juce::File (args[1]);
+        reportFile.deleteFile();
+
+        const auto timeoutIndex = args.indexOf ("--timeout");
+        const auto timeoutSec = timeoutIndex >= 0 ? args[timeoutIndex + 1].getIntValue() : 4;
+
+        araPlaybackCheck = std::make_unique<AraPlaybackCheck> ([this] (const juce::String& line) { report (line); },
+                                                              [this] (bool ok, const juce::String& what) { return check (ok, what); },
+                                                              juce::File (args[2]), juce::File (args[3]), timeoutSec);
+        araPlaybackCheck->start ([this]
+        {
+            report (failures == 0 ? "RESULT OK" : "RESULT FAILED (" + juce::String (failures) + ")");
+            setApplicationReturnValue (failures == 0 ? 0 : 1);
+
+            juce::Timer::callAfterDelay (teardownWaitMs, [this]
+            {
+                araPlaybackCheck.reset();
+                report ("teardown: quit");
+                quit();
+            });
+        });
+    }
+
+    void runAraPreviewCheck (const juce::StringArray& args)
+    {
+        reportFile = juce::File (args[1]);
+        reportFile.deleteFile();
+
+        araPreviewCheck = std::make_unique<AraPreviewCheck> ([this] (const juce::String& line) { report (line); },
+                                                            [this] (bool ok, const juce::String& what) { return check (ok, what); },
+                                                            juce::File (args[2]), juce::File (args[3]), juce::File (args[4]),
+                                                            args[0] == "--ara-preview-playback");
+        araPreviewCheck->start ([this]
+        {
+            report (failures == 0 ? "RESULT OK" : "RESULT FAILED (" + juce::String (failures) + ")");
+            setApplicationReturnValue (failures == 0 ? 0 : 1);
+
+            juce::Timer::callAfterDelay (teardownWaitMs, [this]
+            {
+                araPreviewCheck.reset();
                 report ("teardown: quit");
                 quit();
             });
@@ -321,6 +394,8 @@ private:
     std::unique_ptr<OffscreenWindow> window;
     std::unique_ptr<EditorCheck> editorCheck;
     std::unique_ptr<AraEditorCheck> araEditorCheck;
+    std::unique_ptr<AraPlaybackCheck> araPlaybackCheck;
+    std::unique_ptr<AraPreviewCheck> araPreviewCheck;
 
     juce::File reportFile, traceDir;
     juce::String pluginPath;

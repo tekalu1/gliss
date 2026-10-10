@@ -176,7 +176,7 @@ def track_sig(s, t):
         g = None
     if g is not None:
         c = M.as_clip(g)
-        gt = s.track(s.guide)
+        gt = s.track(s.effective_guide_id(t))
         gd = [_norm(c.source), gt.get("sha256"), int(c.offset_frames or 0), c.length_frames,
               bool(c.pad)]
     d = [PREP_VERSION, _norm(t["path"]), t.get("sha256"), t.get("clip"), t.get("source_id"), gd,
@@ -185,7 +185,8 @@ def track_sig(s, t):
     pref = s.estimator_of(t)
     est = F0.resolve_estimator(pref, recorded=None if pref else _store.recorded_estimator_in(s.project_dir_of(t)))
     if est != "rmvpe":
-        d.append([est, F0.estimator_version(est)])   # ピッチ検出の方式（RMVPE は前と同じ署名のまま）
+        version = (_store.recorded_gliss_version_in(s.project_dir_of(t)) if est == "gliss" else None)
+        d.append([est, version or F0.estimator_version(est)])   # 旧解析は旧版の署名を維持する
     return hashlib.sha1(json.dumps(d, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:16]
 
 
@@ -340,6 +341,8 @@ def _remove_invalid_caches(pdir, sig):
                 try:
                     data = read_json(path)
                     name = os.path.basename(path)
+                    if os.path.basename(os.path.dirname(path)) == "phonemes":
+                        name = "phonemes/" + name    # 鍵付きの音素（cache/phonemes/take-<鍵>.json）
                     if isinstance(data, dict) and (
                             (name.endswith("-analysis.json") and "f0" in data and "notes" in data)
                             or (name == "onsets.json" or name.startswith("onsets-"))
@@ -510,7 +513,7 @@ class Preparer:
         self._sdir = None
         self._items = {}                # トラック id → _Item（今の組み合わせのもの）
         self._order = []                # セッションの並び順
-        self._guide = None
+        self._guides = frozenset()      # ガイドとして使われているトラック id（先に準備する）
         self._current = None
         self._recent = []               # 最近選んだトラック（前ほど新しい）
         self._running = None
@@ -571,7 +574,7 @@ class Preparer:
         for tid, it in self._items.items():
             if tid not in want:
                 it.cancelled = True
-        self._items, self._order, self._guide = want, order, s.guide
+        self._items, self._order, self._guides = want, order, frozenset(s.guide_users())
         self._cv.notify_all()
 
     @staticmethod
@@ -588,7 +591,8 @@ class Preparer:
             for it in self._items.values():
                 it.cancelled = True
             self._items, self._order, self._recent = {}, [], []
-            self._sdir = self._current = self._guide = None
+            self._sdir = self._current = None
+            self._guides = frozenset()
             self._cv.notify_all()
 
     def release_tree(self, root, timeout=None):
@@ -607,7 +611,8 @@ class Preparer:
                 for it in self._items.values():
                     it.cancelled = True
                 self._items, self._order, self._recent = {}, [], []
-                self._sdir = self._current = self._guide = None
+                self._sdir = self._current = None
+                self._guides = frozenset()
             else:
                 for tid, it in list(self._items.items()):
                     if under(it.pdir):
@@ -914,7 +919,7 @@ class Preparer:
                 return (0, 0)
             if it.tid == self._current:
                 return (1, 0)
-            if it.tid == self._guide:
+            if it.tid in self._guides:
                 return (2, 0)
             if it.tid in self._recent:
                 return (3, self._recent.index(it.tid))

@@ -46,8 +46,9 @@ from . import prep
 from .audio import file_sig
 from .project import Project, ProjectError
 from .project import document as D
-from .project.session import Session, SessionError, norm_tempo
+from .project.session import Session, SessionError, norm_tempo, set_guide_id
 from .project import transfer as _tr
+from .project.model import RENDER_VERSION
 from .project.store import ARCHIVE_FORMAT, dir_lock
 
 _ok = _srv._ok
@@ -57,6 +58,7 @@ OUT_DIR = "ara-out"             # 差分の再合成の PCM（.f32）の置き�
 KEEP_OUT = 4                    # 修飾ごとに残す .f32 の数（プラグインが読み終える前に消さない）
 RENDERERS_MAX = 4               # 下ごしらえ（RegionRenderer）を持っておく修飾の数（LRU）
 DEFAULT_MAX_SEC = 10.0          # ara_render_dirty が 1 回で再合成する窓の長さの上限（秒）
+TEST_DELAY_ENV = "GLISS_TEST_RENDER_DELAY_SEC"   # 試験用: ara_render_dirty が窓を作る呼び出しの前に待つ秒
 EMPTY_REV = "empty"             # プロジェクト（project.json）がまだ無い修飾の版
 NOTE_FLOOR_DB = -60.0           # ara_notes の音量: この dB を 0、0 dB を 1 にする（ARA の volume は dB に近い尺度）
 # アーカイブの素材の参照に入れるキー（`Project.to_archive` の ref と同じ）
@@ -106,7 +108,54 @@ def _row(s, t):
             "offset_sec": t["offset_sec"], "duration_sec": t["duration_sec"], "sr": t["sr"],
             "channels": t["channels"], "source_frames": t["source_frames"],
             "source_id": t.get("source_id"), "path": t["path"], "project_dir": s.project_dir_of(t),
-            "current": t["id"] == _mt.current_track_id(), "guide": t["id"] == s.guide}
+            "current": t["id"] == _mt.current_track_id(), "guide": t["id"] == s.guide,
+            "guide_id": t.get("guide_id"), "effective_guide_id": s.effective_guide_id(t)}
+
+
+def _guides_of(s):
+    """トラックごとのガイド（`set_track_guide`）→ {修飾の ara_id: ガイドの修飾の ara_id}（DAW の文書の外のトラックは入れない）。"""
+    out = {}
+    tracks = list(s.tracks)
+    for t in tracks:
+        gid = t.get("guide_id")
+        if not t.get("ara_id") or not gid:
+            continue
+        g = next((x for x in tracks if x["id"] == gid), None)
+        if g is not None and g.get("ara_id"):
+            out[t["ara_id"]] = g["ara_id"]
+    return out
+
+
+def _guide_records(s, t):
+    """外すトラック t のガイドの指定（本人の `guide_id` と、t を指していた指定）。`ara_gone` に控えて、足し直しで戻す。"""
+    rec = {}
+    if t.get("guide_id"):
+        rec["guide_id"] = t["guide_id"]
+    refs = [x["id"] for x in s.tracks if x.get("guide_id") == t["id"]]
+    if refs:
+        rec["guide_refs"] = refs
+    return rec
+
+
+def _restore_guides(s, t, gone):
+    """足し直したトラック t のガイドの指定を戻す（DAW の取り消し）。相手がまだ戻っていない組は
+    `s.ara_guide_wait`（トラック id → ガイドのトラック id）に預け、相手が戻ったときに当てる。
+    今のトラックに別の指定が入っていれば上書きしない。"""
+    wait = s.ara_guide_wait
+    pairs = []
+    if gone.get("guide_id"):
+        pairs.append((t["id"], gone["guide_id"]))
+    pairs.extend((r, t["id"]) for r in gone.get("guide_refs") or [])
+    pairs.extend(wait.items())
+    by_id = {x["id"]: x for x in s.tracks}
+    for src, dst in pairs:
+        a, b = by_id.get(src), by_id.get(dst)
+        if a is None or b is None:
+            wait[src] = dst                      # 相手がまだ戻っていない
+            continue
+        wait.pop(src, None)
+        if a["kind"] == "vocal" and b["kind"] == "vocal" and src != dst and not a.get("guide_id"):
+            set_guide_id(a, dst)
 
 
 def _audio_sha(path):
@@ -247,12 +296,14 @@ def _archive_of(t, pdir):
     q = Project(pdir).load()
     take = q.take
     q.take = q.guide = None
+    # 明示方式を先に反映し、方式名とモデル版を同じ解析先から作る。
+    # 後から方式名だけ上書きすると、解析待ちの保存で Gliss 版が null になる。
+    q.estimator_pref = t.get("estimator")
     arc = q.to_archive()
     known = t.get("ara_audio_sha") if take and take.get("sha256") == t.get("sha256") else None
     arc["take"] = _ref(take, known)
     arc["guide"] = None
     (arc.get("lyrics") or {}).pop("guide", None)
-    arc["f0_estimator"] = t.get("estimator") or arc.get("f0_estimator")     # トラックで明示した方式 → 前に解析した方式
     return arc
 
 
@@ -272,7 +323,7 @@ def _mismatch(t, archive):
     return "音の中身が違う（DAW の音が変わったので編集を当てない）"
 
 
-def _restore_into(s, t, archive):
+def _restore_into(s, t, archive, forget_history=True):
     """アーカイブをトラックのプロジェクトに戻す（素材は照合済み）。戻した Project。"""
     pdir = s.project_dir_of(t)
     arc = copy.deepcopy(archive)
@@ -282,7 +333,8 @@ def _restore_into(s, t, archive):
                   source_id=t.get("source_id"))
     with dir_lock(pdir):
         p = Project.from_archive(arc, take=clip, project_dir=pdir, overwrite=True)
-    _forget_history(s, t["id"])
+    if forget_history:
+        _forget_history(s, t["id"])
     _mark_all(s, t["id"], p)
     return p
 
@@ -308,6 +360,7 @@ def _apply_estimator(s, t, est):
     if why:
         return None, why
     t["estimator"] = est
+    t.pop(_mt.EXPLICIT_KEY, None)               # アーカイブの方式（利用者の明示ではない）
     return est, None
 
 
@@ -315,7 +368,10 @@ def _fit_estimator(s, t, p):
     """ノートの ID に頼る編集の対象が、今の方式の解析に無いとき、全部の対象が見つかる方式を探してそのトラックの方式にする。
     方式の記録の無い（古い）アーカイブ・記録が別の方式になってしまったアーカイブ（開き直しで方式が外れたまま保存された曲）を
     救う。ノートの ID は解析の方式で変わるので、補正を作った方式でなければ編集が当たらない。今の方式で全部当たるなら何もしない。
-    探す（F0 の推定は方式ごとに数秒〜数十秒）のは、同じ組み合わせにつき 1 回だけ。見つかれば True（解析し直した）。"""
+    探す（F0 の推定は方式ごとに数秒〜数十秒）のは、同じ組み合わせにつき 1 回だけ。見つかれば True（解析し直した）。
+
+    利用者が明示した方式（`analyze_take(estimator=…)`・`set_f0_estimator(scope="current")`。トラックの
+    `estimator_explicit`）は戻さない。当たらない編集は、呼び出し元が missing として報告する（`_missing_error`）。"""
     from .analysis import f0 as F
     missing = sorted({nid for _e, nid in p._missing_note_targets()})
     if not missing:
@@ -325,6 +381,10 @@ def _fit_estimator(s, t, p):
     if key in _fit_tried:
         return False
     _fit_tried.add(key)
+    if t.get(_mt.EXPLICIT_KEY):
+        log.get().warning("修飾 %s: 編集の対象のノート %s が、利用者が明示した方式 %s の解析に無い（方式は戻さない）",
+                          t["ara_id"], ", ".join(missing[:5]), cur)
+        return False
     for cand in F.ESTIMATORS:
         if cand == cur or _estimator_problem(cand):
             continue
@@ -337,7 +397,7 @@ def _fit_estimator(s, t, p):
             continue
         log.get().warning("修飾 %s: 編集の対象のノート %s が方式 %s の解析に無い。全部当たる %s に替える",
                           t["ara_id"], ", ".join(missing[:5]), cur, cand)
-        _apply_estimator(s, t, cand)
+        _apply_estimator(s, t, cand)             # 方式探しで決めた方式（明示の印は付けない）
         p.estimator_pref = cand
         s.save()
         with prep.exclusive(p.dir):
@@ -351,9 +411,53 @@ def _fit_estimator(s, t, p):
     return False
 
 
+def _missing_error(t, p):
+    """ノートの ID に頼る編集の対象が今の解析に無い（方式探しでも揃わない・利用者が明示した方式）: 黙って
+    別のノートや無しで鳴らさず、どの編集が当たらないかを ProjectError で返す（再合成しない）。"""
+    lost = p._missing_note_targets()
+    if not lost:
+        return
+    ids = sorted({nid for _e, nid in lost})
+    raise ProjectError("修飾 %s: ノートの ID を対象にした編集 %d 件（%s）の対象のノート %s が、今の F0 の方式 %s の解析に無い"
+                       "（missing_note_targets）。方式を補正を作った方式に戻すか、その編集を外す"
+                       % (t.get("ara_id"), len(lost), ", ".join(e.id for e, _n in lost[:5]),
+                          ", ".join(ids[:5]), p.f0_estimator()))
+
+
 # ---------------------------------------------------------------- 版
+def _without_estimates(lyrics, guide=True):
+    """歌詞のうち利用者のもの（自動推定のまま手を入れていない区間を除く）。guide=False ならガイドの歌詞も除く。
+    自動推定の歌詞は解析が作る（曲を開いて解析し直しただけで足される）ので、編集の署名・保存の状態の署名に入れない。
+    推定に手を入れると origin が confirmed になるか confirmed_syllables が付く（`phoneme/lyrics.py`）。"""
+    out = {}
+    for k, v in (lyrics or {}).items():
+        if k == "guide" and not guide:
+            continue
+        keep = [e for e in v or [] if not (e.get("origin") == "estimated" and not e.get("confirmed_syllables"))]
+        if keep:
+            out[k] = keep
+    return out
+
+
+def _state_sig(t, p):
+    """保存（ARA のアーカイブ）に入る、利用者が変えた状態の署名。編集の changeset の列（取り消し・やり直しの印を含む）・
+    利用者の歌詞・トラックの F0 の方式（明示・アーカイブ・方式探しで決めたもの。session の estimator）とアーカイブに
+    書くその版（`Project.archived_f0_version`。古いアーカイブの版の印が最初の解析で外れても変わらない）・描画の版から決まる。
+    解析だけで変わるもの（自動推定の歌詞・解析の時刻・方式を決めていないトラックの解析の方式）は入れない
+    （曲を開いて解析しただけで「保存するものが変わった」にしない）。p はディスクから読んだ Project（無ければ None）。
+    プラグインはホストに知らせた署名と違えば、ホストに「保存するものが変わった」と知らせる（docs/ara-plugin.md）。"""
+    est = t.get("estimator")
+    data = [[c.to_json() for c in p.changesets] if p is not None else [],
+            _without_estimates(p.lyrics if p is not None else {}, guide=False),
+            est, p.archived_f0_version(est) if p is not None else None,
+            p.render_version if p is not None else RENDER_VERSION]
+    return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str)
+                        .encode("utf-8")).hexdigest()[:12]
+
+
 def _rev_parts(p):
-    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式・時刻・キャッシュのファイル）と、編集リスト・歌詞から決まる。
+    """(解析の署名, 編集の署名)。素材・解析（テイクの F0 の方式・時刻・キャッシュのファイル）・描画の版と、
+    編集リスト・利用者の歌詞（自動推定のままの区間は除く）から決まる。
 
     `analyzed_at` は秒の単位なので、同じ秒の解析し直しはキャッシュのファイルの署名（大きさ・更新時刻）で見分ける。"""
     tk = p.take or {}
@@ -366,18 +470,66 @@ def _rev_parts(p):
         except OSError:
             pass
     asig = hashlib.sha1(json.dumps([tk.get("sha256"), tk.get("offset_frames"), tk.get("frames"),
-                                    a.get("analyzed_at"), a.get("estimator"), cache],
+                                    a.get("analyzed_at"), a.get("estimator"), cache, getattr(p, "render_version", RENDER_VERSION)],
                                    sort_keys=True, default=str).encode("utf-8")).hexdigest()[:10]
-    erev = hashlib.sha1(json.dumps([[e.to_json() for e in p.edits], p.lyrics],
+    erev = hashlib.sha1(json.dumps([[e.to_json() for e in p.edits], _without_estimates(p.lyrics)],
                                    sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()[:10]
     return asig, erev
 
 
-def _disk_rev(s, t):
+_disk_cache = {}                # project.json のあるフォルダ → (project.json の署名, 方式, 解析のキャッシュのパス・署名, 結果)
+SETTLE_NS = 2_000_000_000       # 書いてからこれより経った project.json だけ、署名が同じなら読み直さない
+
+
+def _stat_sig(path):
+    """ファイルの (更新時刻・大きさ・inode)。無ければ（パスが無ければ）None。"""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino)
+
+
+def _disk_state(s, t):
+    """(版, 保存の状態の署名)。ディスクの project.json を読む（無ければ版は EMPTY_REV）。
+
+    プラグインが 1 秒ごとに全修飾の版を聞く（`ara_revs`）。読み直し（17 修飾・約 10 MB で 0.3 秒、Python の GIL を握る）を
+    毎回すると、エンジンの他のツール（試聴）が秒単位で待たされる。版と署名は project.json・F0 の方式・解析のキャッシュの
+    ファイルだけから決まる（`_rev_parts`・`_state_sig`）ので、その署名が前と同じなら前の結果を返す。
+    書いた直後（SETTLE_NS 以内）の署名は、同じ時刻の次の書き込みと区別できないので信用せず、毎回読む。"""
     pdir = s.project_dir_of(t)
-    if not os.path.exists(os.path.join(pdir, "project.json")):
-        return EMPTY_REV
-    return "%s:%s" % _rev_parts(Project(pdir).load())
+    pj = os.path.join(pdir, "project.json")
+    sig = _stat_sig(pj)
+    if sig is None:
+        return EMPTY_REV, _state_sig(t, None)
+    key, est = _norm(pdir), t.get("estimator")
+    hit = _disk_cache.get(key)
+    if hit is not None and hit[0] == sig and hit[1] == est and _stat_sig(hit[2]) == hit[3]:
+        return hit[4]
+    checked = time.time_ns()
+    p = Project(pdir).load()
+    result = "%s:%s" % _rev_parts(p), _state_sig(t, p)
+    cache = ((p.analysis or {}).get("take") or {}).get("cache")
+    cache_sig = _stat_sig(cache) if cache else None
+    settled = checked - sig[0] > SETTLE_NS and (cache_sig is None or checked - cache_sig[0] > SETTLE_NS)
+    if settled and _stat_sig(pj) == sig:
+        _disk_cache[key] = (sig, est, cache, cache_sig, result)
+    else:
+        _disk_cache.pop(key, None)
+    return result
+
+
+def _disk_rev(s, t):
+    return _disk_state(s, t)[0]
+
+
+def _guide_ara_id(s):
+    """共通のガイド（`set_guide_track`）の修飾の ara_id（無ければ None）。"""
+    if not s.guide:
+        return None
+    return next((t.get("ara_id") for t in list(s.tracks) if t["id"] == s.guide), None)
 
 
 # ---------------------------------------------------------------- 差分の再合成
@@ -409,6 +561,94 @@ def _renderer_for(ara_id, p, backend, channels, asig):
     while len(_renderers) > RENDERERS_MAX:
         _renderers.popitem(last=False)
     return rr
+
+
+def audition_renderer(ara_id, p, backend, asig):
+    """同じ素材・解析版ならARA再生のレンダラを試聴へ貸す（新たな全域準備を避ける）。"""
+    hit = _renderers.get(ara_id)
+    if hit is None:
+        return None
+    key, rr = hit
+    if key[0] != _norm(p.dir) or key[1] != (p.take or {}).get("sha256"):
+        return None
+    if key[2] != backend or key[4] != asig:
+        return None
+    _renderers.move_to_end(ara_id)
+    return rr
+
+
+def audition_segs(ara_id, p, backend, asig, rev):
+    """ARAの再生用に作った同じ版の Segment 列（無ければ None）。cents = 0 の試聴はこの列で再合成でき、編集の層を
+    作り直さなくて済む（編集が多い曲で 0.2 秒以上）。"""
+    st = _render.get(ara_id)
+    if (st is None or st.get("rev") != rev or st.get("asig") != asig
+            or st.get("backend") != backend or st.get("pending")
+            or st.get("project_dir") != _norm(p.dir)):
+        return None
+    return st.get("segs")
+
+
+def audition_region(ara_id, p, t0, t1, around=7.0):
+    """ピッチをドラッグしている間の試聴（cents ≠ 0）で層を当てる範囲（素材の秒）: 要求範囲 [t0, t1] の前後 around 秒。
+    再合成する窓は 5 秒を超えると要求範囲の近くに絞られる（`render.region._audition_window`）ので、窓が 5 秒以内でも
+    範囲の端（REGION_MARGIN_SEC）に触れない大きさにしてある。足りなければ `audition_segments_near` が省かずに作り直すので、
+    音は変わらない。"""
+    return max(0.0, float(t0) - around), float(t1) + around
+
+
+def audition_pcm(ara_id, p, backend, asig, rev, ia, ib):
+    """ARAへ渡した同じ版のPCMに要求範囲が丸ごとあれば、その部分を返す。"""
+    st = _render.get(ara_id)
+    if (st is None or st.get("rev") != rev or st.get("asig") != asig
+            or st.get("backend") != backend or st.get("pending")
+            or st.get("project_dir") != _norm(p.dir)):
+        return None
+    pcm = st.get("audition_pcm")
+    if (pcm is None or pcm["sr"] != int(p.take["sr"])
+            or pcm["source_frames"] != int(p.take["frames"])):
+        return None
+    channels = pcm["channels"]
+    for part in _pcm_parts(pcm):
+        for w in part["windows"]:
+            first = w["start_frame"]
+            last = first + w["frames"]
+            if not (first <= ia < ib <= last):
+                continue
+            offset = w["byte_offset"] + (ia - first) * channels * 4
+            length = (ib - ia) * channels * 4
+            try:
+                with open(part["path"], "rb") as f:
+                    f.seek(offset)
+                    raw = f.read(length)
+                if len(raw) != length:
+                    return None
+            except OSError:
+                return None
+            y = np.frombuffer(raw, dtype="<f4").reshape(-1, channels)
+            if channels > 1:
+                return y.mean(axis=1, dtype="float64"), (first, last)
+            return y[:, 0].copy(), (first, last)
+    return None
+
+
+def _pcm_parts(pcm):
+    """試聴に使える PCM のファイルの一覧 [{path, windows}]（新しいものが先）。ARA へ渡した再合成のファイルは、編集のたびに
+    変わった窓だけを持つので、変わっていない窓は前のファイルに残る（`parts`）。単一の {path, windows} の形も読む。"""
+    return pcm["parts"] if "parts" in pcm else [{"path": pcm["path"], "windows": pcm["windows"]}]
+
+
+def _kept_parts(previous, restore, sr, ch, n):
+    """前の PCM の一覧から、今回の再合成で書き直す範囲（restore: [[頭のフレーム, 長さ]]。保留の窓も入る）に掛からない窓を残す。
+    形式（周波数・チャンネル数・長さ）が違えば捨てる。"""
+    if not previous or previous["sr"] != int(sr) or previous["channels"] != int(ch) or previous["source_frames"] != int(n):
+        return []
+    kept = []
+    for part in _pcm_parts(previous):
+        ws = [w for w in part["windows"]
+              if not any(w["start_frame"] < r0 + rn and r0 < w["start_frame"] + w["frames"] for r0, rn in restore)]
+        if ws:
+            kept.append({"path": part["path"], "windows": ws})
+    return kept
 
 
 def _out_path(wd, ara_id):
@@ -513,6 +753,7 @@ def ara_set_modification(ara_id: str, source_path: str, source_id: str | None = 
     同じファイルの別の修飾も別のトラックになる。外した ara_id を足し直すと、前の id・前の編集のまま戻る。
     既存のトラックで素材のファイルが変わっても、音が同じなら編集はそのまま。音が変わったら source_changed = true
     （編集は残し、解析はやり直す）。編集対象が無ければこのトラックを編集対象にする（selected）。
+    rev・state: その時点の版と保存の状態の署名（ara_revs と同じ）。
     """
     if not ara_id:
         raise SessionError("ara_id が要る")
@@ -529,6 +770,7 @@ def ara_set_modification(ara_id: str, source_path: str, source_id: str | None = 
                         offset_sec=float(offset_sec or 0.0), project_dir="tracks/ara-%s" % _key(ara_id),
                         source_id=source_id or None, ara_id=ara_id, track_id=gone.get("id"))
         t["group"] = group
+        _restore_guides(s, t, gone)
         h = _audio_sha(path)
         t.update(ara_file_sig=_sig(path), ara_audio_sha=h)
         pj = os.path.join(s.project_dir_of(t), "project.json")
@@ -543,6 +785,7 @@ def ara_set_modification(ara_id: str, source_path: str, source_id: str | None = 
                 if arc is not None and _mismatch(t, arc) is None:
                     _restore_into(s, t, arc)
                     cloned = True
+                    set_guide_id(t, src.get("guide_id"))     # 複製は複製元のガイドも引き継ぐ
                 elif arc is not None:
                     log.get().warning("複製元 %s と素材が違うので編集を写さない: %s", clone_of, ara_id)
     else:
@@ -570,8 +813,9 @@ def ara_set_modification(ara_id: str, source_path: str, source_id: str | None = 
     else:
         selected = _mt._reopen_if_stale(s)       # ガイドの位置が変わった
     _mt._schedule(s)
+    rev, state = _disk_state(s, t)
     return _ok(track=_row(s, t), created=created, source_changed=source_changed, cloned=cloned,
-               selected=bool(selected), analyzed=_analyzed(s, t), session=_mt.summary(s))
+               selected=bool(selected), analyzed=_analyzed(s, t), rev=rev, state=state, session=_mt.summary(s))
 
 
 @_tool
@@ -586,7 +830,7 @@ def ara_remove_modification(ara_id: str) -> dict:
     tid = t["id"]
     was_cur = tid == _mt.current_track_id()
     _forget_history(s, tid)
-    s.ara_gone[ara_id] = {"id": tid, "audio_sha": t.get("ara_audio_sha")}
+    s.ara_gone[ara_id] = dict({"id": tid, "audio_sha": t.get("ara_audio_sha")}, **_guide_records(s, t))
     s.remove_track(tid)
     s.save()
     switched = None
@@ -603,19 +847,55 @@ def ara_remove_modification(ara_id: str) -> dict:
     return _ok(removed=True, track=tid, switched_to=switched, reopened=bool(reopened), session=_mt.summary(s))
 
 
+def _plan_guides(s, guides, unknown):
+    """`ara_sync(guides=)` の検査: ([(トラック, 当てるガイドのトラック id | None)], rejected)。
+    知らない ara_id は unknown に、当てられない組（伴奏・自分自身）は rejected に積んで飛ばす（ほかの組は当てる）。"""
+    if guides is None:
+        return [], []
+    if not isinstance(guides, dict):
+        raise SessionError("guides は {ara_id: ガイドの ara_id}")
+    plan, rejected = [], []
+    for aid, gid in guides.items():
+        t = s.find_ara(aid)
+        if t is None:
+            unknown.append(aid)
+            continue
+        want = None
+        if gid:
+            gt = s.find_ara(gid)
+            if gt is None:
+                unknown.append(gid)
+                continue
+            why = ("伴奏のトラックはガイドにできない" if gt["kind"] != "vocal" else
+                   "トラック自身はガイドにできない" if gt["id"] == t["id"] else
+                   "伴奏のトラックにはガイドを指定できない" if t["kind"] != "vocal" else None)
+            if why:
+                rejected.append({"ara_id": aid, "guide": gid, "reason": why})
+                continue
+            want = gt["id"]
+        plan.append((t, want))
+    return plan, rejected
+
+
 @_tool
-def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str | None = None) -> dict:
+def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str | None = None,
+             guides: dict | None = None) -> dict:
     """**DAW（ARA）のプラグイン向け**: DAW の位置・名前・テンポをまとめて当てる（取り消しの履歴に入れない）。
 
     tracks: [{ara_id, offset_sec?, name?, group?}]（変わったものだけでよい）。位置は 1 サンプル未満の差なら変えない。
     tempo: {bpm, numerator, denominator, start_sec}（MusicalContext。session.tempo に source = "daw" で書く）。
     guide: ガイドにする修飾の ara_id（"" で外す。省けば今のまま）。アーカイブの document.guide を戻すとき用
       （画面のガイドの指定 set_guide_track と違い、取り消しの履歴に入れない）。
+    guides: トラックごとのガイド {修飾の ara_id: ガイドの修飾の ara_id}（"" か null でそのトラックの指定を外す）。
+      アーカイブの document.guides を戻すとき用（画面の set_track_guide と違い、取り消しの履歴に入れない）。
+      渡した修飾だけを変える（省いた修飾はそのまま）。知らない ara_id は unknown に、当てられない組（伴奏・自分自身）は
+      rejected（[{ara_id, guide, reason}]）に返して、その組だけ飛ばす（ほかの組と tracks・tempo は当てる）。
     編集対象かガイドの位置が変わって、編集対象のガイドの重ね方が変わったら開き直す（reopened = true →
     画面は analyze_take から描き直す）。知らない ara_id は unknown に返す。
     """
     s = _session()
     changed, unknown = [], []
+    guide_plan, rejected = _plan_guides(s, guides, unknown)   # 位置などを変える前に検査する（不正な組は rejected に積んで飛ばす）
     for e in tracks or []:
         if not isinstance(e, dict):
             raise SessionError("tracks の要素は {ara_id, offset_sec?, name?, group?}")
@@ -663,13 +943,20 @@ def ara_sync(tracks: list | None = None, tempo: dict | None = None, guide: str |
         if (g is not None or not guide) and g != s.guide:
             s.guide = g
             guide_changed = True
+    guides_changed = []
+    for t, want in guide_plan:
+        if t.get("guide_id") != want:
+            set_guide_id(t, want)
+            guides_changed.append(t["id"])
+    guide_changed = guide_changed or bool(guides_changed)
     if changed or tempo_changed or guide_changed:
         s.save()
     reopened = _mt._reopen_if_stale(s)
     if changed or guide_changed:
         _mt._schedule(s)
     return _ok(changed=changed, unknown=unknown, tempo=copy.deepcopy(s.tempo), tempo_changed=tempo_changed,
-               guide=s.guide, guide_changed=guide_changed, reopened=bool(reopened), session=_mt.summary(s))
+               guide=s.guide, guide_changed=guide_changed, guides=_guides_of(s),
+               guides_changed=guides_changed, rejected=rejected, reopened=bool(reopened), session=_mt.summary(s))
 
 
 @_tool
@@ -711,6 +998,7 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
         if p.edits and not pending_analysis:
             p.ensure_analyzed()
             _fit_estimator(s, t, p)              # 編集の対象のノートが無いとき、当たる方式に替える（アーカイブの方式が合わない曲）
+            _missing_error(t, p)
         asig, erev = _rev_parts(p)
         rev = "%s:%s" % (asig, erev)
         if p.edits and not pending_analysis:
@@ -743,6 +1031,8 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     done, out_windows, chunks, total = [], [], [], 0.0
     prep_sec = rr.prepare_sec if rr is not None else 0.0
     t_render = time.perf_counter()
+    if todo and os.environ.get(TEST_DELAY_ENV):
+        time.sleep(float(os.environ[TEST_DELAY_ENV]))     # 試験用: 再合成が長いとき（plugin/tests/aratest の -changes）
     if todo:
         with _srv._prep_yield():
             byte = 0
@@ -774,9 +1064,16 @@ def ara_render_dirty(ara_id: str, since: str | None = None, backend: str = "praa
     if remaining:
         _out_seq[0] += 1
         token = "%s~%d" % (rev, _out_seq[0])
+    # 試聴に使う PCM: 今回書いた窓と、書き直していない前の窓（版をまたいで残す。変わっていない窓は今も正しい）
+    previous_pcm = st.get("audition_pcm") if st is not None and not reset else None
+    parts = ([{"path": path, "windows": out_windows}] if path else []) + _kept_parts(previous_pcm, restore, sr, ch, n)
+    current_pcm = ({"parts": parts[:KEEP_OUT - 1], "channels": int(ch), "sr": int(sr), "source_frames": int(n)}
+                   if parts else None)
     _render[ara_id] = {"rev": token, "segs": segs, "windows": [list(w) for w in wins],
                        "pending": _merge([list(w) for w in remaining]), "backend": name,
-                       "channels": channels, "asig": asig}
+                       "channels": channels, "asig": asig,
+                       "project_dir": _norm(p.dir) if p is not None else None,
+                       "audition_pcm": current_pcm}
     return _ok(track=t["id"], ara_id=ara_id, rev=token, reset=reset, more=bool(remaining),
                analysis_pending=pending_analysis, sr=int(sr),
                channels=int(ch), source_frames=int(n), restore=restore, windows=out_windows, path=path,
@@ -793,29 +1090,34 @@ def ara_revs() -> dict:
     プラグインは手元の版と違う修飾だけ ara_render_dirty を呼ぶ（取り消しで別のトラックが変わったときも拾える）。
     プロジェクトがまだ無い修飾は "empty"。
     external: 外部の AI の中継（ara_relay.py）が開いていれば `{seq, session_seq, track_id}`。外部の AI が曲を変えるたびに
-    seq が進み（セッションを変えうるものは session_seq も）、プラグインは画面に project-changed（・session-changed）を知らせる。"""
+    seq が進み（セッションを変えうるものは session_seq も）、プラグインは画面に project-changed（・session-changed）を知らせる。
+    states: {ara_id: 保存の状態の署名}（アーカイブに入る利用者の状態: 編集の履歴・歌詞・トラックの F0 の方式。解析だけでは
+    変わらない）。guide・guides: 共通のガイド・トラックごとのガイド（ara_archive と同じ形）。プラグインはこれらが
+    ホストに知らせた後に変わったら、音が変わらなくてもホストに「保存するものが変わった」と知らせる。"""
     s = _srv._state.get("session")
     if _doc() is None or s is None:
         raise ProjectError("DAW のドキュメントが開かれていない（先に ara_open を呼ぶ）")
-    revs, ids, errors = {}, {}, {}
+    revs, states, ids, errors = {}, {}, {}, {}
     for t in list(s.tracks):
         aid = t.get("ara_id")
         if not aid:
             continue
         ids[aid] = t["id"]
         try:
-            revs[aid] = _disk_rev(s, t)
+            revs[aid], states[aid] = _disk_state(s, t)
         except Exception as e:                   # noqa: BLE001  書きかけ・壊れている: その修飾だけ
-            revs[aid] = None
+            revs[aid] = states[aid] = None
             errors[aid] = str(e)
     from . import ara_relay
-    return _ok(revs=revs, track_ids=ids, errors=errors or None, external=ara_relay.external())
+    return _ok(revs=revs, states=states, track_ids=ids, guide=_guide_ara_id(s), guides=_guides_of(s),
+               errors=errors or None, external=ara_relay.external())
 
 
 @_tool(lock=False)
 def ara_archive(ara_ids: list | None = None) -> dict:
     """**DAW（ARA）のプラグイン向け**: 保存（ARA のアーカイブ）に入れる各修飾の編集の状態
-    `{archives: {ara_id: {name, track, archive}}, guide: <ガイドの ara_id | null>, tempo}`。
+    `{archives: {ara_id: {name, track, archive}}, guide: <共通のガイドの ara_id | null>,
+    guides: {ara_id: トラックごとのガイドの ara_id}, tempo}`。
 
     archive は `Project.to_archive()` と同じ形（素材の参照・歌詞・編集の changeset の列。解析・画面の状態は入らない。
     ガイドは入れない）。エンジンのロックを取らずにディスクの project.json から作る（解析のジョブの最中でも
@@ -833,12 +1135,10 @@ def ara_archive(ara_ids: list | None = None) -> dict:
             out[aid] = {"name": t["name"], "track": t["id"], "archive": _archive_of(t, s.project_dir_of(t))}
         except Exception as e:                   # noqa: BLE001  その修飾だけ
             errors[aid] = str(e)
-    g = None
-    if s.guide:
-        g = next((t.get("ara_id") for t in list(s.tracks) if t["id"] == s.guide), None)
+    g = _guide_ara_id(s)
     missing = sorted(want - set(out) - set(errors)) if want is not None else []
-    return _ok(archives=out, guide=g, tempo=copy.deepcopy(s.tempo), errors=errors or None,
-               missing=missing or None)
+    return _ok(archives=out, guide=g, guides=_guides_of(s), tempo=copy.deepcopy(s.tempo),
+               errors=errors or None, missing=missing or None)
 
 
 @_tool
@@ -851,7 +1151,10 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
     プラグインはアーカイブを捨てずに持ち続ける）。編集対象のトラックなら開き直す（reopened）。
     archive の `f0_estimator`（補正を作った F0 の方式）があれば、そのトラックの方式にする（estimator_applied。
     別の PC・別の作業場所で開き直しても同じ方式で解析する）。この PC で使えない方式（重みが無い）は当てず、
-    estimator_note に理由を返す。"""
+    estimator_note に理由を返す。rev・state: 戻した直後の版と保存の状態の署名（ara_revs と同じ。戻しただけの状態）。
+    描画の版（archive の render_version。無ければ 1 = 0.1.0-beta.6 までの音）はアーカイブのまま鳴らす。
+    render_changed: このエンジンより新しい描画の版で保存したピッチ曲線の編集があり、保存したときと音が変わりうる
+    （プラグインは最初の再合成をホストに知らせる）。"""
     s = _session()
     t = _track(s, ara_id)
     why = _mismatch(t, archive)
@@ -864,13 +1167,22 @@ def ara_restore(ara_id: str, archive: dict) -> dict:
         log.get().warning("修飾 %s の F0 の方式を当てない: %s", ara_id, note)
     p = _restore_into(s, t, archive)
     s.save()
+    # 描画の版はアーカイブのまま（版の無いアーカイブは 1 = 0.1.0-beta.6 までの音）。このエンジンより新しい版で保存した
+    # ピッチ曲線の編集は、使える最新の版で鳴らすので、保存したときと音が変わりうる
+    render_changed = (int(archive.get("render_version") or 1) > p.render_version
+                      and any(e.kind == "pitch_curve" for e in p.edits))
+    if render_changed:
+        log.get().warning("修飾 %s: このエンジンより新しい描画の版（%s）で保存したピッチ曲線の編集がある。音が変わりうる",
+                          ara_id, archive.get("render_version"))
     reopened = False
     if t["id"] == _mt.current_track_id():
         _mt._open_track(s, t)
         reopened = True
     _mt._schedule(s)
+    rev, state = _disk_state(s, t)
     return _ok(track=t["id"], ara_id=ara_id, mismatch=False, edits=len(p.edits), changesets=len(p.changesets),
-               reopened=reopened, estimator_applied=applied, estimator_note=note, session=_mt.summary(s))
+               reopened=reopened, estimator_applied=applied, estimator_note=note, rev=rev, state=state,
+               render_changed=render_changed, session=_mt.summary(s))
 
 
 def _note_row(n, start, end, midi):
@@ -1010,9 +1322,8 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
       補正を作った方式と違うと再合成の音が変わり、ノートの ID に頼る編集は当たらなくなる。方式の記録が無い archive は
       estimator を指定するか、`analyze_take(estimator=…)` で方式を決め、missing_note_targets が 0 になる方式にする。
       この PC で使えない方式（rmvpe の重みが無い）は当てず warnings に出す。
-    取り込んだ編集は**取り消しの履歴（Ctrl+Z）に入らない**（`ara_restore` と同じ。DAW の読み込みを Ctrl+Z で戻させない）。
-    author は archive のまま（human / ai が保たれる）。戻すには `undo(changeset_id)`・`reset_to_original(whole_track=true)`、
-    または元の編集を `replace = true` で入れ直す。
+    明示的な取り込みは、置換前の補正とともに Ctrl+Z / Ctrl+Y の 1 操作にする。
+    ホストの初期読込 `ara_restore` は履歴に加えない。補正内の author は archive のまま保つ。
     当てた後は外部の編集と同じ道で再合成・DAW への反映（ara_revs の版・プラグインへの通知）に乗る。
     返り値: mismatch・imported・track・ara_id・edits・changesets・authors・estimator・estimator_applied・analysis
     （estimator・ran）・missing_note_targets（{count, ids}。解析が済んでいなければ null）・replaced・
@@ -1033,6 +1344,9 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
         return _ok(track=t["id"], ara_id=t["ara_id"], mismatch=True, imported=False, reason=why)
     pdir = s.project_dir_of(t)
     replaced = None
+    before_estimator = t.get("estimator")
+    s.ensure_history()
+    mark_before = int(s.history_marks.get(t["id"]) or 0)
     if os.path.exists(os.path.join(pdir, "project.json")):
         q = Project(pdir).load()
         if q.changesets:
@@ -1045,29 +1359,68 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
                 st = _tr.edit_stats(q.to_archive())
                 replaced = {"edits": st["edits"], "changesets": st["changesets"], "authors": st["authors"]}
     warnings = list((info or {}).get("warnings") or [])
-    est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
+    old_track = copy.deepcopy(t)
+    old_history = copy.deepcopy(s.history)
+    old_marks = dict(s.history_marks)
+    dropped = []
+    ran, analysis_error = False, None
+    try:
+        # 裏準備が一時キャッシュを書き終えるまで待ってから、復元前の控えを作る。
+        with prep.exclusive(pdir):
+            before_archive = _archive_of(t, pdir)
+            with _mt._recover_projects([pdir]):
+                est, note = _apply_estimator(s, t, archive.get("f0_estimator"))
+                p = _restore_into(s, t, archive, forget_history=False)
+                pref = s.estimator_of(t)
+                p.estimator_pref = pref
+                after_archive = _archive_of(t, pdir)
+                if before_archive is None:
+                    before_archive = copy.deepcopy(after_archive)
+                    before_archive.update(changesets=[], seq={"edit": 0, "changeset": 0},
+                                          lyrics={}, auto_lyrics_attempted=False,
+                                          f0_estimator=before_estimator)
+                if not _json_equal(before_archive, after_archive) or before_estimator != t.get("estimator"):
+                    entry, dropped = s.record_archive(t["id"], before_archive, after_archive,
+                                                      before_estimator, t.get("estimator"), mark_before)
+                s.save()
+                if analyze and est:
+                    try:
+                        if not p.analysis_cached(est):
+                            p.analyze(estimator=est)
+                            ran = True
+                    except Exception as e:       # noqa: BLE001  編集は取り込んだ。解析は analyze_take で
+                        analysis_error = str(e)
+                        log.get().warning("取り込んだ後の解析に失敗: %s", e)
+                        warnings.append("解析に失敗した（analyze_take(estimator=%r) でやり直す）: %s" % (est, e))
+                _mt._schedule(s)
+    except BaseException:
+        t.clear()
+        t.update(old_track)
+        s.history = old_history
+        s.history_marks = old_marks
+        cur = _srv._state.get("project")
+        if cur is not None and _norm(cur.dir) == _norm(pdir):
+            cur.load()
+            cur._forget_analysis()
+        raise
+    if analyze and analysis_error is None and prep.enabled():
+        try:
+            prepared = prep.join(s.dir, t["id"])
+            if prepared and prepared.get("state") == prep.FAILED:
+                raise ProjectError(prepared.get("error") or "裏の準備に失敗した")
+            p.reload_if_changed()
+        except Exception as e:                   # noqa: BLE001  取り込みと履歴の保存は既に完了した
+            analysis_error = str(e)
+            log.get().warning("取り込み後の準備が未完了: %s", e)
+            warnings.append("編集は取り込んだ。準備は未完了（後で解析をやり直す）: %s" % e)
+    _mt._discard_dropped(s, dropped)
     if note:
         warnings.append(note)
-    p = _restore_into(s, t, archive)
-    pref = s.estimator_of(t)
-    p.estimator_pref = pref
-    s.save()
     cur = _srv._state.get("project")
     if cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
         cur.load()                               # 画面の編集対象が古い Project のまま（同じトラック）: 読み直す
         cur._forget_analysis()
         cur.estimator_pref = pref
-    ran, analysis_error = False, None
-    if analyze and est:
-        try:
-            if not p.analysis_cached(est):
-                with prep.exclusive(p.dir):
-                    p.analyze(estimator=est)
-                ran = True
-        except Exception as e:                   # noqa: BLE001  編集は取り込んだ。解析は analyze_take で
-            analysis_error = str(e)
-            log.get().warning("取り込んだ後の解析に失敗: %s", e)
-            warnings.append("解析に失敗した（analyze_take(estimator=%r) でやり直す）: %s" % (est, e))
     if ran and cur is not None and cur is not p and _norm(cur.dir) == _norm(p.dir):
         cur.load()
         cur._forget_analysis()
@@ -1081,7 +1434,6 @@ def import_edits(archive: dict | None = None, gliss_path: str | None = None, tra
         if ids:
             warnings.append("ノートの ID に頼る編集 %d 件の対象のノートが無い（解析の方式が補正を作った方式と違う）。"
                             "estimator を合わせる" % len(ids))
-    _mt._schedule(s)
     st = _tr.edit_stats(archive)
     ta = (p.analysis or {}).get("take") or {}
     return _ok(track=t["id"], ara_id=t["ara_id"], mismatch=False, imported=True, edits=len(p.edits),

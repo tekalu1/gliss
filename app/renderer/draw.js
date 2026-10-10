@@ -15,8 +15,50 @@ import {
 } from './grid.js';
 import { renderTempo } from './tempo.js';
 import { bandColor, desat, lineColorer } from './corr.js';
+import { createFollower } from './follow.js';
+import { ARA, araEditorHead, araEditorRegion, araEditorTrack, araRegions, araScale } from './ara.js';
 
 const { KEYS_W, SCALE_H, LANE_H, EDGE } = LAYOUT;
+
+/** 下段は編集済 PCM の出力秒。DAW の小節時刻だけリージョンを通して写す。 */
+function editorTicks(labelPx = 50) {
+  if (!ARA) return ticks(S.view.t0 + S.off, S.view.t0 + S.view.span + S.off,
+    pps(), GRID_MIN_PX, labelPx).out.map((g) => ({ ...g, local: g.t - S.off }));
+  const track = araEditorTrack();
+  const out = [];
+  for (const r of (track && araRegions(track)) || []) {
+    const scale = araScale(r);
+    const lo = Math.max(S.view.t0, r.mod_start);
+    const hi = Math.min(S.view.t0 + S.view.span, r.mod_end);
+    if (hi <= lo || r.mod_end <= r.mod_start || r.song_end <= r.song_start) continue;
+    const a = r.song_start + (lo - r.mod_start) * scale;
+    const b = r.song_start + (hi - r.mod_start) * scale;
+    for (const g of ticks(a, b, pps() / scale, GRID_MIN_PX, labelPx).out) {
+      const local = r.mod_start + (g.t - r.song_start) / scale;
+      if (local < lo - 1e-9 || local >= hi - 1e-9 || araEditorRegion(local)?.id !== r.id) continue;
+      out.push({ ...g, local });
+    }
+  }
+  return out;
+}
+
+function editorLoopSegments() {
+  if (ARA && S.araLoopDraft?.trackId === araEditorTrack()?.id) return [S.araLoopDraft.range];
+  if (!S.loop) return [];
+  if (!ARA) return [[S.loop[0] - S.off, S.loop[1] - S.off]];
+  const track = araEditorTrack();
+  const out = [];
+  for (const r of (track && araRegions(track)) || []) {
+    const a = Math.max(S.loop[0], r.song_start);
+    const b = Math.min(S.loop[1], r.song_end);
+    if (b <= a || r.mod_end <= r.mod_start || r.song_end <= r.song_start) continue;
+    const scale = araScale(r);
+    const lo = r.mod_start + (a - r.song_start) / scale;
+    const hi = r.mod_start + (b - r.song_start) / scale;
+    if (araEditorRegion((lo + hi) / 2)?.id === r.id) out.push([lo, hi]);
+  }
+  return out;
+}
 const { TAKE, GUIDE, SEL, WAS, AI: AI_EDGE } = COLORS;
 
 let svg = null;
@@ -24,6 +66,8 @@ let W = 1200;
 let H = 396;
 // 描き直し・再生位置の移動のたびに呼ぶもの（トラックビュー。上下で白枠・再生位置・ループを合わせる）
 const hooks = { render: [], head: [] };
+const lowerFollow = createFollower();   // 下のピアノロールの追従の規則（follow.js）
+let locateNext = false;                  // follow({ locate }) が movePlayhead の上の表示へ渡す
 export function onRender(fn) { hooks.render.push(fn); }
 export function onPlayhead(fn) { hooks.head.push(fn); }
 
@@ -308,11 +352,11 @@ function guideBlobPts(g, hmax) {
 }
 
 // ---------------------------------------------------------------- 端のつかみ（v3 §3）
-// 帯の端から内側 8 px・外側 4 px（短いノートは内側を幅の 1/3 まで）、縦は帯の太さによらず中心から ±10 px。
+// 帯の端から内側 12 px・外側 4 px（短いノートは内側を幅の 1/3 まで）、縦は帯の太さによらず中心から ±14 px。
 // 外側は隣のノートとの隙間の半分まで（隣の端・本体のつかみと重ねない。接していれば外側は無い）。
-const EDGE_IN = 8;
+const EDGE_IN = 12;
 const EDGE_OUT = 4;
-const EDGE_Y = 10;
+const EDGE_Y = 14;
 
 /** S.pitched[k] の端のつかみの横の範囲 [左, 右]（px）。 */
 function edgeGrab(k, which, x0, x1, yc) {
@@ -370,36 +414,9 @@ function noPitchHit(n, segs, conn) {
   return out;
 }
 
-/** 子音・息の端が隣と接しているか（接続の見込み。カーソルの形だけに使う。エンジンの既定と同じく接していれば接続）。 */
+/** 子音・息の端が隣と接続しているか（カーソルの形だけに使う。エンジンの接続 = 音程ノートと同じ規則。view data の connected_prev / next）。 */
 function noPitchConn(n) {
-  const i = S.notes.indexOf(n);
-  const a = S.notes[i - 1]; const b = S.notes[i + 1];
-  const touch = (x, y) => !!x && !!y
-    && Math.abs(y.start_sec - x.end_sec) < 1e-6;
-  return { start: touch(a, n), end: touch(n, b) };
-}
-
-/** 子音・息の端をドラッグ中の接続の記号（計画の info。接続 = 塗りの点、切り離し = 両端に白抜きの点）。 */
-function noPitchGlyph(n, which, x, y) {
-  const info = S.plan?.data?.info;
-  const dr = S.drag;
-  if (!info?.pair || S.plan.data.kind !== 'edge' || S.plan.data.params?.note_id !== n.id) return '';
-  let conn = !!info.connected;
-  const d = S.plan.data;
-  if (d.snap_x != null && Math.abs((S.plan.x || 0) - d.snap_x) < 1e-6 && Math.abs(S.plan.x || 0) > 1e-9) conn = true;
-  const key = `${info.pair[0]}|${info.pair[1]}`;
-  if (conn && !(dr?.alt && !dr.moved)) {
-    return `<g data-conn="${key}" data-state="connected" pointer-events="none"><circle cx="${f1(x)}" cy="${f1(y)}" r="3.4" fill="${SEL}"/></g>`;
-  }
-  const nb = S.byId.get(info.neighbour);
-  let s = `<g data-conn="${key}" data-state="${conn ? 'cut' : 'detached'}" pointer-events="none">`
-    + `<circle cx="${f1(x)}" cy="${f1(y)}" r="3.2" fill="#111113" stroke="${SEL}" stroke-width="1.3"/>`;
-  if (nb) {
-    const nx = X(which === 'start' ? spanOf(nb)[1] : spanOf(nb)[0]);
-    const ny = nb.kind === 'note' ? Y(bandOf(nb)) : y;
-    s += `<circle cx="${f1(nx)}" cy="${f1(ny)}" r="3.2" fill="#111113" stroke="${SEL}" stroke-width="1.3"/>`;
-  }
-  return `${s}</g>`;
+  return { start: !!n.connected_prev, end: !!n.connected_next };
 }
 
 /** 端の明るい縦線の片側の長さ（px）: 端から 30 ms 内側の帯の太さ（最低 8 px）。 */
@@ -460,7 +477,7 @@ const pairKey = (a, b) => `${a.id}|${b.id}`;
 function connFocus() {
   const out = new Set();
   if (S.tool !== 'main' || !S.vd) return out;
-  const P = S.pitched;
+  const P = S.blocks;                               // 種類によらず、隣り合う区間の組
   const idx = new Map(P.map((n, i) => [n.id, i]));
   const sides = (id) => {
     const i = idx.get(id);
@@ -489,7 +506,7 @@ export function hasConnFocus() { return connGlyphs() !== ''; }
 /** ポインタ（px）に近い境目の 'a|b'（無ければ null）。隙間の真ん中など、どちらの端からも遠いところは出さない。 */
 export function nearPair(x, y) {
   if (S.tool !== 'main' || !S.vd || x <= KEYS_W || y <= rollTop() || y >= rollBottom()) return null;
-  const P = S.pitched;
+  const P = S.blocks;
   let best = null; let bd = Infinity;
   for (let i = 0; i + 1 < P.length; i++) {
     const a = P[i]; const b = P[i + 1];
@@ -497,7 +514,9 @@ export function nearPair(x, y) {
     if (xb < KEYS_W - NEAR_PX || xa > W + NEAR_PX) continue;
     const dx = Math.min(Math.abs(x - xa), Math.abs(x - xb));
     if (dx >= NEAR_PX || dx >= bd) continue;
-    const ba = boxOf(a); const bb = boxOf(b);
+    const aa = S.blockAnchor.get(a.id); const ab = S.blockAnchor.get(b.id);
+    if (!aa || !ab) continue;
+    const ba = boxOf(aa); const bb = boxOf(ab);
     if (y < Y(Math.max(ba.hi, bb.hi)) - 16 || y > Y(Math.min(ba.lo, bb.lo)) + 16) continue;
     bd = dx; best = pairKey(a, b);
   }
@@ -508,7 +527,7 @@ export function nearPair(x, y) {
 function connGlyphs() {
   const keys = connFocus();
   if (!keys.size) return '';
-  const P = S.pitched;
+  const P = S.blocks;
   const trBy = new Map((S.vd.transitions || []).map((t) => [`${t.a}|${t.b}`, t]));
   const cc = planConnChanges();
   if (cc?.add) trBy.set(`${cc.add.a}|${cc.add.b}`, cc.add);
@@ -521,7 +540,9 @@ function connGlyphs() {
     if (!keys.has(key)) continue;
     const xa = X(spanOf(a)[1]); const xb = X(spanOf(b)[0]);
     if (xb < KEYS_W - 40 || xa > W + 40) continue;
-    const yA = Y(bandOf(a)); const yB = Y(bandOf(b));
+    const aa = S.blockAnchor.get(a.id); const ab = S.blockAnchor.get(b.id);
+    if (!aa || !ab) continue;
+    const yA = Y(bandOf(aa)); const yB = Y(bandOf(ab));
     // 離した後の接続: 計画の切り離し（x ≠ 0）・吸着を重ねる
     let conn = !!a.connected_next;
     if (cc?.off.has(key)) conn = false;
@@ -778,16 +799,15 @@ export function render() {
   }
 
   // ---- 時間グリッド（タイムラインの秒 = S.off + ピアノロールの秒。小節・拍、テンポが無ければ秒。issue #18）
-  const tk = ticks(S.view.t0 + S.off, S.view.t0 + S.view.span + S.off, pps(), GRID_MIN_PX);
-  for (const g of tk.out) {
-    const gx = Math.round(X(g.t - S.off)) + 0.5;
+  for (const g of editorTicks()) {
+    const gx = Math.round(X(g.local)) + 0.5;
     if (gx < KEYS_W || gx > W) continue;
     s += `<line data-grid="${g.l}" x1="${gx}" y1="${ROLL_T}" x2="${gx}" y2="${ROLL_B}" stroke="${GRIDC[g.l]}" pointer-events="none"/>`;
   }
 
   // ---- ループ区間（S.loop はタイムラインの秒）
-  if (S.loop) {
-    const lx0 = X(S.loop[0] - S.off); const lx1 = X(S.loop[1] - S.off);
+  for (const [a, b] of editorLoopSegments()) {
+    const lx0 = X(a); const lx1 = X(b);
     s += `<rect x="${f1(lx0)}" y="${ROLL_T}" width="${f1(lx1 - lx0)}" height="${ROLL_B - ROLL_T}" fill="${SEL}" opacity=".07" pointer-events="none"/>`;
   }
 
@@ -819,15 +839,19 @@ export function render() {
     }
   }
 
-  // ---- 音素境界（ごく薄く常時。ノート境界とずれるときは音素境界を優先する）
+  // ---- 音素境界。通常は下の音素レーンだけに置き、編集対象の境界だけ延長する。
   let tipStr = '';
   if (S.bounds.length) {
+    const selectedSpans = S.sel.map((id) => S.byId.get(id)).filter(Boolean).map(spanOf);
     for (const b of S.bounds) {
       const x = X(boundSec(b));
       if (x < KEYS_W || x > W) continue;
-      const strong = b.kind === 'onset' || b.kind === 'offset';
-      s += `<line x1="${f1(x)}" y1="${ROLL_T}" x2="${f1(x)}" y2="${ROLL_B}" stroke="${SEL}"`
-        + ` stroke-opacity="${strong ? 0.13 : 0.08}" pointer-events="none"/>`;
+      const t = boundSec(b);
+      const active = S.drag?.type === 'bound' && S.drag.id === b.id || S.boundHover === b.id
+        || selectedSpans.some(([start, end]) => t >= start - 0.002 && t <= end + 0.002);
+      if (!S.showAllBounds && !active) continue;
+      s += `<line data-bound-line="${b.id}" x1="${f1(x)}" y1="${ROLL_T}" x2="${f1(x)}" y2="${ROLL_B}" stroke="${SEL}"`
+        + ` stroke-opacity="${active ? 0.55 : 0.16}" pointer-events="none"/>`;
     }
   }
 
@@ -867,8 +891,7 @@ export function render() {
     if (grabbed && dr.type === 'edge') {
       const cx = X(dr.which === 'start' ? s0 : s1);
       const p = dr.which === 'start' ? first : last;
-      s += noPitchGlyph(n, dr.which, cx, p.y);
-      if (dr.moved) tipStr += tip(cx, p.y - Math.max(8, p.h) - 14, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
+      if (dr.moved) tipStr += tip(cx, p.y - Math.max(8, p.h) - 14, `${sign(Math.round((S.plan?.x ?? dr.want ?? 0) * 1000))} ms`, 'middle');
     }
     if (grabbed && dr.type === 'note' && dr.axis === 'time' && dr.moved) {
       tipStr += tip((X(s0) + X(s1)) / 2, Math.min(first.y, last.y) - 22, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
@@ -962,7 +985,7 @@ export function render() {
     }
     if (dr && dr.moved && dr.type === 'edge' && dr.id === n.id) {
       const cx = dr.which === 'start' ? x0 : x1;
-      tipStr += tip(cx, y0 - 14, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
+      tipStr += tip(cx, y0 - 14, `${sign(Math.round((S.plan?.x ?? dr.want ?? 0) * 1000))} ms`, 'middle');
     }
     if (dr && dr.moved && dr.type === 'note' && dr.axis === 'time' && dr.anchor?.id === n.id) {
       tipStr += tip((x0 + x1) / 2, y0 - 14, `${sign(Math.round((S.plan?.x || 0) * 1000))} ms`, 'middle');
@@ -971,6 +994,17 @@ export function render() {
   }
 
   s += fadeSvg;
+  if (S.edgeDraft && S.edgeDraft.trackId === S.session?.current
+    && !(S.edgeDraft.planId && S.plan?.data?.plan_id === S.edgeDraft.planId)) {
+    const d = S.edgeDraft;
+    const n = S.byId.get(d.id);
+    if (n) {
+      const [a, b] = spanOf(n);
+      const x = X(d.which === 'start' ? a : b);
+      s += `<line data-edge-draft="${d.id}" x1="${f1(x)}" y1="${ROLL_T}" x2="${f1(x)}" y2="${ROLL_B}" stroke="${SEL}" stroke-width="1.5" stroke-dasharray="4 4" pointer-events="none"/>`;
+      tipStr += tip(x, ROLL_T + 18, '仮の端 · 計画待ち', 'middle');
+    }
+  }
   s += corrLines() + corrMarks();         // 帯の上・テイクの曲線の下
 
   // ---- はさみ: 接して並ぶノートの境目（ダブルクリックで結合）と、切る位置の線
@@ -1097,7 +1131,8 @@ export function render() {
       + `<rect x="${f1(lx)}" y="${ROLL_B}" width="${f1(lw)}" height="${LANE_H}" fill="none" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;
   }
 
-  s += `<g id="ph" transform="translate(${f1(X(S.head - S.off))},0)" pointer-events="none">`
+  const head = araEditorHead();
+  s += `<g id="ph"${head == null ? ' style="display:none"' : ` transform="translate(${f1(X(head - S.off))},0)`}"} pointer-events="none">`
     + `<line x1="0" y1="0" x2="0" y2="${H}" stroke="${SEL}" stroke-width="1"/>`
     + `<path d="M-4,0 L4,0 L0,6 Z" fill="${SEL}"/></g>`;
 
@@ -1143,16 +1178,15 @@ function asrLane(ROLL_B, cand) {
 /** タイムスケール（目盛りはタイムラインの秒 = トラックの位置 S.off ＋ ピアノロールの秒）とループの印。 */
 function scaleSvg() {
   let s = `<rect x="0" y="0" width="${W}" height="${SCALE_H}" fill="#111113"/>`;
-  if (S.loop) {
-    const lx0 = X(S.loop[0] - S.off); const lx1 = X(S.loop[1] - S.off);
+  for (const [a, b] of editorLoopSegments()) {
+    const lx0 = X(a); const lx1 = X(b);
     s += `<rect x="${f1(lx0)}" y="0" width="${f1(lx1 - lx0)}" height="${SCALE_H}" fill="${SEL}" opacity=".07" pointer-events="none"/>`
       + `<rect x="${f1(lx0)}" y="${SCALE_H - 3}" width="${f1(lx1 - lx0)}" height="3" fill="${SEL}" opacity=".5" pointer-events="none"/>`;
   }
   // 目盛りはグリッドと同じ（小節・拍か秒）。ラベルは 50 px 以上あける
-  const tk = ticks(S.view.t0 + S.off, S.view.t0 + S.view.span + S.off, pps(), GRID_MIN_PX, 50);
-  for (const g of tk.out) {
+  for (const g of editorTicks(50)) {
     if (g.l === 2 && !g.lab) continue;
-    const tx = X(g.t - S.off);
+    const tx = X(g.local);
     if (tx < KEYS_W - 1) continue;
     s += `<line x1="${f1(tx)}" y1="${SCALE_H - (g.lab || g.l === 0 ? 8 : 4)}" x2="${f1(tx)}" y2="${SCALE_H}" stroke="#3a3a3e" pointer-events="none"/>`;
     if (g.lab) s += `<text data-rlab="1" x="${f1(tx + 3)}" y="12" font-size="10" fill="#8f8f94" pointer-events="none">${g.lab}</text>`;
@@ -1163,22 +1197,33 @@ function scaleSvg() {
 
 export function movePlayhead() {
   const g = svg?.querySelector('#ph');
-  if (g) g.setAttribute('transform', `translate(${f1(X(S.head - S.off))},0)`);
+  const head = araEditorHead();
+  if (g) {
+    g.style.display = head == null ? 'none' : '';
+    if (head != null) g.setAttribute('transform', `translate(${f1(X(head - S.off))},0)`);
+  }
   const c = document.querySelector('#clock');
   if (c) c.textContent = fmtTime(S.head);
-  for (const fn of hooks.head) fn();
+  const locate = locateNext;
+  locateNext = false;
+  for (const fn of hooks.head) fn({ locate });
 }
 
-/** 再生中、再生位置がピアノロールの表示範囲を出たら画面送りする（モックと同じ。上の白枠も追従する）。
- * ヘッダーの「再生位置に追従」（F。issue #40）がオフなら送らない。 */
-export function follow() {
-  if (!S.vd || S.drag || !G.follow) return;
-  const t = S.head - S.off;
+/** 再生位置がピアノロールの表示範囲を出たら画面送りする（モックと同じ。上の白枠も追従する）。規則は follow.js:
+ * 停止中は送らない（locate: DAW 側で再生位置が動いた知らせのときだけ 1 回寄せる）。再生中に利用者が表示を動かしたら、再生位置が
+ * 範囲に戻るか次の再生まで送らない。ヘッダーの「再生位置に追従」（F。issue #40）がオフなら送らない。 */
+export function follow({ locate = false } = {}) {
+  locateNext = locate;
+  if (!S.vd) return;
+  const head = araEditorHead();
+  const t = head == null ? null : head - S.off;
   const total = totalSec();
-  if (t < 0 || t > total) return;                   // 編集中のトラックの外（他のトラックだけ鳴っている）
+  // 編集中のトラックの外（他のトラックだけ鳴っている）は対象外
+  const go = lowerFollow.check({ playing: S.playing, locate, view: S.view, head: t, valid: t != null && t >= 0 && t <= total });
+  if (!go || S.drag || !G.follow) return;
   const v = S.view;
-  if (t >= v.t0 && t <= v.t0 + v.span) return;
   v.t0 = clamp(t - v.span * 0.02, 0, Math.max(0, total - v.span));
+  lowerFollow.placed(v);
   render();
 }
 
@@ -1199,6 +1244,16 @@ export function renderToolbar() {
   const tip = (b, t) => { if (b && b.title !== t) { b.title = t; b.setAttribute('aria-label', t); } };
   tip(bu, withKey(u ? `元に戻す: ${u}` : '元に戻す', 'undo'));
   tip(br, withKey(rd ? `やり直す: ${rd}` : 'やり直す', 'redo'));
+  const historyLabel = q('#undoLabel');
+  if (historyLabel) historyLabel.textContent = u ? `元に戻す: ${u}` : '元に戻す: なし';
+  const strokeActions = q('#strokeActions');
+  if (strokeActions) {
+    const phase = S.strokePhase;
+    strokeActions.hidden = !['failed', 'checking'].includes(phase);
+    const msg = q('#strokeMessage');
+    if (msg) msg.textContent = phase === 'checking' ? '適用状態を確認中 · 描線を保持' : '描線を確定できませんでした';
+    q('#strokeRetry').disabled = phase === 'checking';
+  }
   tip(q('#bPlay'), withKey('再生／停止', 'play'));
   tip(q('#bToolMain'), withKey('メインツール', 'tool-main'));
   tip(q('#bToolDraw'), `${withKey('鉛筆', 'tool-draw')}: ピッチを描く`);

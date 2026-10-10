@@ -3,15 +3,31 @@
 namespace gliss
 {
 
-void PlayheadState::write (const juce::AudioPlayHead::PositionInfo& position) noexcept
+void PlayheadState::write (const juce::AudioPlayHead::PositionInfo& position, std::uintptr_t source) noexcept
 {
     const auto seconds = position.getTimeInSeconds();
-
-    if (! seconds.hasValue())
+    const auto isPlaying = position.getIsPlaying();
+    if (! seconds.hasValue() && isPlaying)
         return;
 
-    songSec.store (*seconds, std::memory_order_relaxed);
-    playing.store (position.getIsPlaying(), std::memory_order_relaxed);
+    bool expected = false;
+    if (! writing.compare_exchange_strong (expected, true, std::memory_order_acquire))
+        return; // 複数の processor が同時に呼んでもオーディオスレッドでは待たない
+
+    const auto now = juce::Time::getMillisecondCounter();
+    const auto stale = (juce::uint32) (now - stampMs.load()) > 250;
+    if (masterSource != 0 && masterSource != source && ! stale
+        && (playing.load() || ! isPlaying))
+    {
+        writing.store (false, std::memory_order_release);
+        return;
+    }
+    masterSource = source;
+    const auto odd = sequence.fetch_add (1) + 1;
+
+    if (seconds.hasValue())
+        songSec.store (*seconds);
+    playing.store (isPlaying);
 
     bool loopOn = false;
 
@@ -21,35 +37,49 @@ void PlayheadState::write (const juce::AudioPlayHead::PositionInfo& position) no
         const auto ppq = position.getPpqPosition();
         const auto bpm = position.getBpm();
 
-        if (loop.hasValue() && ppq.hasValue() && bpm.hasValue())
+        if (seconds.hasValue() && loop.hasValue() && ppq.hasValue() && bpm.hasValue())
         {
             const auto a = playhead::ppqToSeconds (loop->ppqStart, *ppq, *seconds, *bpm);
             const auto b = playhead::ppqToSeconds (loop->ppqEnd, *ppq, *seconds, *bpm);
 
             if (a.has_value() && b.has_value() && *b > *a)
             {
-                loopStartSec.store (*a, std::memory_order_relaxed);
-                loopEndSec.store (*b, std::memory_order_relaxed);
+                loopStartSec.store (*a);
+                loopEndSec.store (*b);
                 loopOn = true;
             }
         }
     }
 
-    looping.store (loopOn, std::memory_order_relaxed);
-    stampMs.store (juce::Time::getMillisecondCounter(), std::memory_order_relaxed);
-    valid.store (true, std::memory_order_release);
+    looping.store (loopOn);
+    stampMs.store (now);
+    valid.store (true);
+    sequence.store (odd + 1);
+    writing.store (false, std::memory_order_release);
 }
 
 PlayheadSnapshot PlayheadState::read() const noexcept
 {
     PlayheadSnapshot s;
-    s.valid = valid.load (std::memory_order_acquire);
-    s.songSec = songSec.load (std::memory_order_relaxed);
-    s.playing = playing.load (std::memory_order_relaxed);
-    s.looping = looping.load (std::memory_order_relaxed);
-    s.loopStartSec = loopStartSec.load (std::memory_order_relaxed);
-    s.loopEndSec = loopEndSec.load (std::memory_order_relaxed);
-    s.stampMs = stampMs.load (std::memory_order_relaxed);
+    for (int attempt = 0; attempt < 8; ++attempt)
+    {
+        const auto before = sequence.load();
+        if (before & 1)
+            continue;
+        s.valid = valid.load();
+        s.songSec = songSec.load();
+        s.playing = playing.load();
+        s.looping = looping.load();
+        s.loopStartSec = loopStartSec.load();
+        s.loopEndSec = loopEndSec.load();
+        s.stampMs = stampMs.load();
+        if (sequence.load() == before)
+        {
+            s.sequence = before / 2;
+            return s;
+        }
+    }
+    s.valid = false;
     return s;
 }
 
@@ -91,6 +121,8 @@ juce::var describe (const PlayheadSnapshot& s, const std::vector<std::pair<juce:
     auto* o = new juce::DynamicObject();
     o->setProperty ("song_sec", s.songSec);
     o->setProperty ("playing", s.playing);
+    o->setProperty ("sequence", (juce::int64) s.sequence);
+    o->setProperty ("stamp_ms", (juce::int64) s.stampMs);
 
     if (s.looping)
         o->setProperty ("loop", juce::Array<juce::var> { s.loopStartSec, s.loopEndSec });

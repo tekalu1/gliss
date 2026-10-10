@@ -16,6 +16,9 @@
 重いので、1 回作って使い回すこと。`export_wav` もこれを使う。
 """
 import time
+from collections import OrderedDict
+from dataclasses import replace
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -32,7 +35,7 @@ class RegionRenderer:
     （左右のバランスを保つ。`export_wav` と同じ）。
     """
 
-    def __init__(self, x, sr, f0r, backend=None):
+    def __init__(self, x, sr, f0r, backend=None, audition_local=False):
         x = np.asarray(x, dtype="float64")
         if x.ndim == 1:
             x = x[:, None]
@@ -46,9 +49,17 @@ class RegionRenderer:
         self._ref = None
         self._ref_done = False
         self.prepare_sec = 0.0          # 下ごしらえに掛かった秒（計測用）
+        # 局所解析は試聴だけで使う。通常のexport/ARAの音と準備方法は変えない。
+        # Praatは窓頭の位相が変わるため全域解析を使う。
+        self._localize = (audition_local and self.n_frames > 8 * self.sr
+                          and self.backend_name == "psola")
+        self._local_key = None
+        self._local_renderer = None     # 最後に使った窓だけ。長尺素材の全域解析を押下時に行わない
+        self._window_pcm = OrderedDict()
+        self._window_pcm_bytes = 0
 
     @classmethod
-    def for_project(cls, project, backend=None, channels="mono"):
+    def for_project(cls, project, backend=None, channels="mono", audition_local=False):
         """channels: "mono"（解析と同じモノラル。プレビュー・計測向け）/ "all"（素材のチャンネルそのまま）。"""
         project.ensure_analyzed()
         if channels == "mono":
@@ -57,7 +68,7 @@ class RegionRenderer:
             x, sr = M.read_clip(project.take)
         else:
             raise ValueError("channels は mono か all")
-        return cls(x, sr, project.take_f0, backend=backend)
+        return cls(x, sr, project.take_f0, backend=backend, audition_local=audition_local)
 
     def _get_ref(self):
         if not self._ref_done:
@@ -82,12 +93,16 @@ class RegionRenderer:
 
     def prepare(self):
         """下ごしらえを先に済ませる（プラグインなら素材を受け取った時点で）。掛かった秒を返す。"""
+        if self._localize:
+            return self.prepare_sec    # 長尺では窓が決まった時にその付近だけ準備する
         for ch in range(self.n_ch):
             self._get(ch)
         return self.prepare_sec
 
     @property
     def actual_backend(self):
+        if self._local_renderer is not None:
+            return self._local_renderer.actual_backend
         r = next((r for r in self._rends if r is not None), None)
         return r.backend_name if r is not None else self.backend_name
 
@@ -96,6 +111,16 @@ class RegionRenderer:
 
         長さは必ず ib − ia。窓の端は静かなところに取ってあること（`windows_for`）。"""
         ia, ib = max(0, int(ia)), min(self.n_frames, int(ib))
+        key = (ia, ib, tuple(_pcm_seg_key(s) for s in segs
+                             if s.end_sec >= ia / self.sr and s.start_sec <= ib / self.sr))
+        hit = self._window_pcm.get(key)
+        if hit is not None:
+            self._window_pcm.move_to_end(key)
+            return hit[0].copy(), dict(hit[1])
+        if self._localize and ib - ia >= 2:
+            y, meta = self._render_local(ia, ib, segs)
+            self._remember_window(key, y, meta)
+            return y, meta
         n = max(0, ib - ia)
         y = np.zeros((n, self.n_ch))
         warnings = []
@@ -117,7 +142,53 @@ class RegionRenderer:
             if len(yc) != n:                  # 念のため（fit_out_sec が効いていれば通らない）
                 yc = yc[:n] if len(yc) > n else np.concatenate([yc, np.zeros(n - len(yc))])
             y[:, ch] = yc
-        return y, {"warnings": warnings, "backend": self.actual_backend}
+        meta = {"warnings": warnings, "backend": self.actual_backend}
+        self._remember_window(key, y, meta)
+        return y, meta
+
+    def _remember_window(self, key, y, meta):
+        # 押下直前のARA差分や直前の試聴を再利用する。5秒×stereoなら約3.5MiB。
+        if y.nbytes > 16 * 1024 * 1024:
+            return
+        old = self._window_pcm.pop(key, None)
+        if old is not None:
+            self._window_pcm_bytes -= old[0].nbytes
+        self._window_pcm[key] = (y.copy(), dict(meta))
+        self._window_pcm_bytes += y.nbytes
+        while len(self._window_pcm) > 4 or self._window_pcm_bytes > 16 * 1024 * 1024:
+            _, (old, _) = self._window_pcm.popitem(last=False)
+            self._window_pcm_bytes -= old.nbytes
+
+    def _render_local(self, ia, ib, segs):
+        """長尺素材では窓の周囲だけ解析する。絶対の編集時刻を局所時刻へ写す。"""
+        hop = float(self.f0r.hop_s)
+        f0_start = max(0, int((ia / self.sr - 1.0) / hop))
+        cut0 = max(0, int(round(f0_start * hop * self.sr)))
+        f0_end = min(len(self.f0r.f0), int(np.ceil((ib / self.sr + 1.0) / hop)) + 1)
+        cut1 = min(self.n_frames, int(round(f0_end * hop * self.sr)))
+        key = (cut0, cut1)
+        if key != self._local_key:
+            f0 = SimpleNamespace(f0=self.f0r.f0[f0_start:f0_end],
+                                 voiced=self.f0r.voiced[f0_start:f0_end], hop_s=hop)
+            self._local_renderer = RegionRenderer(self.x[cut0:cut1], self.sr, f0,
+                                                  backend=self.backend)
+            self._local_renderer._localize = False
+            self._local_key = key
+        local = self._local_renderer
+        off = cut0 / self.sr
+        nearby = []
+        for s in segs:
+            if s.end_sec < cut0 / self.sr or s.start_sec > cut1 / self.sr:
+                continue
+            fade = s.fade
+            if fade is not None:
+                fade = (fade[0] - off, fade[1] - off, fade[2])
+            nearby.append(replace(s, start_sec=s.start_sec - off,
+                                  end_sec=s.end_sec - off, fade=fade))
+        prep0 = local.prepare_sec
+        y, meta = local.render_frames(ia - cut0, ib - cut0, nearby)
+        self.prepare_sec += local.prepare_sec - prep0
+        return y, meta
 
 
 # ---------------------------------------------------------------- 窓
@@ -134,6 +205,14 @@ def _seg_key(s):
             getattr(s, "fade", None),
             None if not s.curve_points else tuple((round(float(t), 9), round(float(c), 9))
                                                   for t, c in s.curve_points))
+
+
+def _pcm_seg_key(s):
+    """窓PCM用の正確な編集キー。微小変更も別版とし、古い音を返さない。"""
+    return (s.start_sec, s.end_sec, s.cents, s.ratio, s.move_ms,
+            s.silence_sec, s.gain, s.fade,
+            None if s.curve_points is None else tuple(tuple(p) for p in s.curve_points),
+            tuple(s.edit_ids))
 
 
 def _merge(spans):
@@ -181,8 +260,24 @@ def dirty_windows(project, segs_before, segs_after, windows_before=None, windows
 
 
 # ---------------------------------------------------------------- 区間 → PCM
+def _audition_window(wa, wb, ia, ib, sr, segs):
+    """長い窓の試聴だけ、要求範囲と前後の編集境界を含む短区間へ絞る。"""
+    lo = max(wa, ia / sr - 0.3)
+    hi = min(wb, ib / sr + 0.3)
+    for s in segs:
+        # 一定pitch/gainの長いsegmentは内部だけを合成しても要求範囲のPCMが同じ。
+        # 曲線は点の時刻がsegment頭基準なので、切断せず端まで含める。
+        if not s.curve_points:
+            continue
+        if s.start_sec < lo < s.end_sec:
+            lo = max(wa, s.start_sec)
+        if s.start_sec < hi < s.end_sec:
+            hi = min(wb, s.end_sec)
+    return max(int(round(wa * sr)), int(round(lo * sr))), min(int(round(wb * sr)), int(round(hi * sr)))
+
+
 def render_region(project, start_sec=None, end_sec=None, backend=None, channels="mono",
-                  renderer=None, segs=None):
+                  renderer=None, segs=None, audition_fast=False):
     """編集を当てた [start, end)（プロジェクト＝クリップ内の秒）の PCM を返す。(y, info)
 
     y は (n, ch) の float64、n = 頼んだ範囲のサンプル数（**長さは変わらない**）。
@@ -209,6 +304,14 @@ def render_region(project, start_sec=None, end_sec=None, backend=None, channels=
         wa, wb = int(round(a * sr)), int(round(b * sr))
         if wb <= ia or wa >= ib or wb - wa < 2:
             continue
+        # 伸縮・移動・切取・無音挿入は窓頭からの出力時間が効くため、元の窓を保つ。
+        # ピッチ/鉛筆/ミュート/フェードだけなら各segmentの再合成は絶対時刻で独立する。
+        if audition_fast and wb - wa > 5 * sr:
+            has_timewarp = any((abs(s.ratio - 1.0) > 1e-9 or abs(s.move_ms) > 1e-9
+                                or s.silence_sec > 0.0) and s.end_sec >= a and s.start_sec <= b
+                               for s in segs)
+            if not has_timewarp:
+                wa, wb = _audition_window(a, b, ia, ib, sr, segs)
         yw, meta = rr.render_frames(wa, wb, segs)
         lo, hi = max(ia, wa), min(ib, wb)
         y[lo - ia:hi - ia] = yw[lo - wa:hi - wa]
@@ -228,7 +331,7 @@ def render_region(project, start_sec=None, end_sec=None, backend=None, channels=
     }
 
 
-def audition_segments(project, note_id, cents=0.0):
+def audition_segments(project, note_id, cents=0.0, region=None):
     """ノートを cents だけ動かした**つもり**の Segment 列（プロジェクトは書き換えない。issue #27）。
 
     画面でピッチをドラッグしている間のプレビュー音用。確定した編集に、そのノートの pitch_shift を
@@ -242,22 +345,61 @@ def audition_segments(project, note_id, cents=0.0):
     edits = list(project.edits) + [Edit(id="audition", kind="pitch_shift",
                                         target=Target.note(note_id),
                                         params={"cents": float(cents)}, author="human")]
-    segs = layered_segments(project, edits)
+    segs = layered_segments(project, edits, region=region)
     from ..project.fades import fade_segments
     return list(segs) + fade_segments(project)
 
 
+REGION_MARGIN_SEC = 1.0      # 要求範囲に掛かる（実際に再合成する）窓が、層を省いた範囲の端からこれ以上内側に収まること
+
+
+def _render_windows(project, segs, ia, ib, sr, audition_fast=True):
+    """`render_region` が (ia, ib) のために実際に再合成する窓 [(開始フレーム, 終了フレーム)]（同じ規則。長い窓の試聴は絞る）。"""
+    out = []
+    for a, b in windows_for(project, segs):
+        wa, wb = int(round(a * sr)), int(round(b * sr))
+        if wb <= ia or wa >= ib or wb - wa < 2:
+            continue
+        if audition_fast and wb - wa > 5 * sr:
+            has_timewarp = any((abs(s.ratio - 1.0) > 1e-9 or abs(s.move_ms) > 1e-9
+                                or s.silence_sec > 0.0) and s.end_sec >= a and s.start_sec <= b
+                               for s in segs)
+            if not has_timewarp:
+                wa, wb = _audition_window(a, b, ia, ib, sr, segs)
+        out.append((wa, wb))
+    return out
+
+
+def audition_segments_near(project, note_id, cents, t0, t1, region=None):
+    """audition_segments。region（素材の秒の範囲）が渡されたときは、その外へは層を当てない（ピッチのドラッグ 1 歩ごとに、
+    曲全体の層を当てる時間を省く）。要求範囲 [t0, t1] のために再合成する窓が region の端から REGION_MARGIN_SEC 以内に
+    触れたら、省かずに全体で作り直す。窓の中の Segment は省かないときと同じなので、音は変わらない。"""
+    if region is None or abs(float(cents)) < 1e-6:
+        return audition_segments(project, note_id, cents)
+    lo, hi = float(region[0]), float(region[1])
+    segs = audition_segments(project, note_id, cents, region=(lo, hi))
+    sr = int(project.take["sr"])
+    ia, ib = int(round(t0 * sr)), int(round(t1 * sr))
+    for wa, wb in _render_windows(project, segs, ia, ib, sr):
+        if wa / sr < lo + REGION_MARGIN_SEC or wb / sr > hi - REGION_MARGIN_SEC:
+            return audition_segments(project, note_id, cents)
+    return segs
+
+
 def audition(project, note_id, cents=0.0, start_sec=None, end_sec=None, renderer=None,
-             backend=None):
+             backend=None, segs=None, region=None):
     """つかんだノートのプレビュー音: ノートを cents だけ動かしたつもりで [start, end) を再合成する。(y, info)
 
     範囲の既定はノートの編集前の範囲（タイミングを動かしたノートは画面が編集後の範囲を渡す）。
-    中身は `render_region` と同じ（掛かる窓を丸ごと再合成して切り出す）。"""
+    中身は `render_region` と同じ（掛かる窓を丸ごと再合成して切り出す）。
+    segs: cents = 0 のとき、同じ版で作ってある Segment 列（無ければ作る）。"""
     n = project.note(note_id)
     t0 = n.start_sec if start_sec is None else float(start_sec)
     t1 = n.end_sec if end_sec is None else float(end_sec)
-    segs = audition_segments(project, note_id, cents)
-    y, info = render_region(project, t0, t1, backend=backend, renderer=renderer, segs=segs)
+    if segs is None or abs(float(cents)) >= 1e-6:
+        segs = audition_segments_near(project, note_id, cents, t0, t1, region)
+    y, info = render_region(project, t0, t1, backend=backend, renderer=renderer, segs=segs,
+                            audition_fast=True)
     info = dict(info, note_id=note_id, cents=round(float(cents), 3))
     return y, info
 

@@ -45,6 +45,8 @@ RMVPE_PATH = os.path.join(DEFAULT_MODELS_DIR, "rmvpe.onnx")
 
 # Gliss の F0 モデル。エンジンと一緒に配る（135 KB。配布版は vocal-engine.spec が exe に入れる）
 GLISS_F0_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", "gliss-f0.onnx")
+GLISS_F0_V2_PATH = os.path.join(os.path.dirname(GLISS_F0_PATH), "gliss-f0-v2.onnx")
+GLISS_F0_V2_VERSION = "m-017e490a7aa8"
 
 # 画面・MCP で選べる方式（並びは画面の並び）と、版（方式の中身を変えたら上げる。解析のキャッシュを分ける）。
 # Gliss の F0 モデルの版は、同梱のモデルファイルの SHA-256（`estimator_version`。モデルを替えたら自動で変わる）
@@ -150,6 +152,15 @@ def estimator_version(name):
     if name == "gliss":
         return _gliss_model_version()
     return ESTIMATOR_VERSIONS.get(name)
+
+
+def gliss_model_path(version=None):
+    """既存の補正に記録された v2 のみ旧重みで復元する。新規解析は常に現行モデル。"""
+    if version is None or version == estimator_version("gliss"):
+        return GLISS_F0_PATH
+    if version == GLISS_F0_V2_VERSION:
+        return GLISS_F0_V2_PATH
+    raise ModelMissingError("保存された Gliss F0 モデルの版を復元できない: %s" % version)
 
 
 def same_estimator(result_estimator, result_version, wanted):
@@ -279,7 +290,7 @@ def _to_grid(times_src, values, n_frames, hop_s=HOP_S, is_f0=True):
 
 def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
                 model_path=None, threshold=RMVPE_THRESHOLD,
-                energy_floor_db=ENERGY_FLOOR_DB):
+                energy_floor_db=ENERGY_FLOOR_DB, gliss_version=None):
     """10 ms ホップの F0 と V/UV。
 
     estimator: "rmvpe"（既定） / "gliss"（Gliss の F0 モデル） / "praat" / "fcpe"（代替） /
@@ -304,7 +315,7 @@ def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
             if est == "rmvpe":
                 f0, conf = _estimate_rmvpe(x, sr, n_frames, sweep, model_path, threshold)
             elif est == "gliss":
-                f0, conf = _estimate_gliss(x, sr, n_frames)
+                f0, conf = _estimate_gliss(x, sr, n_frames, gliss_version)
             elif est == "praat":
                 f0, conf = _estimate_praat(x, sr, n_frames)
             else:
@@ -316,8 +327,9 @@ def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
             conf = np.where(voiced, conf, 0.0) if est in ("gliss", "praat") else conf
             meta = {"vuv_rule": "%s f0>0 AND rms > %.1f dBFS" % (est, energy_floor_db),
                     "threshold": threshold, "sweep": bool(sweep)}
-            if estimator_version(est) is not None:
-                meta["version"] = estimator_version(est)
+            version = gliss_version if est == "gliss" and gliss_version else estimator_version(est)
+            if version is not None:
+                meta["version"] = version
                 meta["voicing"] = (GLISS_VOICING if est == "gliss" else PRAAT_VOICING)
             return F0Result(f0=f0, confidence=conf, voiced=voiced, rms_db=rms,
                             hop_s=HOP_S, sr=int(sr), estimator=est, elapsed_sec=elapsed,
@@ -359,19 +371,21 @@ _GLISS_LOOKAHEAD = 10
 GLISS_VOICING = "confidence >= %.2f (%g-%g Hz)" % (GLISS_CONF, GLISS_FMIN, GLISS_FMAX)
 
 
-def _gliss_session():
-    key = ("gliss", GLISS_F0_PATH)
+def _gliss_session(version=None):
+    path = gliss_model_path(version)
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        raise ModelMissingError("Gliss の F0 モデルが見つからない: %s" % path) from e
+    key = ("gliss", path, st.st_size, st.st_mtime_ns)
     with _MODEL_LOCK:
         if key not in _MODEL_CACHE:
             import onnxruntime as ort
-            if not os.path.exists(GLISS_F0_PATH):
-                raise ModelMissingError("Gliss の F0 モデルが見つからない: %s（エンジンと一緒に配るファイル）"
-                                        % GLISS_F0_PATH)
             so = ort.SessionOptions()
             so.log_severity_level = 3
             so.intra_op_num_threads = max(1, min(4, os.cpu_count() or 1))   # 小さいモデル。これ以上は効かない
             so.add_session_config_entry("session.intra_op.allow_spinning", "0")
-            _MODEL_CACHE[key] = ort.InferenceSession(GLISS_F0_PATH, sess_options=so,
+            _MODEL_CACHE[key] = ort.InferenceSession(path, sess_options=so,
                                                      providers=["CPUExecutionProvider"])
         return _MODEL_CACHE[key]
 
@@ -391,9 +405,9 @@ def _gliss_run(sess, audio):
     return pitch, conf
 
 
-def gliss_raw(x, sr):
+def gliss_raw(x, sr, version=None):
     """Gliss の F0 モデルの生の出力。-> 時刻（秒。フレームの中心）, F0（Hz）, 確信度（0..1）。16 ms 刻み。"""
-    sess = _gliss_session()
+    sess = _gliss_session(version)
     sig = np.asarray(x, dtype="float32")
     if int(sr) != GLISS_SR:
         import soxr
@@ -414,9 +428,9 @@ def gliss_raw(x, sr):
     return np.arange(len(pitch)) * (GLISS_HOP / GLISS_SR), pitch, conf
 
 
-def _estimate_gliss(x, sr, n_frames):
+def _estimate_gliss(x, sr, n_frames, version=None):
     """_estimate_rmvpe と同じ戻り値: (10 ms 格子の F0, 確信度)。"""
-    ts, f, c = gliss_raw(x, sr)
+    ts, f, c = gliss_raw(x, sr, version)
     voiced = (c >= GLISS_CONF) & (f > 0)
     f0g = _to_grid(ts, np.where(voiced, f, 0.0), n_frames)
     confg = _to_grid(ts, c, n_frames, is_f0=False) if len(ts) else np.zeros(n_frames)

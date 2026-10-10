@@ -350,7 +350,7 @@ def test_undo_guide_change_reschedules(env):
     _until(_ready(prep, tb))
     assert fake.calls["dtw"].count((440, 660)) == 1
     _ok(m.undo())                                # ガイドの指定を取り消す → g1 に戻る
-    assert prep.PREPARER._guide == _tid(r, "g1")
+    assert prep.PREPARER._guides == {_tid(r, "g1")}
     _until(_ready(prep, tb))
     assert fake.calls["dtw"].count((440, 330)) == 1           # 前の組み合わせは鍵付きで残っている
 
@@ -517,6 +517,38 @@ def test_explicit_estimator_is_kept_by_prep(env):
     finally:
         from vocal_engine.analysis import f0 as F
         F.set_preferred_estimator(None)
+
+
+def test_estimator_switch_waits_for_running_old_worker(env):
+    """旧方式の準備中は方式と履歴を確定せず、譲った後に新方式で準備する。"""
+    m, mt, prep, fake, paths, sdir = env
+    from vocal_engine.project.session import Session
+
+    gate = fake.gate[("f0", FREQ["take"])] = threading.Event()
+    tid = _open(m, paths, sdir)["session"]["current"]
+    _until(lambda: fake.entered.get(("f0", FREQ["take"])))
+    result = {}
+    worker = threading.Thread(target=lambda: result.setdefault(
+        "value", m.set_f0_estimator("praat", scope="current")))
+    worker.start()
+    try:
+        _until(lambda: prep.PREPARER._claimed)
+        assert worker.is_alive()
+        disk = Session.load(sdir)
+        assert disk.track(tid).get("estimator") is None
+        assert not any(e.get("kind") == "estimator" for e in disk.history or [])
+    finally:
+        gate.set()
+        worker.join(10)
+    assert not worker.is_alive()
+    _ok(result["value"])
+    _until(_ready(prep, tid))
+    disk = Session.load(sdir)
+    assert disk.track(tid)["estimator"] == "praat"
+    assert disk.history[-1]["kind"] == "estimator"
+    p = m._state["project"]
+    p.reload_if_changed()
+    assert p.analysis["take"]["estimator"] == "praat"
 
 
 def test_pause_and_foreground_yield(env):

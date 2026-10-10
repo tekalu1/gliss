@@ -1,7 +1,10 @@
 // トラックビュー（上）。モック `proposal/track-view.html` の設計のとおり（issue #7。`docs/track-view.md` §3）。
 //
-//  - トラックの見出しは 1 段目が 名前・ガイド指定のアイコン・M・S、2 段目が音量のスライダー・パンのノブ（高さ 40 px 未満は
+//  - トラックの見出しは 1 段目が 名前・ガイドのボタン・M・S、2 段目が音量のスライダー・パンのノブ（高さ 40 px 未満は
 //    2 段目を畳む）。音量・パンは M／S と同じ聴き比べの操作（再生だけに効く・取り消しの対象外・session に保存）。
+//  - **ガイドはトラックごと**（docs/track-view.md §9）: ガイドのボタン（プルダウン）で「共通のガイド」か
+//    ほかのボーカルを選ぶ（set_track_guide）。プラグインは 2 段目が空くので、そこに「今のガイドの名前 ▾」を出す。
+//    どれかのトラックのガイドになっているトラックには、レーンのクリップの左上に「ガイド」の札。
 //    見出しとレーンの境目をドラッグして見出しの幅を変える（140〜360 px。state.json の view に保存）。
 //    裏の準備（issue #63）がまだの間だけ、名前の右に小さな印（準備中の輪・待ちの点線の輪・失敗の !）を足す。
 //  - クリップ（音声ファイル 1 本）をクリック → そのトラックを編集対象にして、クリックした所の歌っている
@@ -11,7 +14,7 @@
 //    クリックで再生位置、ドラッグでループ）。
 //  - 上下の境界はドラッグで高さを変え、ダブルクリックで上を 1 トラック分に畳む／戻す。既定は全トラックが入る
 //    高さ（画面の 40% まで）。
-//  - 色は足さない: 編集中のトラックの波形は黄（テイク）、ガイドはグレー（エディターのガイドと同じ）、他は暗い灰。
+//  - 色は足さない: 編集中のトラックの波形は黄（テイク）、編集中のトラックのガイドはグレー（エディターのガイドと同じ）、他は暗い灰。
 //    聞こえないトラック（ミュート／ソロ）は波形を暗く。
 //  - **クリップの下半分を横にドラッグ → 音源全体の位置をずらす**（非破壊。`set_track(offset_sec)`。§4）。
 //    上半分は範囲のドラッグ（Studio One／Fender Studio Pro のスマートツールと同じ分け方: 上半分 = 範囲、
@@ -42,10 +45,12 @@ import {
 import { onPlayhead, onRender, render, renderToolbar } from './draw.js';
 import { adoptSession, guideSuffix, guideWhy, onSession, phonemeSuffix, setMix, setTrack } from './session.js';
 import { enqueue, handleEngineError, refresh, setHistoryHandler, wake } from './edits.js';
+import { refreshF0 } from './f0.js';
 import { dropBuffers, play, setGains, stop } from './audio.js';
 import { CUT_MIN_EDGE, covered, joinAt, normCuts, paintPiece, pieces } from './clipedit.js';
-import { closeMenu, openClipMenu, openRulerMenu, openTrackMenu } from './menus.js';
+import { closeMenu, justClosed, menuOpen, openClipMenu, openGuideMenu, openRulerMenu, openTrackMenu } from './menus.js';
 import { wheelAction } from './commands.js';
+import { createFollower } from './follow.js';
 import { G, currentDiv, snapStep, snapTime, tempo, ticks, timeSnapOn } from './grid.js';
 import { ARA, araCacheOf, araExtent, araLoop, araLoopHold, araRegions, araScale, araSeek, araSig, araToRep } from './ara.js';
 import {
@@ -67,6 +72,7 @@ const { SCALE_H, LANE_H } = LAYOUT;
 const { TAKE, GUIDE, SEL, INST, VOCAL } = COLORS;
 const ICON_MUTE = '<path d="M11 5 6 9H3v6h3l5 4z"/><path d="m22 9-6 6"/><path d="m16 9 6 6"/>';
 const ICON_GUIDE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 4 9 5-9 5-9-5z"/><path d="m3 14 9 5 9-5"/></svg>';
+const ICON_CARET = '<svg class="cv" viewBox="0 0 10 10" aria-hidden="true"><path d="m2.5 4 2.5 2.5L7.5 4"/></svg>';
 const SNAP_PX = 6;          // 元の位置（0）に吸い付く距離
 const SNAP_MAX_SEC = 0.03;  // ただしこれより大きくは吸い付かない（曲全体の表示では 6 px が 1 秒近くになる）
 const MIN_VIEW = 0.15;      // 下の表示範囲の最小（draw.js の zoom と同じ）
@@ -106,6 +112,7 @@ let lastHit = null;         // 最後のポインタの当たり（ツールを�
 let tvTool = 'main';        // 描いたときのツール（変わったらホバーを捨てる）
 let lastCut = { id: null, t: 0, x: 0 };   // はさみ: 前のクリック（切れ目のダブルクリックでつなぐ）
 let suppressClick = false;  // 並び替えのドラッグの後の click は名前のクリック（編集対象の切り替え）にしない
+const pendingGuide = new Map(); // トラック id → 選んだガイド（null = 共通）。エンジンが答えるまで見出しはこれで描く
 const overviews = new Map(); // トラック id → JSON メタと Int8 波形（セッションが変わったら捨てる）
 const waveCache = new Map();
 const ovLoading = new Set();
@@ -316,30 +323,70 @@ export function viewRange() {
   return [off + S.view.t0, off + S.view.t0 + S.view.span];
 }
 
+// ---------------------------------------------------------------- トラックごとのガイド
+/** トラックが明示したガイドの id（null = 共通のガイド）。選んでエンジンの答えを待っている間はその値。 */
+function guideIdOf(t) {
+  return pendingGuide.has(t.id) ? pendingGuide.get(t.id) : (t.guide_id || null);
+}
+
+/** トラックが実際に使うガイドの id（無ければ null）。エンジンの effective_guide_id（古いエンジンは共通のガイド）。 */
+function effectiveGuideOf(t) {
+  if (!t || t.kind !== 'vocal') return null;
+  if (pendingGuide.has(t.id)) {
+    const g = pendingGuide.get(t.id) || S.session?.guide || null;
+    return g === t.id ? null : g;
+  }
+  if (t.effective_guide_id !== undefined) return t.effective_guide_id || null;
+  const g = S.session?.guide || null;
+  return g === t.id ? null : g;
+}
+
+/** そのトラックを実際のガイドにしているトラック（「ガイド」の印。エンジンの guide_for）。 */
+function guideUsers(t) {
+  return S.tracks.filter((x) => x.id !== t.id && effectiveGuideOf(x) === t.id);
+}
+
+/** 見出しに出す今のガイド（名前と、共通のガイドに従っているか）。 */
+function guideText(t) {
+  const id = effectiveGuideOf(t);
+  const g = id ? S.tracks.find((x) => x.id === id) : null;
+  const own = !!guideIdOf(t);
+  if (!g) return { short: 'なし', long: t.guide ? 'なし（このトラックが共通のガイド）' : 'なし', own, none: true };
+  return own ? { short: g.name, long: g.name, own, none: false }
+    : { short: `共通（${g.name}）`, long: `共通のガイド（${g.name}）`, own, none: false };
+}
+
 function headsHtml() {
   return rows().map((t, i) => {
     const cur = t.id === S.session?.current;
     const cls = `th ${t.kind}${cur ? ' cur' : ''}${audible(t) ? '' : ' off'}`;
     const nm = esc(t.name);
-    const g = t.kind === 'vocal'
-      ? `<button class="g" data-act="guide" aria-pressed="${!!t.guide}" title="${t.guide ? 'ガイドを外す' : 'このトラックをガイドにする'}" aria-label="ガイド">${ICON_GUIDE}</button>`
-      : '<span class="gx"></span>';
+    const gt = t.kind === 'vocal' ? guideText(t) : null;
+    const gcls = gt ? `g${gt.own ? ' own' : ''}${gt.none ? ' none' : ''}` : '';
+    const gattr = gt ? ` data-act="guide" aria-haspopup="menu" aria-expanded="false" aria-label="${nm} のガイド: ${esc(gt.long)}"`
+      + ` title="ガイド: ${esc(gt.long)}（クリックで選ぶ）"` : '';
+    // 1 段目のボタン（アイコンだけ）。プラグインは 2 段目に名前つきのボタンを出し、1 段目のものは高さが小さいときだけ出す
+    const g = gt ? `<button class="${gcls} ic"${gattr}>${ICON_GUIDE}${ICON_CARET}</button>` : '<span class="gx"></span>';
+    // 「ガイド」の印はレーンのクリップの札（見出しの名前を削らない）。見出しは名前のツールチップに誰のガイドかを出す
+    const users = guideUsers(t);
+    const gfor = users.length ? `&#10;ガイド: ${esc(users.map((x) => x.name).join('・'))} が合わせる` : '';
     const pp = t.kind === 'vocal' ? `<span class="pp" data-pp="${esc(t.id)}"></span>` : '';
     const db = gainOf(t); const pan = panOf(t);
     const dragging = (k) => (mixDrag && mixDrag.id === t.id && mixDrag.kind === k ? ' drag' : '');
     const pct = (dbToPos(db) * 100).toFixed(2);
     // 高さが小さくて 2 段目を畳んでいる間は、値を名前のツールチップに出す
-    const tip = `${esc(t.path || t.name)} — 音量 ${fmtDb(db)} dB・パン ${fmtPan(pan)}`;
+    const tip = `${esc(t.path || t.name)} — 音量 ${fmtDb(db)} dB・パン ${fmtPan(pan)}${gfor}`;
     const r1 = `<div class="r1"><span class="nm" title="${tip}">${nm}</span>${pp}${g}`
       + `<button data-act="m" aria-pressed="${!!t.mute}" title="ミュート" aria-label="${nm} のミュート">M</button>`
       + `<button data-act="s" aria-pressed="${!!t.solo}" title="ソロ" aria-label="${nm} のソロ">S</button></div>`;
-    // 2 段目（音量・パン）は Gliss の再生だけに効く。プラグインは DAW が鳴らすので出さない（M・S と同じ）
-    const r2 = ARA ? '' : '<div class="r2">'
+    // 2 段目（音量・パン）は Gliss の再生だけに効く。プラグインは DAW が鳴らすので出さず、空いた 2 段目にガイドを出す
+    const r2 = ARA ? (gt ? `<div class="r2 rg"><button class="${gcls} wide"${gattr}>${ICON_GUIDE}`
+      + `<span class="gt">${esc(gt.short)}</span>${ICON_CARET}</button></div>` : '') : '<div class="r2">'
       + `<div class="vol${dragging('vol')}" data-mix="vol" role="slider" tabindex="0" aria-label="${nm} の音量" aria-valuemin="${GAIN_MIN_DB}" aria-valuemax="${GAIN_MAX_DB}" aria-valuenow="${db}" aria-valuetext="${fmtDb(db)} dB" title="音量 ${fmtDb(db)} dB（ダブルクリックで 0 dB・Shift で細かく）">`
       + `<i class="tr"></i><i class="fi" style="width:${pct}%"></i><i class="z" style="left:80%"></i><i class="kn" style="left:${pct}%"></i></div>`
       + `<span class="vv${Math.abs(db) > 0.04 ? ' chg' : ''}">${fmtDb(db)}</span>`
       + `<div class="pan${dragging('pan')}" data-mix="pan" role="slider" tabindex="0" aria-label="${nm} のパン" aria-valuemin="-100" aria-valuemax="100" aria-valuenow="${panUi(pan)}" aria-valuetext="${panSpeech(pan)}" title="パン ${fmtPan(pan)}（上下にドラッグ・ダブルクリックで中央）">${knobSvg(pan)}</div></div>`;
-    return `<div class="${cls}" data-i="${i}" data-id="${esc(t.id)}">${r1}${r2}</div>`;
+    return `<div class="${cls}" data-i="${i}" data-id="${esc(t.id)}"${t.guide ? ' data-common="1"' : ''}>${r1}${r2}</div>`;
   }).join('');
 }
 
@@ -407,14 +454,17 @@ export function renderTracks() {
   // 名前の入力中は見出しを作り直さない（入力欄が消える）
   if (hh !== lastHeads && !renaming) {
     const keep = focusedMix();
+    const keepG = focusedGuide();
     heads.innerHTML = hh;
     lastHeads = hh;
     paintPrep(true);
     if (keep) heads.querySelector(`.th[data-id="${CSS.escape(keep.id)}"] [data-mix="${keep.kind}"]`)?.focus({ preventScroll: true });
+    if (keepG) guideButton(keepG)?.focus({ preventScroll: true });
   }
   heads.style.setProperty('--th', `${TH}px`);
   const vr = viewRange();
   const sig = JSON.stringify([laneW, TH, range, vr, S.loop, S.session?.current, S.session?.guide,
+    S.tracks.map((t) => effectiveGuideOf(t)),
     rows().map((t) => [t.id, offsetOf(t), t.kind, t.mute, t.solo, t.duration_sec, t.cuts, t.mutes]), S.tool,
     overviews.size, dr && [dr.type, dr.row, dr.a, dr.b, dr.moved, dr.off], S.vd ? mutedSpans() : null,
     tempo(), G.fmt, currentDiv(), araSig()]);
@@ -449,11 +499,12 @@ function drawLanes(vr) {
   lanes.setAttribute('height', LH);
   lanes.setAttribute('viewBox', `0 0 ${laneW} ${LH}`);
   const curId = S.session?.current;
+  const curGuide = effectiveGuideOf(currentTrack());      // 編集中のトラックのガイド（エディターに灰色で重なるもの）
   let s = '';
   R.forEach((t, i) => {
     const y = i * TH;
     const cur = t.id === curId;
-    const isG = !!t.guide && !cur;
+    const isG = t.id === curGuide && !cur;
     s += `<rect x="0" y="${y}" width="${laneW}" height="${TH}" fill="${cur ? '#161619' : '#111113'}"/>`
       + `<line x1="0" y1="${y + 0.5}" x2="${laneW}" y2="${y + 0.5}" stroke="#232326"/>`;
     const off = offsetOf(t);
@@ -512,6 +563,17 @@ function drawLanes(vr) {
         s += `<rect data-muted-span="${f1(a)}" x="${f1(mx0)}" y="${y + CLIP_T}" width="${f1(Math.max(1, mx1 - mx0))}" height="${clipH()}" rx="2" fill="#161619" fill-opacity=".72" stroke="#8f8f94" stroke-opacity=".7" stroke-dasharray="3 2.5" pointer-events="none"/>`;
       }
     }
+  });
+  // 「ガイド」の印: どれかのトラックのガイドになっているトラックの、クリップの左上（見えている所）に札
+  R.forEach((t, i) => {
+    if (!guideUsers(t).length) return;
+    const rs = ARA ? araRegions(t) : null;
+    const x0 = rs && rs.length ? Math.min(...rs.map((r) => tvX(r.song_start))) : tvX(offsetOf(t));
+    const w = 38;
+    const tx = clamp(Math.max(x0, 0) + 4, 0, Math.max(0, laneW - w));
+    const ty = i * TH + CLIP_T + 2;
+    s += `<g data-gtag="${esc(t.id)}" pointer-events="none"><rect x="${f1(tx)}" y="${ty}" width="${w}" height="14" rx="7" fill="#1c1c1f" fill-opacity=".9" stroke="#4a4a50"/>`
+      + `<text x="${f1(tx + w / 2)}" y="${ty + 10.5}" font-size="10" text-anchor="middle" fill="#b4b4ba">ガイド</text></g>`;
   });
   // 下で表示している範囲（レーンをドラッグ中はその範囲）
   const ci = R.findIndex((t) => t.id === curId);
@@ -582,12 +644,18 @@ function drawRuler() {
   ruler.innerHTML = s;
 }
 
-function moveHead() {
-  // 再生位置に追従（issue #40）: ズームしている上の表示も、再生位置が出たら送る（全体表示なら要らない）
-  if (S.playing && G.follow && tvView && !dr && !hd && (S.head < range[0] || S.head > range[1])) {
+const upperFollow = createFollower();     // 上の表示の追従の規則（follow.js。下のピアノロールとは別に覚える）
+
+function moveHead({ locate = false } = {}) {
+  // 再生位置に追従（issue #40）: ズームしている上の表示も、再生位置が出たら送る（全体表示なら要らない）。
+  // 停止中は送らない（DAW 側で再生位置が動いたときだけ 1 回）。再生中に利用者が動かしたら、位置が戻るか次の再生まで送らない
+  if (!tvView) upperFollow.forget();
+  else {
     const w = worldRange();
-    if (S.head >= w[0] && S.head <= w[1]) {
+    const go = upperFollow.check({ playing: S.playing, locate, view: tvView, head: S.head, valid: S.head >= w[0] && S.head <= w[1] });
+    if (go && G.follow && !dr && !hd) {
       tvView = clampTv({ t0: S.head - tvView.span * 0.02, span: tvView.span });
+      if (tvView) upperFollow.placed(tvView);
       renderTracks();
       return;                       // renderTracks が再生位置も描く
     }
@@ -983,6 +1051,7 @@ setHistoryHandler(async (r) => {
   }
   replay();
   renderTracks();
+  if ((r.undone || r.redone)?.kind === 'estimator') await refreshF0({ syncSaved: true });
   return hold;
 });
 
@@ -1165,7 +1234,7 @@ async function reanalyze() {
   }
 }
 
-/** ガイドを指定する（null で外す）。 */
+/** 共通のガイドを指定する（null で外す）。ガイドを選んでいないトラックはこれに合わせる。 */
 export function setGuide(id) {
   return enqueue(async () => {
     S.busy = true;
@@ -1175,8 +1244,8 @@ export function setGuide(id) {
       adoptSession(r.session);
       if (r.reopened) await reanalyze();
       const why = guideWhy();
-      status(id ? `ガイド: ${S.tracks.find((t) => t.id === id)?.name}${why ? `（今のトラックには重ならない: ${why}）` : ''}`
-        : 'ガイドを外した');
+      status(id ? `共通のガイド: ${S.tracks.find((t) => t.id === id)?.name}${why ? `（今のトラックには重ならない: ${why}）` : ''}`
+        : '共通のガイドを外した');
     } catch (err) {
       if (!await handleEngineError(err)) status(`ガイドを変えられなかった: ${err.message}`);
     } finally {
@@ -1186,6 +1255,59 @@ export function setGuide(id) {
       wake();
     }
   }, { label: 'ガイドの指定' });
+}
+
+/** トラックのガイドを選ぶ（guideId = null で共通のガイドに戻す）。取り消しの履歴に 1 つ入る。
+ * エンジンが答えるまで見出しは選んだ値で描き、失敗したら元の選択に戻して知らせる。 */
+export function setTrackGuide(trackId, guideId) {
+  const t0 = S.tracks.find((x) => x.id === trackId);
+  if (!t0) return Promise.resolve();
+  if ((t0.guide_id || null) === (guideId || null) && !pendingGuide.has(trackId)) return Promise.resolve();
+  pendingGuide.set(trackId, guideId || null);
+  renderTracks();
+  return enqueue(async () => {
+    S.busy = true;
+    renderToolbar();
+    try {
+      const r = await call('set_track_guide', { track_id: trackId, guide_track_id: guideId || null, author: 'human' });
+      pendingGuide.delete(trackId);              // ここからはエンジンの答え（返り値のセッション）で描く
+      adoptSession(r.session);
+      if (r.reopened) await reanalyze();
+      const t = S.tracks.find((x) => x.id === trackId);
+      const why = trackId === S.session?.current ? guideWhy() : null;
+      status(`${t?.name} のガイド: ${guideText(t).long}${why ? `（重ならない: ${why}）` : ''}`);
+    } catch (err) {
+      if (!await handleEngineError(err)) status(`${t0.name} のガイドを変えられなかった（元に戻した）: ${err.message}`);
+    } finally {
+      pendingGuide.delete(trackId);
+      S.busy = false;
+      renderToolbar();
+      renderTracks();
+      render();
+      wake();
+    }
+  }, { label: 'ガイドの指定' });
+}
+
+/** 見出しのガイドのボタン（見えているほう。プラグインは 2 段目の名前つき、高さが小さいときは 1 段目のアイコン）。 */
+function guideButton(id) {
+  const th = heads?.querySelector(`.th[data-id="${CSS.escape(id)}"]`);
+  if (!th) return null;
+  return [...th.querySelectorAll('button.g')].find((b) => b.offsetParent !== null) || null;
+}
+
+function focusedGuide() {
+  const a = document.activeElement;
+  if (!a || !heads?.contains(a) || !a.classList.contains('g')) return null;
+  return a.closest('.th')?.dataset.id || null;
+}
+
+/** トラックのガイドのプルダウンを出す（見出しのボタンの下。右クリックの「ガイドを選ぶ…」からも）。 */
+export function openGuidePicker(id) {
+  const t = S.tracks.find((x) => x.id === id);
+  if (!t || t.kind !== 'vocal') return;
+  if (!guideButton(id)) heads?.querySelector(`.th[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest' });
+  openGuideMenu(t, () => guideButton(id));
 }
 
 // ---------------------------------------------------------------- ポインタ
@@ -1616,7 +1738,12 @@ function onHeadsClick(e) {
     const act = b.dataset.act;
     if (act === 'm') toggle(t, 'mute');
     else if (act === 's') toggle(t, 'solo');
-    else if (act === 'guide') setGuide(t.guide ? null : t.id);
+    else if (act === 'guide') {
+      // プルダウン（もう一度押すと閉じる。外を押して閉じた直後の click では開き直さない）
+      if (menuOpen()) closeMenu();
+      else if (!justClosed(b)) openGuidePicker(t.id);
+      return;
+    }
     root.focus({ preventScroll: true });
     return;
   }
@@ -1635,7 +1762,7 @@ async function toggle(t, key) {
 }
 
 // ---------------------------------------------------------------- 音量・パン（見出しの 2 段目）
-// M／S と同じ聴き比べの操作: その場で音に当て（再生中も）、取り消しの履歴には入れず、session に保存する（session.js setMix）。
+// M／S と同じ聴き比べの操作: その場で音に当て（再生中も）、session に保存する（session.js setMix）。
 // 値を変えると見出しを作り直すので、ドラッグは window で追う。2 回押しは押下の間隔で見る（dblclick は作り直しで届かない）。
 
 /** 音量・パンを当てる（変わらなければ何もしない）。エンジンへの保存の失敗は状態行に出す。 */
@@ -2077,6 +2204,13 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   heads.addEventListener('click', onHeadsClick);
   heads.addEventListener('pointerdown', onMixDown);
   heads.addEventListener('keydown', onMixKey);
+  heads.addEventListener('keydown', (e) => {
+    const b = e.target.closest?.('button.g');
+    if (!b || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openGuidePicker(b.closest('.th').dataset.id);
+  });
   heads.addEventListener('pointerdown', onHeadsDown);
   heads.addEventListener('pointermove', onHeadsMove);
   window.addEventListener('pointerup', onHeadsUp);
@@ -2093,6 +2227,7 @@ export function installTracks(rootEl, { onViewChanged, onNewTake: newTake } = {}
   onSession((sess) => {
     ensureOverviews();
     renderTracks();
+    renderToolbar();
     adoptPrep((sess?.tracks || []).map((t) => [t.id, t.prep]), { session: true });
   });
   window.addEventListener('resize', () => { lastSig = ''; renderTracks(); });
@@ -2117,7 +2252,10 @@ export function tracksState() {
     heads: [...(heads?.querySelectorAll('.th') || [])].map((el) => ({
       id: el.dataset.id, cur: el.classList.contains('cur'), off: el.classList.contains('off'),
       gain: +el.querySelector('.vol')?.getAttribute('aria-valuenow'), pan: +el.querySelector('.pan')?.getAttribute('aria-valuenow'),
-      guide: el.querySelector('.g')?.getAttribute('aria-pressed') === 'true',
+      guide: el.dataset.common === '1',
+      guideMark: !!lanes?.querySelector(`[data-gtag="${CSS.escape(el.dataset.id)}"]`),
+      guideLabel: [...el.querySelectorAll('button.g')].find((b) => b.offsetParent !== null)?.getAttribute('aria-label') || null,
+      guideText: el.querySelector('.g.wide .gt')?.textContent || null,
       prep: el.querySelector('.pp')?.dataset.state || null,
       prepTip: el.querySelector('.pp')?.title || null,
     })),

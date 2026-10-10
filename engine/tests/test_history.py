@@ -87,18 +87,19 @@ def test_one_history_across_tracks_switches_track(tmp_path, mcp):
     assert [e["track"] for e in hs] == [t1, t2]
 
 
-def test_track_operations_are_undoable_but_mute_solo_are_not(tmp_path, mcp):
+def test_track_operations_and_mute_solo_are_undoable(tmp_path, mcp):
     m, mt = mcp
     d = str(tmp_path / "h2")
     t1, t2 = _open(m, d)
     _ok(mt.set_track(t2, offset_sec=0.3, author="human"))
-    _ok(mt.set_track(t2, mute=True, solo=True))              # 履歴に入らない
+    _ok(mt.set_track(t2, mute=True, solo=True))
     _ok(mt.set_track(t2, name="guide vox", author="human"))
     r = _ok(mt.add_track(CLIP_E, kind="inst", author="human"))
     t3 = r["track"]
     _ok(mt.set_guide_track(None, author="human"))
     labels = [e["label"] for e in _hist(d)]
-    assert labels == ["トラックの位置", "トラックの名前", "トラックの追加", "ガイドの指定"]
+    assert labels == ["トラックの位置", "トラックのミュート・トラックのソロ",
+                      "トラックの名前", "トラックの追加", "ガイドの指定"]
     # ガイドの指定を戻す
     u = _ok(m.undo())
     assert u["undone"]["label"] == "ガイドの指定" and u["switched_to"] == t2   # 操作したトラックへ
@@ -113,12 +114,15 @@ def test_track_operations_are_undoable_but_mute_solo_are_not(tmp_path, mcp):
     tr = {t["id"]: t for t in _ok(mt.list_tracks())["tracks"]}
     assert u["switched_to"] == t2 and tr[t2]["name"] == stem(GUIDE)
     assert tr[t2]["mute"] is True and tr[t2]["solo"] is True
-    # 位置を戻す
+    # ミュート／ソロと位置を順に戻す
     _ok(m.undo())
     tr = {t["id"]: t for t in _ok(mt.list_tracks())["tracks"]}
-    assert tr[t2]["offset_sec"] == 0.0 and tr[t2]["mute"] is True
+    assert tr[t2]["mute"] is False and tr[t2]["solo"] is False
+    _ok(m.undo())
+    tr = {t["id"]: t for t in _ok(mt.list_tracks())["tracks"]}
+    assert tr[t2]["offset_sec"] == 0.0 and tr[t2]["mute"] is False
     # やり直すと足したトラックが同じ id・同じ位置で戻る
-    for _ in range(3):
+    for _ in range(5):
         _ok(m.redo())
     tr = [t["id"] for t in _ok(mt.list_tracks())["tracks"]]
     assert tr == [t1, t2, t3]
@@ -331,7 +335,8 @@ def test_continuous_curve_over_a_gap_is_not_smoothed(tmp_path):
     from vocal_engine.project.model import Target
     plain = Project.open(CLIP_A, None, project_dir=str(tmp_path / "a"))
     plain.analyze()
-    rows = [(a, b) for a, b, c, _ in TM.connections(plain) if c and b.start_sec - a.end_sec > 0.03]
+    # つなぎの相手は beta.10 までの既定（子音をはさんだ短い隙間も接続。pitch.transitions）
+    rows = [(a, b) for a, b, c, _ in TM.connections(plain, legacy=True) if c and b.start_sec - a.end_sec > 0.03]
     assert rows, "隙間のある接続が無い"
     a, b = rows[0]
     L = b.end_sec - a.start_sec
@@ -354,8 +359,8 @@ def test_small_differences_are_not_steps(plain):
     assert not any(t.active for t in trs)
 
 
-def test_merge_removes_the_silence_at_the_boundary(plain):
-    """分割 → 切り離して左を縮める（境目に無音）→ 結合: 無音の穴を残さず、前後の位置は変えない。"""
+def test_merge_keeps_the_silence_at_the_boundary(plain):
+    """分割 → 切り離して左を縮める → 結合しても手動の無音と両側の位置を保つ。"""
     from vocal_engine.project import timing as TM
     m = _plain_mcp(plain)
     n = plain.note("n006")
@@ -368,12 +373,13 @@ def test_merge_removes_the_silence_at_the_boundary(plain):
     tm0 = TM.current_map(plain)
     a0, b0 = tm0.at(n.start_sec, "right"), tm0.at(n.end_sec, "left")
     r = _ok(m.merge_notes("n006", rid, author="human"))
-    assert r["removed_silence"] is True
-    assert not [e for e in plain.edits if e.kind == "silence" and abs(e.target.start_sec - t) < 0.01]
+    assert r["removed_silence"] is False
+    assert [e for e in plain.edits if e.kind == "silence" and abs(e.target.start_sec - t) < 0.01]
     tm1 = TM.current_map(plain)
     assert abs(tm1.at(n.start_sec, "right") - a0) < 1e-6
     assert abs(tm1.at(n.end_sec, "left") - b0) < 1e-6
-    assert abs(tm1.at(t, "left") - tm1.at(t, "right")) < 1e-9       # 境目に縦の段（無音）が無い
+    assert abs(tm1.at(t, "left") - tm0.at(t, "left")) < 1e-9
+    assert abs(tm1.at(t, "right") - tm0.at(t, "right")) < 1e-9
     # 後ろのノートは 1 サンプルも動かない
     nxt = plain.note("n007")
     assert abs(tm1.at(nxt.start_sec) - tm0.at(nxt.start_sec)) < 1e-9

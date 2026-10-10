@@ -29,9 +29,11 @@
 | kind | 中身 | 取り消し |
 |---|---|---|
 | `edit` | トラックのプロジェクトの changeset（1 つ以上。複数ノートのピッチのドラッグは 1 つにまとめる） | そのトラックを編集対象にして、changeset を後ろから undo |
-| `session` | トラックの追加・外す・位置・名前・種類・ガイドの指定。前後のスナップショット（トラックの並びとガイド） | 前のスナップショットに戻す（**ミュート／ソロ・ガイドの歌詞の控えは今のまま**） |
+| `session` | トラックの操作と前後のスナップショット | 前のスナップショットへ。単体版のミキサー操作ではミュート／ソロ・音量・パンも戻す |
+| `archive` | 明示的な ARA 補正インポートの前後 | 補正全体と解析方式を一操作で戻す。ホストの初期復元は履歴外 |
+| `estimator` | 単体版の F0 方式と各トラックの解析方式 | 方式を戻し、必要な解析を復元する |
 
-- 取り消せないもの: ミュート／ソロ・表示・選択・編集対象の切り替え（DAW と同じ線引き。`proposal/v3.html` §1）
+- 取り消せないもの: 表示・選択・編集対象の切り替え、ARA で DAW が所有するミキサー操作
 - 新しい操作を入れると、やり直しの列（末尾の取り消し済み）は捨てる
 - テンポ（`tempo`。issue #18）も `session` の項目に入る（スナップショットに含める）。ドラッグ・続けたホイールの変更は
   group で 1 つの項目にまとめる（`record_session(group=…)`）
@@ -240,12 +242,22 @@ def _norm_track(t):
     t.setdefault("clip", None)
     t.setdefault("source_id", None)
     t.setdefault("ara_id", None)
+    if not t.get("guide_id"):
+        t.pop("guide_id", None)                  # このトラックが使うガイドのトラック。無ければ（共通のガイド）キーごと持たない
     # 切れ目と、消した部分（クリップの分割。トラックの頭＝クリップの頭が 0 の秒。offset_sec で動かしても一緒に動く）
     dur = t.get("duration_sec")
     t["cuts"] = norm_cuts(t.get("cuts"), dur)
     t["mutes"] = norm_mutes(t.get("mutes"), dur)
     t.setdefault("name", os.path.splitext(os.path.basename(t.get("path") or "track"))[0])
     return t
+
+
+def set_guide_id(t, guide_id):
+    """トラックごとのガイドを決める（None = 共通のガイドに戻す。キーごと外す）。"""
+    if guide_id:
+        t["guide_id"] = guide_id
+    else:
+        t.pop("guide_id", None)
 
 
 class Session:
@@ -265,7 +277,8 @@ class Session:
         self.tempo = None            # テンポ（issue #18。無ければ秒のグリッド）
         self.tempo_checked = []      # iXML のテンポを読みに行ったトラック（読み直さない）
         self.ara = False             # DAW（ARA）のドキュメントのセッション（mcp_ara.py）
-        self.ara_gone = {}           # 外した ARA のトラック: ara_id → {id, …}（足し直したら同じ id）
+        self.ara_gone = {}           # 外した ARA のトラック: ara_id → {id, guide_id?, guide_refs?, …}（足し直したら同じ id・同じガイドの指定）
+        self.ara_guide_wait = {}     # 足し直したら戻すガイドの指定: トラック id → ガイドのトラック id（相手がまだ戻っていない）
 
     # ------------------------------------------------------------ 読み書き
     @property
@@ -293,6 +306,7 @@ class Session:
         self.tracks = [_norm_track(t) for t in d.get("tracks") or []]
         ids = {t["id"] for t in self.tracks}
         self.guide = d.get("guide") if d.get("guide") in ids else None
+        self._drop_dangling_guides(ids)
         self.current = d.get("current") if d.get("current") in ids else None
         self.missing_guide = d.get("missing_guide") or None
         self.seq = max([int(d.get("seq") or 0)] + [_num_id(t["id"]) for t in self.tracks])
@@ -305,6 +319,7 @@ class Session:
         self.ara = bool(d.get("ara"))
         self.ara_gone = {str(k): dict(v) if isinstance(v, dict) else {"id": str(v)}
                          for k, v in (d.get("ara_gone") or {}).items()}
+        self.ara_guide_wait = {str(k): str(v) for k, v in (d.get("ara_guide_wait") or {}).items()}
         self._sig = self._stat()
         return self
 
@@ -314,6 +329,8 @@ class Session:
              "tracks": self.tracks, "tempo": self.tempo, "tempo_checked": self.tempo_checked}
         if self.ara:
             d.update(ara=True, ara_gone=self.ara_gone)
+            if self.ara_guide_wait:
+                d["ara_guide_wait"] = self.ara_guide_wait
         if self.history is not None:
             d.update(history=self.history, history_seq=self.history_seq,
                      history_marks=self.history_marks)
@@ -477,14 +494,54 @@ class Session:
                     and n == int(round(float(clip["length_sec"]) * sr)))
         return off == 0 and n == int(frames)
 
+    def _drop_dangling_guides(self, ids=None):
+        """トラックごとのガイド（`guide_id`）のうち、無いトラック・自分自身を指すものを外す。"""
+        ids = ids if ids is not None else {t["id"] for t in self.tracks}
+        for t in self.tracks:
+            if t.get("guide_id") and (t["guide_id"] not in ids or t["guide_id"] == t["id"]):
+                t.pop("guide_id")
+
     def remove_track(self, track_id):
         t = self.track(track_id)
         self.tracks = [x for x in self.tracks if x["id"] != track_id]
+        self.drop_guide_refs(track_id)
         if self.guide == track_id:
             self.guide = None
         if self.current == track_id:
             self.current = None
         return t
+
+    def drop_guide_refs(self, guide_id):
+        """トラックごとのガイドで guide_id を指しているものを、共通のガイドに戻す（そのトラックを外した・伴奏にした）。"""
+        for x in self.tracks:
+            if x.get("guide_id") == guide_id:
+                x.pop("guide_id")
+
+    def effective_guide_id(self, t):
+        """トラック t が使うガイドのトラック id。`guide_id`（トラックごと）があればそれ、無ければ共通のガイド（`guide`）。
+        どちらも無ければ None。t 自身は返さない（共通のガイドのトラック自身にはガイドが無い）。"""
+        if t.get("kind") != "vocal":
+            return None                          # 伴奏はガイドを持たない
+        gid = t.get("guide_id") or self.guide
+        return gid if gid and gid != t["id"] else None
+
+    def set_kind(self, t, kind):
+        """トラックの種類を変える。伴奏にしたら、そのトラックのガイドの指定と、それを指していた指定（トラックごと・共通）を外す。"""
+        t["kind"] = kind
+        if kind == "inst":
+            self.drop_guide_refs(t["id"])
+            set_guide_id(t, None)
+            if self.guide == t["id"]:
+                self.guide = None
+
+    def guide_users(self):
+        """ガイドとして使われているトラック id → それを実効のガイドにしているトラック id の並び（ボーカルだけ）。"""
+        out = {}
+        for t in self.vocal_tracks():
+            g = self.effective_guide_id(t)
+            if g:
+                out.setdefault(g, []).append(t["id"])
+        return out
 
     def vocal_tracks(self):
         return [t for t in self.tracks if t["kind"] == "vocal"]
@@ -517,9 +574,10 @@ class Session:
         ガイドのトラックを「t の頭のタイムライン上の位置」から切り出す。位置の差が 0 でガイドが
         ファイル全体なら、パスそのもの（段階 2 までと同じ＝既存の解析・歌詞をそのまま使う）。
         """
-        if not self.guide:
+        gid = t.get("guide_id") or self.guide        # トラックごとの指定 → 共通のガイド
+        if not gid:
             return None, None
-        g = self.track(self.guide)
+        g = self.track(gid)
         if g["id"] == t["id"]:
             return None, "編集対象がガイドのトラック自身"
         if g["kind"] != "vocal":
@@ -572,22 +630,22 @@ class Session:
                     remember_open(Project(pdir).load())
                 except Exception:                # noqa: BLE001  読めなければ Project.open に任せる
                     pass
-            self._stash_guide_lyrics(pdir)
+            self._stash_guide_lyrics(pdir, t)
             p = Project.open(tclip, gclip, project_dir=pdir,
                              reuse=reuse, lyrics=lyrics, guide_lyrics=guide_lyrics)
             p.estimator_pref = self.estimator_of(t)
             if gclip is not None:
-                p.guide_take_cache_path = self._guide_take_cache_path()
+                p.guide_take_cache_path = self._guide_take_cache_path(t)
             missing = (why or "").startswith("ガイドの音声が見つからない") or (
-                not self.guide and self.missing_guide)
+                not (t.get("guide_id") or self.guide) and self.missing_guide)
             if gclip is None and p.guide is not None and not missing:
                 p.clear_guide()
             if gclip is not None and guide_lyrics is None:
-                self._restore_guide_lyrics(p)
+                self._restore_guide_lyrics(p, t)
         return p, why
 
-    def _guide_take_cache_path(self):
-        gt = self._guide_track()
+    def _guide_take_cache_path(self, t):
+        gt = self._guide_track(t)
         if gt is None or not gt.get("project_dir"):
             return None
         return os.path.join(self.project_dir_of(gt), "cache", "take-analysis.json")
@@ -656,25 +714,28 @@ class Session:
                     q.lyrics["guide"] = g_lyr
                 for k in ("guide", "alignment", "phonemes_guide"):
                     q.analysis.pop(k, None)
-            q.guide_take_cache_path = self._guide_take_cache_path()
-            self._stash_guide_lyrics(pdir)
-            want = self._guide_lyrics_for(q)
+            q.guide_take_cache_path = self._guide_take_cache_path(t)
+            self._stash_guide_lyrics(pdir, t)
+            want = self._guide_lyrics_for(q, t)
             if want and want != q.lyrics.get("guide", []):
                 q.lyrics["guide"] = want
         return q, why
 
     # ---- ガイドの歌詞: ガイドの素材（ファイル）上の秒でガイドのトラックに控える。
     #      ガイドを外す・ずらす・別のテイクに重ねるたびにプロジェクトの歌詞が捨てられても、ここから戻す
-    def _guide_track(self):
+    def _guide_track(self, t):
+        """トラック t の実効のガイドのトラック（無ければ None）。"""
+        gid = self.effective_guide_id(t)
         try:
-            return self.track(self.guide) if self.guide else None
+            return self.track(gid) if gid else None
         except SessionError:
             return None
 
-    def _stash_guide_lyrics(self, pdir):
+    def _stash_guide_lyrics(self, pdir, t=None):
         """プロジェクトのガイドの歌詞（ガイドの切り出し内の秒）→ ガイドのトラックの `guide_lyrics`（ファイル上の秒）。
 
-        ガイドの切り出しの外にある控え（前にずらして外に出た区間）は残す。"""
+        ガイドの切り出しの外にある控え（前にずらして外に出た区間）は残す。
+        t: このプロジェクトのトラック。同じ音のトラックが複数あるとき、t の実効のガイドを先に当てる。"""
         cp = cached_project(pdir)                # メモリに置いた Project がディスクと同じなら読まない（issue #63）
         if cp is not None:
             g, ent = cp.guide, LY.normalize(cp.lyrics.get("guide"))
@@ -692,9 +753,10 @@ class Session:
         if not g or not ent:
             return
         gt = None
-        for t in self.tracks:
-            if t["kind"] == "vocal" and t.get("sha256") == g.get("sha256"):
-                gt = t
+        first = self._guide_track(t) if t is not None else None
+        for x in ([first] if first is not None else []) + self.tracks:
+            if x["kind"] == "vocal" and x.get("sha256") == g.get("sha256"):
+                gt = x
                 break
         if gt is None:
             return
@@ -713,14 +775,14 @@ class Session:
         except Exception:                        # noqa: BLE001  重なり: 今のものを優先
             gt["guide_lyrics"] = now
 
-    def _restore_guide_lyrics(self, p):
+    def _restore_guide_lyrics(self, p, t):
         """ガイドのトラックの控え（ファイル上の秒）→ プロジェクトのガイドの歌詞（切り出し内の秒）。"""
-        want = self._guide_lyrics_for(p)
+        want = self._guide_lyrics_for(p, t)
         if want and want != p.lyrics.get("guide", []):
             p.set_lyrics_entries(want, "guide")
 
-    def _guide_lyrics_for(self, p):
-        gt = self._guide_track()
+    def _guide_lyrics_for(self, p, t):
+        gt = self._guide_track(t)
         ctl = gt.get("guide_lyrics") if gt else None
         if not ctl or p.guide is None:
             return None
@@ -742,7 +804,7 @@ class Session:
         if p.guide is None:
             return True
         c = M.as_clip(want)
-        g = self.track(self.guide)
+        g = self.track(t.get("guide_id") or self.guide)
         off = int(c.offset_frames or 0)
         n = int(c.length_frames) if c.length_frames is not None else int(g["source_frames"])
         return not (_same_path(p.guide.get("path"), c.source)
@@ -758,28 +820,37 @@ class Session:
                 "tempo": copy.deepcopy(self.tempo)}
 
     @staticmethod
-    def structure(snap):
-        """スナップショットのうち、取り消しの対象になるところ（ミュート／ソロ・音量・パン・ガイドの歌詞の控えを除く）。"""
-        drop = ("mute", "solo", "gain_db", "pan", "guide_lyrics")
+    def structure(snap, include_mixer=False):
+        """スナップショットのうち、取り消しの対象になるところ。"""
+        drop = ("guide_lyrics",) if include_mixer else ("mute", "solo", "gain_db", "pan", "guide_lyrics")
         return {"tracks": [{k: v for k, v in t.items() if k not in drop} for t in snap["tracks"]],
                 "guide": snap.get("guide"), "tempo": snap.get("tempo")}
 
-    def restore(self, snap):
-        """スナップショットに戻す。ミュート／ソロ・音量・パン・ガイドの歌詞の控えは今のまま（取り消しの対象外）。
+    def restore(self, snap, include_mixer=False, other=None):
+        """スナップショットに戻す。通常の履歴ではミキサー値を保つ。単体版のミキサー操作だけ値を戻す。
 
         DAW（ARA）のセッションでは、ARA のトラック（有無・位置・名前・素材）と DAW のテンポ（source = "daw"）は
-        今のまま（DAW が決めたもの）。戻すのはガイドの指定・画面で変えたテンポと、ARA でないトラック。"""
+        今のまま（DAW が決めたもの）。戻すのはガイドの指定・画面で変えたテンポと、ARA でないトラック。
+        other: 取り消しの項目の反対側のスナップショット。ARA のトラックのガイドの指定（`guide_id`）は、その項目で
+        変わったトラックだけ戻す（`ara_sync` で戻した別のトラックの指定を巻き添えにしない）。"""
         cur = {t["id"]: t for t in self.tracks}
         tracks = copy.deepcopy(snap["tracks"])
         if self.ara:
+            was = {t["id"]: t for t in tracks}
+            opp = {t["id"]: t for t in (other or {}).get("tracks") or []}
             tracks = ([copy.deepcopy(t) for t in self.tracks if t.get("ara_id")]
                       + [t for t in tracks if not t.get("ara_id")])
+            for t in tracks:                     # トラックごとのガイドは Gliss の指定（DAW が決めない）: 項目で変わったものだけ戻す
+                if t.get("ara_id") and t["id"] in was and (
+                        other is None or was[t["id"]].get("guide_id") != (opp.get(t["id"]) or {}).get("guide_id")):
+                    set_guide_id(t, was[t["id"]].get("guide_id"))
         for t in tracks:
             c = cur.get(t["id"])
             if c is None:
                 continue
-            t["mute"], t["solo"] = c.get("mute", False), c.get("solo", False)
-            t["gain_db"], t["pan"] = c.get("gain_db", 0.0), c.get("pan", 0.0)
+            if not include_mixer or self.ara:
+                t["mute"], t["solo"] = c.get("mute", False), c.get("solo", False)
+                t["gain_db"], t["pan"] = c.get("gain_db", 0.0), c.get("pan", 0.0)
             if c.get("guide_lyrics") is not None:
                 t["guide_lyrics"] = copy.deepcopy(c["guide_lyrics"])
             else:
@@ -788,6 +859,7 @@ class Session:
         ids = {t["id"] for t in self.tracks}
         g = snap.get("guide")
         self.guide = g if g in ids else None
+        self._drop_dangling_guides(ids)
         self.missing_guide = copy.deepcopy(snap.get("missing_guide"))
         daw_tempo = self.ara and (self.tempo or {}).get("source") == "daw"
         if "tempo" in snap and not daw_tempo:    # テンポを持たない前の版のスナップショットでは今のまま
@@ -871,8 +943,31 @@ class Session:
         self._trim()
         return e, dropped
 
+    def record_archive(self, track_id, before, after, estimator_before, estimator_after,
+                       mark_before, label="補正を取り込む", author="ai"):
+        """明示的な補正インポートを、置換前の補正も含む一操作にする。"""
+        self.ensure_history()
+        dropped = self._drop_redo_tail()
+        e = self._append({"kind": "archive", "track": track_id, "label": label,
+                          "author": author, "at": _now(), "before": before, "after": after,
+                          "estimator_before": estimator_before,
+                          "estimator_after": estimator_after,
+                          "mark_before": mark_before,
+                          "mark_after": int(self.history_marks.get(track_id) or 0)})
+        self._trim()
+        return e, dropped
+
+    def record_estimator(self, track_id, before, after):
+        """単体版の F0 方式を、トラックごとの明示方式と解析の復元情報ごと記録する。"""
+        self.ensure_history()
+        dropped = self._drop_redo_tail()
+        e = self._append({"kind": "estimator", "track": track_id, "label": "ピッチ検出の方式",
+                          "author": "human", "at": _now(), "before": before, "after": after})
+        self._trim()
+        return e, dropped
+
     def record_session(self, label, track_id, before, after, current_before=None,
-                       current_after=None, author="ai", group=None):
+                       current_after=None, author="ai", group=None, include_mixer=False):
         """トラックの操作を履歴に足す（変わっていなければ足さない）。(項目 | None, 捨てたやり直しの列)
 
         group が直前の項目（取り消していない `session`）と同じなら、その項目の after を差し替えて 1 つにまとめる
@@ -880,20 +975,21 @@ class Session:
         self.ensure_history()
         last = self.history[-1] if self.history else None
         if (group and last is not None and not last.get("undone") and last.get("group") == group
-                and last.get("kind") == "session"):
+                and last.get("kind") == "session" and bool(last.get("include_mixer")) == include_mixer):
             last["after"] = after
             last["label"] = label
             last["current_after"] = current_after
-            if self.structure(last["before"]) == self.structure(after):
+            if self.structure(last["before"], include_mixer) == self.structure(after, include_mixer):
                 self.history.pop()
                 return None, []
             return last, []
-        if self.structure(before) == self.structure(after):
+        if self.structure(before, include_mixer) == self.structure(after, include_mixer):
             return None, []
         dropped = self._drop_redo_tail()
         e = self._append({"kind": "session", "track": track_id, "label": label, "author": author,
                           "at": _now(), "before": before, "after": after,
-                          "current_before": current_before, "current_after": current_after})
+                          "current_before": current_before, "current_after": current_after,
+                          "include_mixer": include_mixer})
         if group:
             e["group"] = group
         self._trim()
@@ -997,12 +1093,17 @@ class Session:
     # ------------------------------------------------------------ 要約（MCP・画面）
     def summary(self, current=None, project=None):
         tracks = []
+        users = self.guide_users()
         for t in self.tracks:
             d = {k: t.get(k) for k in ("id", "name", "kind", "path", "offset_sec", "duration_sec",
                                        "sr", "channels", "mute", "solo", "gain_db", "pan", "clip", "cuts", "mutes")}
             if t.get("ara_id"):                  # DAW（ARA）のトラック: AudioModification と DAW のトラック名
                 d["ara_id"], d["group"] = t["ara_id"], t.get("group")
-            d["guide"] = t["id"] == self.guide
+            d["guide"] = t["id"] == self.guide              # 共通のガイド（set_guide_track）
+            d["guide_id"] = t.get("guide_id")               # このトラックに明示したガイド（null = 共通のガイド）
+            d["effective_guide_id"] = self.effective_guide_id(t) if t["kind"] == "vocal" else None
+            d["is_guide"] = bool(users.get(t["id"]))        # どれかのトラックの実効のガイドになっている
+            d["guide_for"] = list(users.get(t["id"], []))
             d["current"] = t["id"] == current
             d["audible"] = self.audible(t)
             d["project_dir"] = self.project_dir_of(t) if t.get("project_dir") else None
@@ -1153,8 +1254,9 @@ def open_session(take, guide=None, project_dir=None, reuse=True, lyrics=None, gu
         sha = sha256_file(tpath)
         if sha != prim.get("sha256"):
             what.append("テイクの差し替え")
-            # 別の素材になった: 前のテイクの位置・切れ目・消した部分・ミュート／ソロ・音量・パン・ガイドの歌詞の控えは引き継がない
+            # 別の素材になった: 前のテイクの位置・切れ目・消した部分・ミュート／ソロ・音量・パン・ガイドの指定・ガイドの歌詞の控えは引き継がない
             prim.update(offset_sec=0.0, mute=False, solo=False, gain_db=0.0, pan=0.0, cuts=[], mutes=[])
+            prim.pop("guide_id", None)
             prim.pop("guide_lyrics", None)
         prim.update(path=tpath, sha256=sha, sr=int(info.samplerate),
                     channels=int(info.channels), source_frames=int(info.frames), clip=tc,

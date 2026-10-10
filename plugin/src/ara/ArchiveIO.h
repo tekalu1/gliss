@@ -17,12 +17,15 @@ struct ModificationArchive
 /** DAW のソングに保存するもの（ARA のアーカイブ。docs/ara-plugin.md の「編集の単位・保存」）。解析のキャッシュは入れない（作業場所に持つ）。
 
     { "format": "gliss-ara", "version": 1,
-      "document": { "work_key": "<作業場所の鍵>", "guide": "<ガイドの修飾の persistentID>" | null },
+      "document": { "work_key": "<作業場所の鍵>", "guide": "<ガイドの修飾の persistentID>" | null,
+                    "guides": { "<修飾の persistentID>": "<その修飾のガイドの修飾の persistentID>" } },   // guides は修飾が 1 つでもあれば（空でも）書く
       "modifications": { "<persistentID>": { "name": "…", "archive": { …Project.to_archive()… } | null } } } */
 struct DocumentArchive
 {
     juce::String workKey;
-    juce::String guide;
+    juce::String guide;                                  // 共通のガイド
+    std::map<juce::String, juce::String> guides;         // トラックごとのガイド（修飾 → ガイドの修飾）
+    bool hasGuides = false;                              // 読んだアーカイブに guides があった（無ければ古い版。作業場所の指定をそのまま使う）
     std::map<juce::String, ModificationArchive> modifications;
 };
 

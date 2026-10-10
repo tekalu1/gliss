@@ -119,15 +119,17 @@ def test_join_restores_unless_both_sides_muted(tmp_path, mcp):
     assert mt.join_track(tid, 2.0)["ok"] is False
 
 
-def test_clip_edits_are_undoable_with_names_and_mute_solo_are_not(tmp_path, mcp):
+def test_clip_and_mixer_edits_are_undoable_in_order(tmp_path, mcp):
     m, mt = mcp
     _, tid = _open(m, tmp_path)
     _ok(mt.split_track(tid, 1.0, author="human"))
     _ok(mt.mute_track_range(tid, 1.0, DUR, author="human"))
-    _ok(mt.set_track(tid, mute=True, solo=True))              # 履歴に入らない
+    _ok(mt.set_track(tid, mute=True, solo=True, gain_db=-3, pan=0.4))
     _ok(mt.mute_track_range(tid, 1.2, 1.4, mute=False, author="human"))
     _ok(mt.join_track(tid, 1.0, author="human"))
-    assert _labels(mt)[-4:] == ["クリップを分ける", "部分のミュート", "部分を戻す", "クリップをつなぐ"]
+    assert _labels(mt)[-5:] == ["クリップを分ける", "部分のミュート",
+                               "トラックのミュート・トラックのソロ・トラックの音量・トラックのパン",
+                               "部分を戻す", "クリップをつなぐ"]
     u = _ok(m.undo())
     assert u["undone"]["label"] == "クリップをつなぐ"
     assert _track(mt, tid)["cuts"] == [1.0]
@@ -135,13 +137,20 @@ def test_clip_edits_are_undoable_with_names_and_mute_solo_are_not(tmp_path, mcp)
     assert u["undone"]["label"] == "部分を戻す"
     assert _track(mt, tid)["mutes"] == [[1.0, DUR]]
     t = _track(mt, tid)
-    assert t["mute"] is True and t["solo"] is True               # ミュート／ソロは今のまま
+    assert t["mute"] is True and t["solo"] is True
+    assert t["gain_db"] == -3 and t["pan"] == 0.4
+    _ok(m.undo())
+    t = _track(mt, tid)
+    assert (t["mute"], t["solo"], t["gain_db"], t["pan"]) == (False, False, 0.0, 0.0)
     _ok(m.undo())
     assert _track(mt, tid)["mutes"] == []
     _ok(m.undo())
     assert _track(mt, tid)["cuts"] == []
     _ok(m.redo())
     _ok(m.redo())
+    _ok(m.redo())
+    t = _track(mt, tid)
+    assert (t["mute"], t["solo"], t["gain_db"], t["pan"]) == (True, True, -3, 0.4)
     t = _track(mt, tid)
     assert t["cuts"] == [1.0] and t["mutes"] == [[1.0, DUR]]
 

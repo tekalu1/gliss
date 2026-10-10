@@ -41,15 +41,17 @@ EDIT_TOOLS = frozenset({
     "shift_pitch", "set_pitch_curve", "move_note", "stretch", "move_boundary", "correct_to_guide",
     "set_transition", "split_note", "merge_notes", "apply_plan", "set_connection",
     "mute_notes", "unmute_notes", "set_fade", "reset_to_original", "undo", "redo", "apply_edits",
-    "add_track", "remove_track", "set_track", "set_guide_track", "make_score_guide", "set_tempo",
+    "add_track", "remove_track", "set_track", "set_guide_track", "set_track_guide", "make_score_guide",
+    "set_tempo",
     "split_track", "join_track", "mute_track_range", "import_edits",
 })
 # 保存・書き出し: ユーザーのファイルを書く（プロジェクトの中の一時ファイル = render_preview などは対象外）。
 # prepare_asr_model は数 GB の聞き取り用モデルをダウンロードしてディスクに書くので、AI が勝手に落とさないようこちら
 SAVE_TOOLS = frozenset({"save_project", "export_wav", "prepare_asr_model"})
-# 引数しだいで入るもの（category() が決める）: close_project(discard=True) は編集、
+# 引数しだいで入るもの（category() が決める）: close_project(discard=True)・set_render_version(apply=True) は編集、
 # render_region(path=…) / export_view_data(path=…) / render_preview(name=<パス>) は保存・書き出し
-CONDITIONAL_TOOLS = frozenset({"close_project", "render_region", "export_view_data", "render_preview"})
+CONDITIONAL_TOOLS = frozenset({"close_project", "render_region", "export_view_data", "render_preview",
+                               "set_render_version"})
 # DAW の ARA プラグインのエンジン専用（mcp_ara.py）。AI のプロセスからは許可に関係なく断る
 # （プラグインの作業場所を別のプロセスから書き換えない。AI からプラグインの曲は触らない）
 ARA_TOOLS = frozenset({"ara_open", "ara_set_modification", "ara_remove_modification", "ara_sync",
@@ -116,6 +118,8 @@ def category(name, args=None):
         return "save"
     if name == "close_project":
         return "edit" if a.get("discard") else None
+    if name == "set_render_version":
+        return "edit" if a.get("apply") else None          # 替えずに音が変わる所を見るだけなら許可なし
     if name in ("render_region", "export_view_data"):
         return "save" if a.get("path") else None
     if name == "render_preview":

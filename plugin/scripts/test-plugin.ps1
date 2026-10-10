@@ -11,16 +11,32 @@
 #   5. GlissHostCheck --editor: the editor's page (app/renderer, embedded) on a fake DocumentBridge, in-process and off-screen:
 #      ui-ready, native functions, /fs/, events, keys, open/close 20 times with 2 editors
 #   6. the same with GLISS_PLUGIN_WEB_DIR pointing at a marked copy of app/renderer (the page is read from the folder)
-#   Checks 1-3, 5 and 6 run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
+#   6b. GlissHostCheck --ara-playback: a real ARA document (JUCE ARA hosting) prepared once; then a region is added, the samples
+#      access is switched off and on, and the host reports a change of the source's samples. The original sound keeps playing
+#      each time (the renderer replaces its source readers and region table without prepareToPlay), and plugin.log has the
+#      renderer lines (prepare, source reader replaced, regions synced, release)
+#   6c. GlissHostCheck --ara-preview: two plug-in instances (editor renderers) bound to one ARA document; a preview asked for
+#      by one of them (the plug-in's test bridge, "@preview", with the requester's editor renderer id) is added to that
+#      instance's output only, also when no editor renderer covers the previewed modification and another instance owned
+#      the previous preview
+#   6d. GlissHostCheck --ara-preview-playback: the same, for a host that gives no region to any editor renderer (Studio Pro): only the
+#      playback renderers have regions, and the instance that asked (the editor window's owner) is not the one that has the
+#      previewed modification; the preview must come from the instance whose playback renderer has it
+#   Checks 1-3, 5, 6, 6b, 6c and 6d run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
 #   worktree's .venv, cwd = this worktree's engine, Praat for the pitch, a temporary work folder):
 #   7. ARA SDK TestHost, all test cases
 #   8. GlissARATest (plugin/tests/aratest): a test edit (GLISS_TEST_EDIT) -> render -> archive -> restore in another work
-#      folder -> render, compared with the engine's render_region by plugin/tests/verify_ara_engine.py
+#      folder -> render, compared with the engine's render_region by plugin/tests/verify_ara_engine.py; restoring the
+#      archive (in a new work folder, and again in the same one) does not tell the host that the document changed
 #   9. GlissHostCheck --ara-editor: a real ARA document (JUCE ARA hosting), the editor bound to it, the page's engine calls
 #   10. GlissARATest -relay: an external AI (another vocal_engine.mcp process, plugin/tests/relay_client.py) lists the open
 #       documents, attaches to the modification and shifts it by +100 cents through the relay; the plug-in picks it up
 #       (render, notes, archive), checked by plugin/tests/verify_ara_relay.py; the relay record is removed at the end
-#   11. no engine process is left behind
+#   11. GlissARATest -changes: every change of what the archive holds tells the host (screen edit through the plug-in's
+#       test bridge, lyrics only, F0 method only, guide, undo/redo, external edit and guide), selection alone does not,
+#       and restoring the stored document (same and another work folder) tells nothing; an archive of the older renderer
+#       with a pitch curve tells the host that the sound changed. Per-step counts in aratest-changes\changes.json
+#   12. no engine process is left behind
 # The engine checks are skipped (reported) when no engine python is found (-EnginePython, GLISS_ENGINE_PYTHON, or the
 # .venv of the main worktree).
 # Nothing is written outside plugin\build and the temp folder (the engine's work and log folders, the plug-in state file
@@ -82,7 +98,8 @@ function Report([string]$Name, [bool]$Ok, [string]$Detail = '') {
 
 try {
     if (-not $SkipBuild) {
-        cmake -S $plugin -B $build -G 'Visual Studio 17 2022' -A x64 -Wno-dev | Out-Null
+        # GLISS_TEST_HOOKS: the test bridge (GLISS_TEST_BRIDGE_DIR) used by GlissARATest -changes; release builds leave it out
+        cmake -S $plugin -B $build -G 'Visual Studio 17 2022' -A x64 -Wno-dev -DGLISS_TEST_HOOKS=ON | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'cmake configure (plugin) failed' }
         cmake --build $build --config $Config --target GlissARA_VST3 GlissHostCheck GlissPluginTests --parallel 8 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'cmake build (plugin) failed' }
@@ -179,8 +196,48 @@ try {
     Report 'GlissHostCheck --editor (GLISS_PLUGIN_WEB_DIR)' ($code -eq 0) "exit=$code $summary"
     if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
 
+    # 6b. the renderer keeps playing after the host changes things without prepareToPlay (plugin.log is redirected here)
+    $report = Join-Path $work 'ara-playback-report.txt'
+    $playbackLog = Join-Path $work 'ara-playback-plugin.log'
+    [System.IO.File]::Delete($playbackLog)
+    $code = Invoke-Checked $hostCheck @('--ara-playback', $report, $gliss, $playbackLog) 'ara-playback' `
+        @{ GLISS_ENGINE_DISABLED = '1'; GLISS_PLUGIN_LOG_FILE = $playbackLog }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    Report 'GlissHostCheck --ara-playback (readers and regions after prepare)' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+    # 6c. two plug-in instances on one document: only the instance that asked for a preview adds it (test bridge "@preview")
+    $previewBridge = Join-Path $work 'ara-preview-bridge'
+    $previewTrace = Join-Path $work 'ara-preview-trace'
+    foreach ($d in @($previewBridge, $previewTrace)) {
+        if (Test-Path $d) { [System.IO.Directory]::Delete($d, $true) }
+        New-Item -ItemType Directory -Force $d | Out-Null
+    }
+    $report = Join-Path $work 'ara-preview-report.txt'
+    $code = Invoke-Checked $hostCheck @('--ara-preview', $report, $gliss, $previewBridge, $previewTrace) 'ara-preview' `
+        @{ GLISS_ENGINE_DISABLED = '1'; GLISS_TEST_BRIDGE_DIR = $previewBridge; GLISS_ARA_TRACE_DIR = $previewTrace
+           GLISS_PLUGIN_LOG_FILE = (Join-Path $work 'ara-preview-plugin.log') }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    Report 'GlissHostCheck --ara-preview (the preview is added by the instance that asked)' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+    # 6d. only the playback renderers have regions (the editor renderers have none)
+    $playbackBridge = Join-Path $work 'ara-preview-playback-bridge'
+    $playbackTrace = Join-Path $work 'ara-preview-playback-trace'
+    foreach ($d in @($playbackBridge, $playbackTrace)) {
+        if (Test-Path $d) { [System.IO.Directory]::Delete($d, $true) }
+        New-Item -ItemType Directory -Force $d | Out-Null
+    }
+    $report = Join-Path $work 'ara-preview-playback-report.txt'
+    $code = Invoke-Checked $hostCheck @('--ara-preview-playback', $report, $gliss, $playbackBridge, $playbackTrace) 'ara-preview-playback' `
+        @{ GLISS_ENGINE_DISABLED = '1'; GLISS_TEST_BRIDGE_DIR = $playbackBridge; GLISS_ARA_TRACE_DIR = $playbackTrace
+           GLISS_PLUGIN_LOG_FILE = (Join-Path $work 'ara-preview-playback-plugin.log') }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    Report 'GlissHostCheck --ara-preview-playback (the preview comes from the instance that plays the modification)' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
     if (-not $EnginePython -or -not (Test-Path $EnginePython)) {
-        Write-Host "SKIP engine checks 7-9: no engine python (pass -EnginePython or set GLISS_ENGINE_PYTHON)"
+        Write-Host "SKIP engine checks 7-11: no engine python (pass -EnginePython or set GLISS_ENGINE_PYTHON)"
     } else {
         Write-Host "engine: $EnginePython (cwd $($engineEnv.GLISS_ENGINE_CWD))"
 
@@ -254,6 +311,29 @@ try {
         }
         $records = @(Get-ChildItem $sessR -Filter '*.json' -ErrorAction SilentlyContinue)
         Report 'relay records removed when the document closed' ($records.Count -eq 0) ("left=" + $records.Count)
+
+        # 11. host notifications for every change of the saved state, none for restoring only
+        $outX = Join-Path $work 'aratest-changes'
+        $workX = Join-Path $work 'aratest-changes-work'
+        $workX2 = Join-Path $work 'aratest-changes-work-2'
+        $sessX = Join-Path $work 'changes-sessions'
+        foreach ($d in @($outX, $workX, $workX2, $sessX)) { New-Item -ItemType Directory -Force $d | Out-Null }
+        $env11 = $engineEnv.Clone()
+        $env11.VOCAL_ENGINE_WORK_DIR = $workX
+        $env11.GLISS_ARA_SESSIONS_DIR = $sessX
+        $env11.GLISS_ARA_SYNC_WAIT_MS = '120000'
+        $env11.GLISS_ARA_READ_TIMEOUT_MS = '3000'
+        $env11.GLISS_ARA_TRACE_DIR = (Join-Path $work 'trace-changes')
+        New-Item -ItemType Directory -Force $env11.GLISS_ARA_TRACE_DIR | Out-Null
+        $saved = $TimeoutSec
+        $TimeoutSec = [Math]::Max($TimeoutSec, 900)
+        try {
+            $code = Invoke-Checked $araTest @('-vst3', $gliss, '-out', $outX, '-changes', (Join-Path $plugin 'tests\relay_client.py'), '-workB', $workX2) 'aratest-changes' $env11
+        } finally { $TimeoutSec = $saved }
+        $steps = Get-Content (Join-Path $work 'aratest-changes.log.err'), (Join-Path $work 'aratest-changes.log') -ErrorAction SilentlyContinue |
+            Select-String 'changes: \d+ '
+        $steps | ForEach-Object { Write-Host ("    " + ($_.Line -replace '^.*changes: ', '')) }
+        Report 'GlissARATest -changes (every saved-state change tells the host, restoring does not)' ($code -eq 0) "exit=$code steps=$($steps.Count)"
     }
 }
 finally {

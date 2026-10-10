@@ -65,7 +65,7 @@ test('(F1) 編集 > ピッチ検出の方式 で替えて解析し直し、設�
   const menuLabels = () => menu().locator('.l').allTextContents();
   const openMenu = async () => {
     await win.locator('#menubar button', { hasText: '編集' }).click();
-    await win.locator('.mbd button', { hasText: 'ピッチ検出の方式' }).click();
+    await win.locator('.mbd button[aria-haspopup="menu"]', { hasText: 'ピッチ検出の方式' }).click();
   };
   const closeMenu = async () => {
     await win.keyboard.press('Escape');
@@ -131,6 +131,13 @@ test('(F1) 編集 > ピッチ検出の方式 で替えて解析し直し、設�
     await expect.poll(async () => (await f0()).vd).toBe('gliss');
     expect((await f0()).effective).toBe('gliss');
     await win.screenshot({ path: path.join(SHOTS, 'f0-gliss.png') });
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).f0Estimator).toBe('gliss');
+    await win.locator('#mock').focus();
+    await win.keyboard.press('Control+z'); await idle();
+    await expect.poll(async () => (await f0()).effective).toBe('praat');
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).f0Estimator).toBeNull();
+    await win.keyboard.press('Control+y'); await idle();
+    await expect.poll(async () => (await f0()).effective).toBe('gliss');
     expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).f0Estimator).toBe('gliss');
     await close();
 
