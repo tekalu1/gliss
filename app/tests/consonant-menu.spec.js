@@ -159,7 +159,7 @@ for (const [name, get, tool] of [['子音', () => U, 'main'], ['息', () => B, '
     expect(by('semitone')).toMatchObject({ disabled: true, title: '子音・息には音程がありません' });
     expect(by('transition')).toMatchObject({ disabled: true, title: '子音・息には音程がありません' });
     expect(by('split')).toMatchObject({ disabled: false, title: '' });
-    expect(by('ask-ai')).toMatchObject({ disabled: true, title: '子音・息への AI の依頼は、まだ決まっていません' });
+    expect(by('ask-ai')).toMatchObject({ disabled: false, title: '' });   // AI へ渡すのは id と秒。子音・息も対象
     expect(by('clear-fade')).toBeUndefined();   // フェードの対象外
     expect(await win.evaluate(() => window.__app.S.sel)).toEqual([r.id]);   // 右クリックで選ぶ
     await escape();

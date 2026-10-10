@@ -5,6 +5,7 @@
 //   (A8) 範囲選択（空白からドラッグ）・Ctrl+A に子音・息が入る。入っても、音程の操作は音程ノートだけに効く
 //   (A9) つかんでいる間は子音・息も鳴る（つかんだノートを鳴らす）。選んだものを聞く（P）も子音・息を対象にする
 //   (A10) 子音・息の上にマウスを置くと濃くなる（.hov）
+//   (A12) AI に頼むは子音・息も対象。文には id と秒を入れ、「区間、子音・息を含む」と書く
 //   (A11) 結合は同じ種類どうしだけ（子音どうし・息どうし・音程ノートどうし）。種類の違う組は理由を出して断る
 import { test, expect, _electron as electron } from '@playwright/test';
 import fs from 'node:fs';
@@ -271,6 +272,22 @@ test('(A11) 音程ノートと子音は結合できない。キーはステー�
   expect(b).toMatchObject({ disabled: true });
   expect(b.title).toContain('同じ種類');
   await win.keyboard.press('Escape');
+});
+
+test('(A12) 子音を選んで「AI に頼む」: 有効。文に子音の id・秒・「区間、子音・息を含む」が入る', async () => {
+  await view(U);
+  await select([U.prev, U.id]);
+  await body(U.id).click({ button: 'right' });
+  const a = (await items()).find((x) => x.cmd === 'ask-ai');
+  expect(a).toMatchObject({ disabled: false, title: '' });
+  await win.keyboard.press('Escape');
+  const t = await win.evaluate(() => window.__app.askText());
+  expect(t.text).toContain(`${U.prev}〜${U.id}（`);
+  expect(t.text).toContain('2 区間、子音・息を含む）');
+  expect(t.note).toBe('2 区間をコピー');
+  await select([U.id]);
+  expect((await win.evaluate(() => window.__app.askText())).text).toContain(`${U.id}（`);
+  await select([]);
 });
 
 test('エラーなし', () => {

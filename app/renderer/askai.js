@@ -8,12 +8,12 @@ import { toast } from './aidlg.js';
 
 const LIST_MAX = 6;            // 飛び飛びのノートを 1 つずつ並べるのはこの数まで
 
-/** 対象のノート（選択。無ければループの範囲に掛かるノート）。並びは時間順。 */
+/** 対象の区間（選択。無ければループの範囲に掛かる区間）。音程ノートのほか子音・息も（AI のツールは id で受ける）。並びは時間順。 */
 export function askTargets() {
-  let ns = S.pitched.filter((n) => isSel(n.id));
+  let ns = S.blocks.filter((n) => isSel(n.id));
   if (!ns.length && S.loop) {
     const a = S.loop[0] - S.off; const b = S.loop[1] - S.off;
-    ns = S.pitched.filter((n) => { const [s0, s1] = spanOf(n); return s1 > a && s0 < b; });
+    ns = S.blocks.filter((n) => { const [s0, s1] = spanOf(n); return s1 > a && s0 < b; });
   }
   return ns.sort((x, y) => x.start_sec - y.start_sec);
 }
@@ -32,7 +32,9 @@ function fmt(t) {
 /** ノートの id の書き方: 1 つ・続いている（n004〜n009）・飛び飛び（n004・n007・n009）。 */
 function idsText(ns) {
   if (ns.length === 1) return ns[0].id;
-  const idx = new Map(S.pitched.map((n, i) => [n.id, i]));
+  // 続いている = 並びで隣（音程ノートだけなら音程ノートの並び、子音・息が混ざるなら区間の並び）
+  const base = ns.every((n) => n.kind === 'note') ? S.pitched : S.blocks;
+  const idx = new Map(base.map((n, i) => [n.id, i]));
   const run = ns.every((n, k) => k === 0 || idx.get(n.id) === idx.get(ns[k - 1].id) + 1);
   if (run || ns.length > LIST_MAX) return `${ns[0].id}〜${ns[ns.length - 1].id}`;
   return ns.map((n) => n.id).join('・');
@@ -46,8 +48,10 @@ export function askText() {
   const where = track ? `今開いている曲の ${track} トラックの ` : '今開いている曲の ';
   if (ns.length) {
     const t0 = Math.min(...ns.map((n) => n.start_sec)); const t1 = Math.max(...ns.map((n) => n.end_sec));
-    return { text: `Gliss（gliss）で、${where}${idsText(ns)}（${fmt(t0)}〜${fmt(t1)}、${ns.length} ノート）について:`,
-      note: `${ns.length} ノートをコピー` };
+    // 子音・息が混ざるときは「ノート」ではなく「区間」と書く（AI に、子音・息も対象だと伝える）
+    const unit = ns.every((n) => n.kind === 'note') ? `${ns.length} ノート` : `${ns.length} 区間、子音・息を含む`;
+    return { text: `Gliss（gliss）で、${where}${idsText(ns)}（${fmt(t0)}〜${fmt(t1)}、${unit}）について:`,
+      note: ns.every((n) => n.kind === 'note') ? `${ns.length} ノートをコピー` : `${ns.length} 区間をコピー` };
   }
   if (!S.loop) return null;
   // ノートの無い範囲（ループ）: 秒だけ。エンジンの秒（トラックの頭が 0、編集前）に直す
