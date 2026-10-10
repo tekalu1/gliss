@@ -89,6 +89,12 @@ const transports = async () => (await calls()).filter((c) => c.kind === 'transpo
 const tracks = () => win.evaluate(() => window.__app.tracks());
 const current = () => win.evaluate(() => window.__app.S.session?.current || null);
 const idle = () => win.waitForFunction(() => window.__app.idle() && !window.__app.S.opening, null, { timeout: 240000 });
+// トラック一覧の開閉（L と同じコマンド）。高さのアニメーションが終わるまで待つ
+const toggleList = async (open) => {
+  await win.evaluate(() => window.__app.runCommand('track-list'));
+  await expect(win.locator('#tv')).toHaveClass(open ? /^(?!.*closed)/ : /closed/);
+  await win.waitForFunction(() => !document.querySelector('#tv').classList.contains('anim'));
+};
 const status = () => win.evaluate(() => window.__app.status());
 const menuLabels = () => win.evaluate(() => {
   const walk = (items) => items.flatMap((i) => (i.type === 'separator' ? [] : i.submenu ? walk(i.submenu) : [i.label]));
@@ -476,6 +482,8 @@ test('(A5c) 移動後の実PCM時刻へ下段ヘッドとグリッドを合わ�
 test('(A6) クリップの位置は動かせない・右クリックのメニューは DAW が決めないものだけ', async () => {
   const before = await tracks();
   await clearCalls();
+  await toggleList(true);                             // クリップも見出しも一覧を開いているときだけ触れる（既定は畳んである）
+  await idle();
   const box = await win.locator('#lanes [data-clip]').first().boundingBox();
   const y = box.y + box.height * 0.8;                 // 下半分（Electron では位置のドラッグ）
   await win.mouse.move(box.x + box.width / 2, y);
@@ -509,6 +517,7 @@ test('(A6) クリップの位置は動かせない・右クリックのメニュ
   await win.evaluate(() => window.__app.runCommand('tool-main'));
   const st = await win.evaluate(() => window.__app.S.tracks.map((t) => [(t.cuts || []).length, (t.mutes || []).length]));
   expect(st.every(([c, m]) => c === 0 && m === 0)).toBe(true);
+  await toggleList(false);                            // 畳んだ元の状態に戻す
 });
 
 test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリックはループを解除しない', async () => {
@@ -526,8 +535,10 @@ test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリ�
   await emit('playhead', { song_sec: inside, playing: false, loop: null });
   await expect.poll(() => win.evaluate(() => document.querySelector('#roll #ph')?.style.display)).not.toBe('none');
   await clearCalls();
+  await toggleList(true);                             // 畳んでいる間、ルーラーの上は帯（編集中のトラックとガイド）になる
+  await idle();
   const r = await win.locator('#tvRuler').boundingBox();
-  const range = await win.evaluate(() => window.__app.tracksState().range);
+  const range =await win.evaluate(() => window.__app.tracksState().range);
   const tAt = (x) => range[0] + (x - r.x) / r.width * (range[1] - range[0]);
   // クリック
   await win.mouse.click(r.x + r.width * 0.3, r.y + 10);
@@ -585,6 +596,7 @@ test('(A7) ルーラー: クリック → seek、ドラッグ → loop。クリ�
   await win.locator('#menu button', { hasText: 'ループを解除' }).click();
   await expect.poll(transports).toEqual([['loop', null]]);
   expect(await win.evaluate(() => window.__app.S.loop)).toBeNull();
+  await toggleList(false);
 });
 
 test('(A8) selection: DAW で選んだリージョンのトラックに切り替え、表示範囲を寄せる', async () => {

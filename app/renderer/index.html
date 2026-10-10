@@ -155,9 +155,35 @@ html[data-mode=ara] .tb .clock{margin-left:14px}
 #tv{flex:none;overflow:hidden;display:flex;flex-direction:column;position:relative;--hw:160px}
 #tv[hidden],#split[hidden]{display:none}
 #tvBody{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#2a2a2e transparent}
-.rr{display:flex;height:20px;position:sticky;top:0;z-index:1;background:#111113}
-.rhd{width:var(--hw,160px);flex:none}
-#tvRuler{flex:1;display:block;height:20px;min-width:0}
+.rr{display:flex;height:24px;position:sticky;top:0;z-index:1;background:#111113}
+.rhd{width:var(--hw,160px);flex:none;display:flex;align-items:center;padding:0 4px;box-sizing:border-box}
+#tvRuler{flex:1;display:block;height:24px;min-width:0}
+/* 一覧を畳む／開く（docs/track-view.md §10）: 畳むと高さ 24 px の帯だけが残る。帯（#tvStrip）はルーラーに重ねて、開閉で透明度を替える */
+#tvToggle{display:inline-flex;align-items:center;gap:4px;height:20px;max-width:100%;padding:0 8px 0 5px;background:#232326;border:1px solid #34343a;color:var(--fg);border-radius:2px;font:inherit;font-size:11.5px;cursor:pointer}
+#tvToggle:hover{background:#2f2f34}
+#tvToggle:focus-visible{outline:1px solid var(--sel);outline-offset:1px}
+#tvToggle svg{width:10px;height:10px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;transition:transform .18s ease-out}
+#tv:not(.closed) #tvToggle svg{transform:rotate(90deg)}
+#tvStrip{position:absolute;left:var(--hw,160px);right:0;top:0;bottom:0;display:flex;align-items:center;gap:12px;padding:0 8px;white-space:nowrap;overflow:hidden;background:#111113;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .18s ease-out,visibility 0s .18s}
+#tv.closed #tvStrip{opacity:1;visibility:visible;pointer-events:auto;transition-delay:0s}
+#tvRuler{transition:opacity .18s ease-out}
+#tv.closed #tvRuler{opacity:0}
+#tvStrip .st{color:var(--fg2);min-width:0;overflow:hidden;text-overflow:ellipsis}
+#tvStrip .st b{color:var(--sel);font-weight:600}
+#tvStrip .st i{font-style:normal;color:var(--fg3)}
+#tvStrip button.g{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:100%;height:18px;padding:0 4px 0 2px;background:none;border:0;border-radius:2px;color:var(--fg2);font:11px system-ui,"Segoe UI",sans-serif;cursor:pointer}
+#tvStrip button.g:hover{color:var(--fg)}
+#tvStrip button.g[aria-expanded="true"]{background:#2a2a2e;color:var(--sel)}
+#tvStrip button.g:focus-visible{outline:1px solid var(--sel);outline-offset:-1px}
+#tvStrip button.g svg{width:12px;height:12px;flex:none;stroke:currentColor;fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;display:block}
+#tvStrip button.g .cv{width:8px;height:8px;stroke-width:1.4}
+#tvStrip button.g .gt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tvStrip button.g.none .gt{color:var(--fg3)}
+/* 畳んでいる間は一覧に触れさせない（ホイール・Tab・読み上げ）。畳み終わってから隠す */
+#tv.closed #tvBody{overflow:hidden}
+#tv.closed .rows{visibility:hidden;transition:visibility 0s .18s}
+#tv.anim{transition:height .18s ease-out}
+@media (prefers-reduced-motion:reduce){#tv.anim,#tvStrip,#tvRuler,#tvToggle svg,#tv.closed .rows{transition:none}}
 .rows{display:flex}
 #heads{width:var(--hw,160px);flex:none}
 #lanes{flex:1;display:block;min-width:0}
@@ -448,8 +474,8 @@ html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
   </section>
   <div id="tv" aria-label="トラックビュー" hidden>
     <div id="tvBody">
-      <div class="rr"><div class="rhd"></div><svg id="tvRuler" aria-hidden="true"></svg></div>
-      <div class="rows"><div id="heads"></div><svg id="lanes" role="img" aria-label="トラック"></svg></div>
+      <div class="rr"><div class="rhd"><button id="tvToggle" type="button" aria-controls="tvRows" aria-expanded="true" title="トラック一覧を開く / 閉じる（L）"><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M3 1.5 7 5 3 8.5"/></svg><span>トラック</span></button></div><svg id="tvRuler" aria-hidden="true"></svg><div id="tvStrip"></div></div>
+      <div class="rows" id="tvRows"><div id="heads"></div><svg id="lanes" role="img" aria-label="トラック"></svg></div>
     </div>
     <div id="hsz" role="separator" aria-orientation="vertical" aria-label="トラックの見出しの幅" tabindex="0" title="ドラッグで見出しの幅を変える（ダブルクリックで既定）"></div>
     <div id="tvBub" aria-hidden="true" hidden></div>

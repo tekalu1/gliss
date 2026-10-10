@@ -124,6 +124,9 @@ test.describe('プラグイン', () => {
     await ctx.idle();
     await ctx.win.evaluate((id) => window.__app.selectTrack(id), low);
     await ctx.idle();
+    // ARA のトラック一覧は初期で畳まれている。見出しのガイドの試験なので開いておく
+    await ctx.win.evaluate(() => { if (!window.__app.tracksState().open) window.__app.runCommand('track-list'); });
+    await ctx.idle();
   });
   test.afterAll(async () => { await close(ctx?.app, ROOT); });
 
