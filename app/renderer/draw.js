@@ -290,7 +290,7 @@ function takeBlobs(n, hmax, ctx) {
       const mid = (run[0] + run[run.length - 1]) / 2;
       const head = mid - r[0] < r[1] - mid;
       const m = (head ? lv.pa ?? lv.pb : lv.pb ?? lv.pa) ?? lv.median;
-      out.push(thin(pinchEnds(run.map((i) => pt(i, Y(m))))));
+      out.push(thin(pinchEnds(applyFadeShape(n, run.map((i) => pt(i, Y(m))), [s0, s1]))));
     }
     run = [];
   };
@@ -397,6 +397,7 @@ function noPitchHit(n, segs, conn) {
     }
   }
   if (!Number.isFinite(lo)) return '';
+  if (S.tool === 'main' && n.kind !== 'silence') lo = Math.min(lo, noPitchFadeY(segs) - 5);       // フェードのつまみまで当たりを広げる（音程ノートと同じ）
   if (S.tool === 'cut' || S.tool === 'mute') return `<rect data-note="${n.id}" x="${f1(xa)}" y="${f1(lo)}" width="${f1(Math.max(2, xb - xa))}" height="${f1(hi - lo)}" fill="transparent"/>`;
   if (S.tool === 'draw') return `<rect data-nop-menu="${n.id}" x="${f1(bx0)}" y="${f1(lo)}" width="${f1(Math.max(2, bx1 - bx0))}" height="${f1(hi - lo)}" fill="transparent"/>`;   // ペン: 右クリックのメニューの当たりだけ（つかめない）
   let out = `<rect data-nop="${n.id}" x="${f1(bx0)}" y="${f1(lo)}" width="${f1(Math.max(2, bx1 - bx0))}" height="${f1(hi - lo)}" fill="transparent" style="cursor:move"/>`;
@@ -413,6 +414,29 @@ function noPitchHit(n, segs, conn) {
     npEdgeXs.push({ x, y: yc, ceded });
   }
   return out;
+}
+
+/** 子音・息のフェードのつまみの高さ（帯のいちばん上の縁から 7 px 上。音程ノートと同じ）。 */
+function noPitchFadeY(segs) {
+  return Math.min(...segs.flat().map((p) => p.y - p.h)) - 7;
+}
+
+/** フェードのつまみ（v3 §5）: 帯の上の両端に小さな四角（DAW のクリップフェードと同じ位置と形）。フェードがあれば端からつまみまで細い線。
+ * 音程ノート・子音・息で同じ。{ svg, tips }（つまみは全部のノートの上に重ねて描く）。 */
+function fadeHandles(n, yf, dr) {
+  const fd = dr?.type === 'fade' && dr.id === n.id;
+  let svg = ''; let tips = '';
+  const [fs0, fs1] = spanOf(n);
+  const { fi, fo } = fadeOf(n);
+  for (const [side, len] of [['in', fi], ['out', fo]]) {
+    const ex = X(side === 'in' ? fs0 : fs1);
+    const hx = X(side === 'in' ? fs0 + len : fs1 - len);
+    const hot = (fd && dr.side === side) || (!dr && S.fadeHover === `${n.id}|${side}`);
+    if (len > 0) svg += `<line x1="${f1(ex)}" y1="${f1(yf)}" x2="${f1(hx)}" y2="${f1(yf)}" stroke="#d6d6d6" stroke-opacity=".35" pointer-events="none"/>`;
+    svg += `<rect data-note="${n.id}" data-fade="${side}" x="${f1(hx - 3.5)}" y="${f1(yf - 3.5)}" width="7" height="7" fill="${hot ? '#ffffff' : '#bdbdc2'}" style="cursor:ew-resize"/>`;
+    if (fd && dr.side === side && dr.moved) tips += tip(hx, yf - 14, `${Math.round(len * 1000)} ms`, 'middle');
+  }
+  return { svg, tips };
 }
 
 /** 子音・息の端が隣と接続しているか（カーソルの形だけに使う。エンジンの接続 = 音程ノートと同じ規則。view data の connected_prev / next）。 */
@@ -874,6 +898,7 @@ export function render() {
   const npc = noPitchCtx();
   const cxs = consonantXs();
   npEdgeXs = [];
+  let fadeSvg = '';            // フェードのつまみは全部のノートの上に重ねる（接した隣のノートの当たりに隠れない）
   const ehNp = main && dr?.type === 'edge' && dr.nop ? { id: dr.id, which: dr.which }
     : main && !dr ? S.edgeHover : null;
   for (const n of S.notes) {
@@ -893,6 +918,10 @@ export function render() {
     if (isSel(n.id) && (Math.abs(n.start_sec - s0) > 0.0005 || Math.abs(n.end_sec - s1) > 0.0005)) {
       const oy = Math.min(...segs.flat().map((p) => p.y - p.h)) - 2;
       s += `<path data-orig="${n.id}" d="M${f1(X(n.start_sec))} ${f1(oy + 5)}V${f1(oy)}H${f1(X(n.end_sec))}V${f1(oy + 5)}" fill="none" stroke="${WAS}" stroke-width="1" pointer-events="none"/>`;
+    }
+    if (main && n.kind !== 'silence' && ((dr?.type === 'fade' && dr.id === n.id) || (!dr && S.noteHover === n.id))) {
+      const h = fadeHandles(n, noPitchFadeY(segs), dr);
+      fadeSvg += h.svg; tipStr += h.tips;
     }
     if (ehNp && ehNp.id === n.id) {
       // 端に乗っている・ドラッグ中: 明るい縦線（ノートの区切り = つかんでいる所）
@@ -916,7 +945,6 @@ export function render() {
   // 当たり判定は今までどおり透明な矩形（中央＝ノート、両端＝端のつまみ）。見た目は波形だけ。
   const eh = main && dr?.type === 'edge' ? { id: dr.id, which: dr.which }
     : main && !dr ? S.edgeHover : null;
-  let fadeSvg = '';            // フェードのつまみは全部のノートの上に重ねる（接した隣のノートの当たりに隠れない）
   for (let k = 0; k < S.pitched.length; k++) {
     const n = S.pitched[k];
     const b = boxOf(n);
@@ -958,18 +986,9 @@ export function render() {
     }
     // フェードのつまみ（v3 §5）: ホバー中のノート・フェードをドラッグ中のノートの帯の上の両端に小さな四角
     // （DAW のクリップフェードと同じ位置と形）。フェードがあれば端からつまみまで細い線
-    const fd = dr?.type === 'fade' && dr.id === n.id;
-    if (main && (fd || (!dr && S.noteHover === n.id))) {
-      const [fs0, fs1] = spanOf(n);
-      const { fi, fo } = fadeOf(n);
-      for (const [side, len] of [['in', fi], ['out', fo]]) {
-        const ex = X(side === 'in' ? fs0 : fs1);
-        const hx = X(side === 'in' ? fs0 + len : fs1 - len);
-        const hot = (fd && dr.side === side) || (!dr && S.fadeHover === `${n.id}|${side}`);
-        if (len > 0) fadeSvg += `<line x1="${f1(ex)}" y1="${f1(yf)}" x2="${f1(hx)}" y2="${f1(yf)}" stroke="#d6d6d6" stroke-opacity=".35" pointer-events="none"/>`;
-        fadeSvg += `<rect data-note="${n.id}" data-fade="${side}" x="${f1(hx - 3.5)}" y="${f1(yf - 3.5)}" width="7" height="7" fill="${hot ? '#ffffff' : '#bdbdc2'}" style="cursor:ew-resize"/>`;
-        if (fd && dr.side === side && dr.moved) tipStr += tip(hx, yf - 14, `${Math.round(len * 1000)} ms`, 'middle');
-      }
+    if (main && ((dr?.type === 'fade' && dr.id === n.id) || (!dr && S.noteHover === n.id))) {
+      const h = fadeHandles(n, yf, dr);
+      fadeSvg += h.svg; tipStr += h.tips;
     }
     // 端にポインタが乗っている・端をドラッグ中: 端に明るい縦線（つかめる所・動かしている所）
     if (eh && eh.id === n.id) {

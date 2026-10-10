@@ -5,6 +5,7 @@
 //   (A8) 範囲選択（空白からドラッグ）・Ctrl+A に子音・息が入る。入っても、音程の操作は音程ノートだけに効く
 //   (A9) つかんでいる間は子音・息も鳴る（つかんだノートを鳴らす）。選んだものを聞く（P）も子音・息を対象にする
 //   (A10) 子音・息の上にマウスを置くと濃くなる（.hov）
+//   (A13) フェード: 子音・息にも帯の上のつまみが出る。ドラッグで set_fade。「フェードを消す」も効く（1 回の Ctrl+Z で戻る）
 //   (A12) AI に頼むは子音・息も対象。文には id と秒を入れ、「区間、子音・息を含む」と書く
 //   (A11) 結合は同じ種類どうしだけ（子音どうし・息どうし・音程ノートどうし）。種類の違う組は理由を出して断る
 import { test, expect, _electron as electron } from '@playwright/test';
@@ -288,6 +289,68 @@ test('(A12) 子音を選んで「AI に頼む」: 有効。文に子音の id・
   await select([U.id]);
   expect((await win.evaluate(() => window.__app.askText())).text).toContain(`${U.id}（`);
   await select([]);
+});
+
+const fadeOf = (id) => win.evaluate((i) => {
+  const n = window.__app.S.byId.get(i);
+  return { fi: n.fade_in_sec || 0, fo: n.fade_out_sec || 0 };
+}, id);
+const shapeOf = (id) => win.evaluate((i) => [...document.querySelectorAll(`#roll path[data-nopitch="${i}"]`)].map((p) => p.getAttribute('d')).join('|'), id);
+
+test('(A13) 子音に乗るとフェードのつまみが 2 つ（帯の上の両端）。内側へドラッグでフェードが付き、帯が細くなる。Ctrl+Z で戻る', async () => {
+  await select([]);
+  await view(U);
+  const roll = await win.locator('#roll').boundingBox();
+  const b = await body(U.id).boundingBox();
+  await win.mouse.move(b.x + b.width / 2, 2);                       // 前の試験の位置から外す
+  await win.waitForFunction(() => window.__app.S.noteHover == null);
+  expect(await win.evaluate((id) => window.__app.fadeInfo(id).length, U.id)).toBe(0);   // 乗っていないときは出ない
+  await win.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await win.waitForFunction((id) => window.__app.fadeInfo(id).length === 2, U.id);
+  const f = await win.evaluate((id) => window.__app.fadeInfo(id), U.id);
+  expect(f.map((x) => x.side)).toEqual(['in', 'out']);
+  expect(f[0].y + roll.y).toBeLessThan(b.y + b.height / 2);       // 帯より上
+  const shape0 = await shapeOf(U.id);
+  const hx = roll.x + f[0].x + 2; const hy = roll.y + f[0].y;        // つまみは隣と接する境目にある。境目の 1 点ではなく、つまみの中の自分の側を押す
+  await win.mouse.move(hx, hy, { steps: 4 });
+  await win.mouse.down();
+  await win.mouse.move(hx + 200, hy, { steps: 12 });       // 帯は区間の中ほどにあるので、帯に届くまで引く
+  expect(await shapeOf(U.id)).not.toBe(shape0);                   // ドラッグ中から帯が変わる
+  await win.mouse.up();
+  await settle();
+  const a = await fadeOf(U.id);
+  expect(a.fi).toBeGreaterThan(0.005);
+  expect(a.fo).toBe(0);
+  expect(await win.evaluate(() => window.__app.undoTitle())).toContain('フェード');
+  expect((await fadeOf(U.prev)).fi).toBe(0);                       // 隣は変わらない
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect((await fadeOf(U.id)).fi).toBe(0);
+});
+
+test('(A13) 子音のフェードは「フェードを消す」で消せる。フェードの無い子音には出さない', async () => {
+  await select([]);
+  await view(U);
+  await body(U.id).click({ button: 'right' });
+  expect((await items()).some((x) => x.cmd === 'clear-fade')).toBe(false);
+  await win.keyboard.press('Escape');
+  await win.evaluate(async (id) => {
+    await window.api.call('set_fade', { note_ids: [id], fade_in_sec: 0.02, fade_out_sec: 0.01, author: 'human' });
+    await window.__app.refresh();
+  }, U.id);
+  await settle();
+  expect(await fadeOf(U.id)).toEqual({ fi: 0.02, fo: 0.01 });
+  await body(U.id).click({ button: 'right' });
+  expect((await items()).find((x) => x.cmd === 'clear-fade')).toMatchObject({ disabled: false });
+  await win.locator('#menu [data-cmd="clear-fade"]').click();
+  await settle();
+  expect(await fadeOf(U.id)).toEqual({ fi: 0, fo: 0 });
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect(await fadeOf(U.id)).toEqual({ fi: 0.02, fo: 0.01 });
+  await win.keyboard.press('Control+z');          // 付けたフェードも戻す（後の試験のため）
+  await settle();
+  expect(await fadeOf(U.id)).toEqual({ fi: 0, fo: 0 });
 });
 
 test('エラーなし', () => {

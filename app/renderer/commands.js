@@ -136,7 +136,8 @@ function toggleFollow() {
   saveGrid();
   render();
 }
-const hasFades = () => selectedNotes().some((n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0);
+const hasFade = (n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0;
+const hasFades = () => selectedBlocks().some(hasFade);          // 音程ノート・子音・息
 
 // ---------------------------------------------------------------- 表
 // [id, 名前, グループ, 既定のキー, 実行, 有効の条件, チェック]
@@ -183,8 +184,7 @@ export const COMMANDS = [
     () => selectedBlocks().some((n) => !n.muted)],
   ['unmute', '無音を戻す', GR.note, [], () => unmuteNotes(selectedBlocks().filter((n) => n.muted).map((n) => n.id)),
     () => selectedBlocks().some((n) => n.muted)],
-  ['clear-fade', 'フェードを消す', GR.note, [], () => clearFades(selectedNotes()
-    .filter((n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0).map((n) => n.id)), hasFades],
+  ['clear-fade', 'フェードを消す', GR.note, [], () => clearFades(selectedBlocks().filter(hasFade).map((n) => n.id)), hasFades],
   // 選んだノート・範囲を AI に頼む文をクリップボードへ（askai.js）
   ['ask-ai', 'AI に頼む', GR.note, [], askAi, canAskAi],
 
@@ -284,7 +284,7 @@ const NEEDS = {
   unmute: '無音のノートを選んでから',
   merge: () => mergeWhy() || '隣り合って接している区間を 2 つ以上選んでから', 'guide-match': guideWhy,
   'guide-view': guideWhy, transition: '接続された境目が無い', rename: 'トラックが無い',
-  'clear-fade': 'フェードのあるノートを選んでから', tempo: 'トラックが無い',
+  'clear-fade': 'フェードのある区間を選んでから', tempo: 'トラックが無い',
   save: 'プロジェクトが無い', 'save-as': 'プロジェクトが無い',
   split: '分ける区間が無い（再生位置を選んだ区間の上に置く）', 'select-all': 'ノートが無い',
   'show-all': 'ノートが無い', 'reset-original': 'ノートが無い', 'ask-ai': 'ノートを選ぶか、ループの範囲を決めてから',
