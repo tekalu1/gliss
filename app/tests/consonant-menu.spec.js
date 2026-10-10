@@ -204,6 +204,42 @@ test('(M3) 接している端は、これまでどおり境目のメニュー', 
   await escape();
 });
 
+test('(M5) Del とメニューの「無音にする」・「無音を戻す」が子音・息にも効く。どれも 1 回で戻せる', async () => {
+  await view({ start: Math.min(U.start, B.start), end: Math.max(U.end, B.end) });
+  const muted = async () => (await all()).filter((n) => n.id === U.id || n.id === B.id).map((n) => n.muted);
+  // Del: 子音と息を一緒に選んで 1 回で無音に
+  await select([U.id, B.id]);
+  await win.keyboard.press('Delete');
+  await settle();
+  expect(await muted()).toEqual([true, true]);
+  expect(await win.evaluate(() => window.__app.undoTitle())).toContain('無音にする');
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect(await muted()).toEqual([false, false]);
+  // メニュー: 子音の体の右クリック → 無音にする → 無音を戻す
+  await view(U);
+  await select([]);
+  await win.locator(`#roll rect[data-nop="${U.id}"]:not([data-nop-edge])`).first().click({ button: 'right' });
+  let it = await items();
+  expect(it.find((x) => x.cmd === 'mute')).toMatchObject({ label: '無音にする', key: 'Del', disabled: false });
+  await win.locator('#menu [data-cmd="mute"]').click();
+  await settle();
+  expect((await all()).find((n) => n.id === U.id).muted).toBe(true);
+  await win.locator(`#roll rect[data-nop="${U.id}"]:not([data-nop-edge])`).first().click({ button: 'right' });
+  it = await items();
+  expect(it.find((x) => x.cmd === 'mute')).toMatchObject({ disabled: true });
+  expect(it.find((x) => x.cmd === 'unmute')).toMatchObject({ label: '無音を戻す', disabled: false });
+  await win.locator('#menu [data-cmd="unmute"]').click();
+  await settle();
+  expect((await all()).find((n) => n.id === U.id).muted).toBe(false);
+  expect(await win.evaluate(() => window.__app.undoTitle())).toContain('無音を戻す');
+  await win.keyboard.press('Control+z');
+  await settle();
+  await win.keyboard.press('Control+z');
+  await settle();
+  expect((await all()).find((n) => n.id === U.id).muted).toBe(false);
+});
+
 test('エラーが出ていない', async () => {
   expect(errors).toEqual([]);
 });

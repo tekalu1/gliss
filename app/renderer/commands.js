@@ -47,6 +47,8 @@ const pos = (ctx) => (ctx && ctx.x != null ? { x: ctx.x, y: ctx.y } : center());
 export function selectedNotes() {
   return S.pitched.filter((n) => isSel(n.id));
 }
+/** 選択中の区間（音程ノート・子音・息）。無音にする・戻すは、子音・息にも同じに効く。 */
+const selectedBlocks = () => S.blocks.filter((n) => isSel(n.id));
 /** 選んだノートが隣どうし接して並んでいる（結合できる）。 */
 export function contiguous(ns = selectedNotes()) {
   if (ns.length < 2) return false;
@@ -171,10 +173,10 @@ export const COMMANDS = [
   ['merge', '結合', GR.note, ['Ctrl+J'], mergeSelected, () => contiguous()],
   ['transition', 'なだらかさ…', GR.note, ['T'], (ctx) => { const p = pos(ctx); openTr(p.x, p.y, ctx?.pair ? { pair: ctx.pair } : {}); }, hasTransitions],
   ['reset-original', 'オリジナルに戻す', GR.note, [], () => resetOriginal(targets()), hasNotes],
-  ['mute', '無音にする', GR.note, ['Delete'], () => muteNotes(selectedNotes().map((n) => n.id)),
-    () => selectedNotes().some((n) => !n.muted)],
-  ['unmute', '無音を戻す', GR.note, [], () => unmuteNotes(selectedNotes().filter((n) => n.muted).map((n) => n.id)),
-    () => selectedNotes().some((n) => n.muted)],
+  ['mute', '無音にする', GR.note, ['Delete'], () => muteNotes(selectedBlocks().filter((n) => !n.muted).map((n) => n.id)),
+    () => selectedBlocks().some((n) => !n.muted)],
+  ['unmute', '無音を戻す', GR.note, [], () => unmuteNotes(selectedBlocks().filter((n) => n.muted).map((n) => n.id)),
+    () => selectedBlocks().some((n) => n.muted)],
   ['clear-fade', 'フェードを消す', GR.note, [], () => clearFades(selectedNotes()
     .filter((n) => (n.fade_in_sec || 0) > 0 || (n.fade_out_sec || 0) > 0).map((n) => n.id)), hasFades],
   // 選んだノート・範囲を AI に頼む文をクリップボードへ（askai.js）
