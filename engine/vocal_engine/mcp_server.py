@@ -1756,7 +1756,9 @@ def unmute_notes(note_ids: list = None, start_sec: float = None, end_sec: float 
 @_tool
 def set_fade(note_ids: list, fade_in_sec: float = None, fade_out_sec: float = None,
              author: str = "ai") -> dict:
-    """ノートの**フェードイン／アウト**（画面の帯の上の角のつまみ。DAW のクリップフェードと同じ）。1 つの changeset。
+    """ノート・子音・息の**フェードイン／アウト**（画面の帯の上の角のつまみ。DAW のクリップフェードと同じ）。1 つの changeset。
+
+    note_ids: 音程のあるノート（kind=note）・子音（unvoiced）・息（breath）の id。無音は区間ではないので付けられない
 
     **音量だけ**を変える（ピッチ・なだらかさは変えない）。隣のノートは変えない（接続された境目にも付けられる）。
     fade_in_sec: ノートの頭から何秒で 0 → 元の音量にするか（編集後の秒。0 = 消す、省略 = そのまま）
@@ -1770,9 +1772,10 @@ def set_fade(note_ids: list, fade_in_sec: float = None, fade_out_sec: float = No
     p.reload_if_changed()
     ids = list(note_ids or [])
     by = {n.id: n for n in p.take_notes}
-    missing = [i for i in ids if i not in by or by[i].kind != "note"]
+    missing = [i for i in ids if i not in by or by[i].kind not in FD.FADE_KINDS]
     if missing:
-        raise ProjectError("音程のあるノートが無い: %s（list_notes で確認）" % ", ".join(missing))
+        raise ProjectError("フェードを付けられる区間（ノート・子音・息）が無い: %s（list_notes で確認）"
+                           % ", ".join(missing))
     if fade_in_sec is None and fade_out_sec is None:
         raise ProjectError("fade_in_sec か fade_out_sec を渡す（0 で消す）")
     try:
@@ -1797,8 +1800,8 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
                       author: str = "ai", boundary_ids: list = None, whole_track: bool = False) -> dict:
     """指定したノート／範囲を原音に戻す（1 つの changeset）。
 
-    ピッチの編集は外す（鉛筆はこのノートにかかる部分だけ外す）。タイミングは**ノートの頭・尻を元の位置へ戻す**（接続された隣は
-    伸び縮みで合わせる。後ろはずらさない）。戻した区間は原音のサンプルそのもの。
+    ピッチの編集は外す（鉛筆はこのノートにかかる部分だけ外す）。タイミングは**ノート・子音・息の頭・尻を元の位置へ戻す**
+    （接続された隣は伸び縮みで合わせる。後ろはずらさない。ピッチの編集は音程のあるノートだけにある）。戻した区間は原音のサンプルそのもの。
     ただし隣のノートのピッチを動かしたままなら、その境目のつなぎ（なだらかさ）は戻したノートの
     端にもかかる（段差にしないため。段差にしたいなら set_transition(value=0)）。
     無音にした（mute_notes）ノートは音が戻る（範囲の外の無音は残す）。
@@ -1838,6 +1841,7 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
         return _ok(changeset=cs.id, removed=len(b_rm), added=0, note_ids=[],
                    boundary_ids=list(boundary_ids), total_edits=len(p.edits))
     pitched = {n.id for n in TM.pitched_notes(p)}
+    block_ids = {n.id for n in TM.blocks(p)}      # タイミングを戻す対象（ノート・子音・息）
     spans = {n.id: (n.start_sec, n.end_sec) for n in p.take_notes if n.id in ids}
     span_list = list(spans.values())
     window = None
@@ -1873,10 +1877,10 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
         rm += [e.id for e in p.edits if e.kind in ("connection", "transition")
                and e.id not in rm
                and lo - 1e-9 <= p.edit_span(e)[0] and p.edit_span(e)[1] <= hi + 1e-9]
-        outside = [i for i in ids if i in pitched and i in spans
+        outside = [i for i in ids if i in block_ids and i in spans
                    and (spans[i][1] <= lo or spans[i][0] >= hi)]
     else:
-        outside = [i for i in ids if i in pitched]
+        outside = [i for i in ids if i in block_ids]
     if outside:
         plan = TM.plan_reset_timing(p, outside)
         r_ids, t_specs, _ = TM.realize(p, plan, 1.0)
