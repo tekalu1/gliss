@@ -17,12 +17,12 @@
 //    はさみ（ノートをクリックで分割、境目をダブルクリックで結合。音素境界の近くは吸着、Alt で吸着なし）、
 //    ミュート（ノートをクリックで無音⇔戻す。なぞると、押したノートと同じ向きにそろえる。離したら 1 つの編集）。
 import {
-  LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
+  BLOCK_KINDS, LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
   frameTime, restoreTo, setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited, toSource,
   totalSec, utteranceAt,
 } from './state.js';
 import {
-  M, T, X, Y, edStep, focusRange, hasConnFocus, nearPair, pan, render, renderToolbar, rollBottom, rollTop,
+  M, T, X, Y, blockYSpans, edStep, focusRange, hasConnFocus, nearPair, pan, render, renderToolbar, rollBottom, rollTop,
   rowH, scrollPitch, size, zoom, zoomPitch,
 } from './draw.js';
 import {
@@ -88,8 +88,14 @@ function scheduleNoteHold(dr, id) {
   if (dr.trackId === S.session?.current) beginAudition(id);
 }
 
+/** つかんだ区間と一緒に動かす区間（選んである音程ノート・子音・息。つかんだものが選んであるなら、その全部）。 */
+function dragBlocks(id) {
+  const ids = S.sel.filter((x) => BLOCK_KINDS.has(S.byId.get(x)?.kind));
+  return ids.length ? ids : [id];
+}
+
 export function beginSelectedAudition({ once = false } = {}) {
-  const id = S.sel.find((n) => S.byId.get(n)?.pitch_editable);
+  const id = S.sel.find((n) => AUDITION_KINDS.has(S.byId.get(n)?.kind));
   if (!id) { status('試聴するノートを選んでください'); return; }
   beginAudition(id);
   if (once) {
@@ -196,7 +202,7 @@ function onDown(e) {
     const n = S.byId.get(d.nop);
     if (!n) return;
     if (e.shiftKey) S.sel = isSel(n.id) ? S.sel.filter((id) => id !== n.id) : [...S.sel, n.id];
-    else S.sel = [n.id];
+    else if (!isSel(n.id)) S.sel = [n.id];     // 選んである区間を押しても選択を保つ（まとめて動かせる）
     if (d.nopEdge !== undefined) {
       const dr = { type: 'edge', id: n.id, which: d.nopEdge, x0: e.clientX, moved: false, alt: e.altKey, want: 0, nop: true,
         trackId: S.session?.current, startedAt: performance.now() };
@@ -204,11 +210,12 @@ function onDown(e) {
       planFor(dr, { op: 'edge', note_id: n.id, side: d.nopEdge, detach: e.altKey });
       S.drag = dr;
     } else {
-      S.drag = { type: 'note', ids: [n.id], x0: e.clientX, y0: e.clientY, moved: false, anchor: n, axis: null,
+      S.drag = { type: 'note', ids: dragBlocks(n.id), x0: e.clientX, y0: e.clientY, moved: false, anchor: n, axis: null,
         want: 0, nop: true, shift0: e.shiftKey, trackId: S.session?.current };
     }
     svg.setPointerCapture(e.pointerId);
     if (ARA) beginAudition(n.id);
+    else startPreview(n.id);                 // 音程ノートと同じ（つかんだ区間を鳴らす。cents 0）
     render();
     return;
   }
@@ -233,9 +240,8 @@ function onDown(e) {
     } else if (!isSel(id)) {
       S.sel = [id];
     }
-    let ids = S.sel.slice();
-    if (!ids.length) ids = [id];
-    ids = ids.filter((x) => S.byId.get(x)?.pitch_editable);
+    // 横に動かすときは選んだ区間（子音・息も）をまとめて。音高のときは音程ノートだけ（onMove で dr.pids に絞る）
+    const ids = dragBlocks(id);
     S.drag = { type: 'note', ids, x0: e.clientX, y0: e.clientY, moved: false, anchor: n,
       axis: null, want: 0, trackId: S.session?.current };
     svg.setPointerCapture(e.pointerId);
@@ -270,6 +276,14 @@ function selectRange(dr, rx0, rx1, ry0, ry1) {
     const b = boxOf(n);
     const x0 = X(b.s); const x1 = X(b.e); const y0 = Y(b.hi); const y1 = Y(b.lo);
     if (x0 < rx1 && x1 > rx0 && y0 < ry1 && y1 > ry0 && sel.indexOf(n.id) < 0) sel.push(n.id);
+  }
+  // 子音・息も、描いている帯に範囲がかかれば入る（選んだ後の音程の操作は音程ノートだけに効く）
+  const ys = blockYSpans();
+  for (const n of S.blocks) {
+    const y = ys.get(n.id);
+    if (!y) continue;
+    const [s, e] = spanOf(n);
+    if (X(s) < rx1 && X(e) > rx0 && y[0] < ry1 && y[1] > ry0 && sel.indexOf(n.id) < 0) sel.push(n.id);
   }
   S.sel = sel;
 }
@@ -374,6 +388,8 @@ function onMove(e) {
       if (Math.max(Math.abs(dx), Math.abs(dy)) < AXIS_PX) return;
       // 子音・息は横だけ（音程が無い。issue #35）
       dr.axis = dr.nop || Math.abs(dx) > Math.abs(dy) ? 'time' : 'pitch';
+      if (dr.nop && Math.abs(dy) > Math.abs(dx)) status('子音・息は音程が無いので、横にだけ動かせます');
+      if (dr.axis === 'pitch') dr.pids = dr.ids.filter((x) => S.byId.get(x)?.pitch_editable);
       clearTimeout(dr.holdTimer);
       if (dr.axis === 'time') { if (!ARA) stopPreview(); planFor(dr, { op: 'move', note_ids: dr.ids }); }   // ARA は鳴らし続ける（cents 0）
       else if (ARA) beginAudition(dr.anchor?.id);
@@ -392,7 +408,7 @@ function onMove(e) {
     // （shift_pitch は相対なので、足さないと見た目より前の分だけ高く／低く当たる）
     dr.deltas = new Map();
     const snapP = pitchSnapOn(e);
-    for (const id of dr.ids) {
+    for (const id of dr.pids) {
       const n = S.byId.get(id);
       if (!n) continue;
       const q = queuedPitch.get(id) || 0;
@@ -469,7 +485,7 @@ function endDrag(e) {
   clearTimeout(dr.holdTimer);
   S.drag = null;
   dr.releasedAt = performance.now();
-  if (dr.moved && (dr.type === 'note' || dr.type === 'edge')) markNoteEdited(dr.type === 'note' ? dr.ids : [dr.id]);   // 試聴は編集したノートだけ厳密に
+  if (dr.moved && (dr.type === 'note' || dr.type === 'edge')) markNoteEdited(dr.type === 'note' ? (dr.pids || dr.ids) : [dr.id]);   // 試聴は編集したノートだけ厳密に
   if (dr.type === 'stroke') {
     // 離した位置も線の終わりに入れる（最後の pointermove の後に動いた分）
     if (e.type === 'pointerup') penTo(e);
@@ -631,8 +647,9 @@ function connHover(e) {
   const bh = d.bound !== undefined ? d.bound : null;
   const sameEdge = (!eh && !S.edgeHover)
     || (eh && S.edgeHover && eh.id === S.edgeHover.id && eh.which === S.edgeHover.which);
-  // ノートに乗っている間は帯の上の角にフェードのつまみを出す（音程の無い区間・鍵盤の上は出さない）
-  const nh = (S.tool === 'main' || S.tool === 'mute') && d.note !== undefined && S.byId.get(d.note)?.kind === 'note' ? d.note : null;
+  // ノートに乗っている間は濃くし、帯の上の角にフェードのつまみを出す（子音・息も同じ。鍵盤の上は出さない）
+  const hid = d.note !== undefined ? d.note : d.nop;
+  const nh = (S.tool === 'main' || S.tool === 'mute') && hid !== undefined && BLOCK_KINDS.has(S.byId.get(hid)?.kind) ? hid : null;
   const fh = nh && d.fade !== undefined ? `${nh}|${d.fade}` : null;
   // Alt はポインタのイベントの値も見る（フォーカスが外にあって keydown を取りこぼしたとき）
   if (near === S.near && e.altKey === S.alt && sameEdge && nh === S.noteHover && fh === S.fadeHover
@@ -990,7 +1007,7 @@ function openPop(x, y) {
   popPlans = plans;
   $('#popPitchShape').checked = true;
   choosePopPlan();
-  $('#popScope').textContent = S.sel.length ? `選択 ${S.sel.length} ノート` : '全体';
+  $('#popScope').textContent = ids.length ? `選択 ${ids.length} ノート` : '全体';   // 子音・息は数えない（計画の対象も音程ノートだけ）
   $('#popPitch').value = 0; $('#popPitchV').textContent = '0%';
   $('#popTime').value = 0; $('#popTimeV').textContent = '0%';
   pop.hidden = false;

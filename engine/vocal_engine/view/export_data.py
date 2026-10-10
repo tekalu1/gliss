@@ -25,7 +25,7 @@ Claude Code などのエージェントがこのツールを呼ぶ理由は無�
 | `f0.take_env` / `guide_env` | F0 のフレームごとの音量の包絡（RMS、0〜1）。ノートごとの小さな波形（blob）の太さ |
 | `notes[].band_midi` / `guide_notes[].band_midi` | 帯（blob）を置く高さ = ノートの平均の音程（音量で重み付け、無声と子音は除く。v3 §3） |
 | `notes[].muted` | 無音にした（`mute_notes`。mute が半分以上を覆う）。画面は帯を薄く描く |
-| `notes[].fade_in_sec` / `fade_out_sec` | ノートのフェード（編集後の秒。ノートの長さに収めたもの。issue #20）。画面は帯をその分細く描く |
+| `notes[].fade_in_sec` / `fade_out_sec` | ノート・子音・息のフェード（編集後の秒。区間の長さに収めたもの。無ければ 0。issue #20。子音・息は 2026-10-10 から。キーは音程のあるノートと同じ）。画面は帯をその分細く描く |
 | `notes[].timing_corr` / `pitch_corr` | 補正の度合い（issue #37。`project/correction.py`）。補正が無ければ null。`{amount_ms / amount_cents, degree（0〜1）, manual（最後にかけたのが手動）}`。ピッチは `shape`（一定量のずらしでない = 鉛筆・曲線）も。基準は `correction_ref` |
 | `phonemes.boundaries[].moved` | その音素の境目を `move_boundary` で動かした（`reset_to_original(boundary_ids=…)` で戻せる） |
 

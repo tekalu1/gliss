@@ -10,6 +10,8 @@ DAW のクリップフェードと同じく、ノートの頭（イン）・尻�
 |---|---|---|---|
 | `fade` | 範囲（ノートの頭〜尻。編集前の秒） | `side`（"in" / "out"）, `sec`（編集後の秒） | ノートの頭（in）か尻（out）から `sec` 秒のフェード |
 
+対象は音程のあるノート・子音・息（`FADE_KINDS`。2026-10-10 承認。子音・息を音程のあるノートと揃える）。無音は区間ではない。
+
 - **錨はノートの端の時刻**（in は target の頭、out は尻）。同じ錨・同じ向きのものは後勝ち。分割するとイン は左の片、
   アウトは右の片に残る（端の時刻が同じなので）。結合で消えた境目の錨はどのノートの端にも当たらないので効かない
   （結合を取り消すと戻る）。
@@ -28,6 +30,7 @@ import numpy as np
 
 MATCH_TOL_SEC = 5e-4           # 錨とノートの端を同じとみなす差
 SIDES = ("in", "out")
+FADE_KINDS = ("note", "unvoiced", "breath")   # フェードを付けられる区間（音程のあるノート・子音・息。無音は区間ではない）
 MAX_SEC = 30.0
 
 
@@ -44,7 +47,7 @@ def _edges(notes):
     starts = {}
     ends = {}
     for n in notes:
-        if n.kind != "note":
+        if n.kind not in FADE_KINDS:
             continue
         starts[n.id] = float(n.start_sec)
         ends[n.id] = float(n.end_sec)
@@ -184,7 +187,7 @@ def fade_specs(project, note_ids, fade_in=None, fade_out=None):
     rm, add, done = [], [], []
     for nid in note_ids:
         n = by.get(nid)
-        if n is None or n.kind != "note":
+        if n is None or n.kind not in FADE_KINDS:
             continue
         cur = raw.get(nid, {})
         L = max(0.0, _map(src, out, n.end_sec, "left") - _map(src, out, n.start_sec))
