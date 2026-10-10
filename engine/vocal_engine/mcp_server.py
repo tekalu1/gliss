@@ -1059,19 +1059,46 @@ def _add(kind, target, params, author, label, note=None, hist=None, group=None):
 
 
 @_tool
-def shift_pitch(cents: float, note_id: str = None, start_sec: float = None,
+def shift_pitch(cents: float = None, note_id: str = None, start_sec: float = None,
                 end_sec: float = None, author: str = "ai", note: str = None,
-                group: str = None, label: str = None) -> dict:
+                group: str = None, label: str = None, notes: list = None) -> dict:
     """音程を cents だけ動かす（+100 = 1 半音上）。対象は note_id か範囲。
 
+    notes: 複数のノートを 1 回で動かす。[{"note_id": "n012", "cents": -12.5}, ...]
+      （cents を省いた要素は引数の cents）。1 回の呼び出し = 1 つの changeset = 取り消し 1 回
+      （画面の複数ノートのピッチのドラッグ・「半音に合わせる」）。note_id・範囲とは併用しない
     group: 同じ文字列を渡した続けての呼び出しは、取り消しの履歴で 1 回にまとめる
       （画面の複数ノートのピッチのドラッグ = Ctrl+Z 1 回で全部戻る）
     label: 取り消しの履歴に出す名前（既定「ピッチ」。画面の「半音に合わせる」など）
     """
-    t = _resolve_target(note_id, start_sec, end_sec)
-    return _add("pitch_shift", t, {"cents": float(cents)}, author,
-                "%s を %+.0f セント" % (t.describe(), cents), note, hist=label or "ピッチ",
-                group=group)
+    if notes is None:
+        if cents is None:
+            raise ProjectError("cents が要る")
+        t = _resolve_target(note_id, start_sec, end_sec)
+        return _add("pitch_shift", t, {"cents": float(cents)}, author,
+                    "%s を %+.0f セント" % (t.describe(), cents), note, hist=label or "ピッチ",
+                    group=group)
+    if note_id is not None or start_sec is not None or end_sec is not None:
+        raise ProjectError("notes と note_id・範囲は一緒に渡さない")
+    if not isinstance(notes, list) or not notes:
+        raise ProjectError("notes は [{note_id, cents}, ...] の空でない配列")
+    specs = []
+    for it in notes:
+        nid = it.get("note_id") if isinstance(it, dict) else None
+        c = it.get("cents", cents) if isinstance(it, dict) else None
+        if not nid or c is None:
+            raise ProjectError("notes の要素には note_id と cents が要る: %r" % (it,))
+        t = _resolve_target(nid, None, None)
+        specs.append({"kind": "pitch_shift", "target": t, "params": {"cents": float(c)}, "note": note})
+    p = _project()
+    first = specs[0]
+    desc = ("%s を %+.0f セント" % (first["target"].describe(), first["params"]["cents"])
+            if len(specs) == 1 else "%d 個のノートのピッチ" % len(specs))
+    cs, edits = p.apply_edits(specs, author=author, label=desc)
+    _rec(p, cs, label or "ピッチ", group=group)
+    return _ok(changeset=cs.id, edits=[e.to_json() for e in edits],
+               total_edits=len(p.edits),
+               next="render_preview / render_view / remeasure で確かめる。戻すなら undo")
 
 
 @_tool
