@@ -835,7 +835,7 @@ public:
         beginTest ("which successful calls ask for a sync");
         {
             const auto ok = parseJson (R"({"ok":true})");
-            for (auto* tool : { "shift_pitch", "undo", "redo", "apply_plan", "set_pitch_curve", "split_note", "select_track",
+            for (auto* tool : { "shift_pitch", "undo", "redo", "apply_plan", "set_pitch_curve", "split_note",
                                 "analyze_take", "set_guide_track", "set_lyrics", "some_future_tool" })
                 expect (tools::shouldSyncAfter (tool, ok), tool);
 

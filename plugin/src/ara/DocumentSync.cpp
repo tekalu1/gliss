@@ -926,6 +926,9 @@ bool DocumentSync::renderModification (const SyncModification& mod, bool stateCh
         if (! u.more)
             break;
 
+        if (between)
+            between();   // 続きの再合成の前に、保存の状態の変化を知らせる（打ち切るときも、音の知らせより先に）
+
         // 新しい編集が来た: 続きを打ち切る（残りの窓はエンジンが覚えていて、次の同期で最新の版の変化と合わせて作る）
         if (editRequested)
         {
@@ -933,9 +936,6 @@ bool DocumentSync::renderModification (const SyncModification& mod, bool stateCh
             renderInterrupted = true;
             return false;
         }
-
-        if (between)
-            between();   // 続きの再合成の前に、保存の状態の変化を知らせる
     }
 
     mod.pcm->releaseUnusedSnapshots();

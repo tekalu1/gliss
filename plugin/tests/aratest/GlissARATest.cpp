@@ -759,9 +759,14 @@ int runChanges (PlugInEntry* plugInEntry, VoiceAudioFile& voice, const ARA::ARAF
                 if (modelUpdateCounts ().documentData > 0)
                     samplesAtDocument = modelUpdateCounts ().modificationSamples;
             }
-            const bool rendered { waitForUpdates (plugInEntry, dc, [] (const ModelUpdateCounts& c) { return c.modificationSamples > 0; }, 60000) };
-            ARA_LOG ("changes: 16 samples when the document notice came: %i", samplesAtDocument);
-            passed = guided && samplesAtDocument == 0 && rendered;
+            // 手本の知らせは残りの窓の再合成を待たない: 打ち切った途中までの音の知らせと同じ回に届いてもよいが、
+            // 残りの窓の音の知らせは手本の知らせより後に来る
+            const bool rendered { samplesAtDocument >= 0
+                                  && waitForUpdates (plugInEntry, dc, [samplesAtDocument] (const ModelUpdateCounts& c)
+                                                     { return c.modificationSamples > samplesAtDocument; }, 60000) };
+            ARA_LOG ("changes: 16 samples when the document notice came: %i, at the end: %i",
+                     samplesAtDocument, modelUpdateCounts ().modificationSamples);
+            passed = guided && rendered;
         }
         record ("16 guide during a long render (told before the render ends)", passed);
         setEnv ("GLISS_TEST_RENDER_DELAY_SEC", nullptr);

@@ -79,8 +79,7 @@ for line in sys.stdin:
         aid = args['ara_id']
         m = mods[aid]
         with open(os.path.join(d, 'calls.txt'), 'a', encoding='utf-8') as f:
-            f.write('%s %s
-' % (aid, args.get('since')))
+            f.write('%s %s\n' % (aid, args.get('since')))
         n = batches.get((aid, m['rev']), 0) + 1
         batches[(aid, m['rev'])] = n
         more = n <= int(m.get('more') or 0)
