@@ -629,8 +629,9 @@ function connHover(e) {
   const bh = d.bound !== undefined ? d.bound : null;
   const sameEdge = (!eh && !S.edgeHover)
     || (eh && S.edgeHover && eh.id === S.edgeHover.id && eh.which === S.edgeHover.which);
-  // ノートに乗っている間は帯の上の角にフェードのつまみを出す（音程の無い区間・鍵盤の上は出さない）
-  const nh = (S.tool === 'main' || S.tool === 'mute') && d.note !== undefined && S.byId.get(d.note)?.kind === 'note' ? d.note : null;
+  // ノートに乗っている間は濃くし、帯の上の角にフェードのつまみを出す（子音・息も同じ。鍵盤の上は出さない）
+  const hid = d.note !== undefined ? d.note : d.nop;
+  const nh = (S.tool === 'main' || S.tool === 'mute') && hid !== undefined && BLOCK_KINDS.has(S.byId.get(hid)?.kind) ? hid : null;
   const fh = nh && d.fade !== undefined ? `${nh}|${d.fade}` : null;
   // Alt はポインタのイベントの値も見る（フォーカスが外にあって keydown を取りこぼしたとき）
   if (near === S.near && e.altKey === S.alt && sameEdge && nh === S.noteHover && fh === S.fadeHover

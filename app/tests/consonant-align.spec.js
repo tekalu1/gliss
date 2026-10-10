@@ -208,6 +208,18 @@ test('(A9) 子音だけを選んで P（押している間）で試聴する。�
   expect(await win.evaluate(() => window.__app.status())).toContain('今は使えない');
 });
 
+test('(A10) 子音の上にマウスを置くと濃くなる（母音と同じ .hov）。外すと戻る', async () => {
+  await select([]);
+  await view(U);
+  const b = await body(U.id).boundingBox();
+  await win.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
+  await win.waitForFunction((id) => window.__app.S.noteHover === id, U.id);
+  await expect(win.locator('#roll .npg.hov')).toHaveCount(1);
+  await win.mouse.move(b.x + b.width / 2, 2);
+  await win.waitForFunction(() => window.__app.S.noteHover == null);
+  await expect(win.locator('#roll .npg.hov')).toHaveCount(0);
+});
+
 test('エラーなし', () => {
   expect(errors).toEqual([]);
 });
