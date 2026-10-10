@@ -1797,8 +1797,8 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
                       author: str = "ai", boundary_ids: list = None, whole_track: bool = False) -> dict:
     """指定したノート／範囲を原音に戻す（1 つの changeset）。
 
-    ピッチの編集は外す（鉛筆はこのノートにかかる部分だけ外す）。タイミングは**ノートの頭・尻を元の位置へ戻す**（接続された隣は
-    伸び縮みで合わせる。後ろはずらさない）。戻した区間は原音のサンプルそのもの。
+    ピッチの編集は外す（鉛筆はこのノートにかかる部分だけ外す）。タイミングは**ノート・子音・息の頭・尻を元の位置へ戻す**
+    （接続された隣は伸び縮みで合わせる。後ろはずらさない。ピッチの編集は音程のあるノートだけにある）。戻した区間は原音のサンプルそのもの。
     ただし隣のノートのピッチを動かしたままなら、その境目のつなぎ（なだらかさ）は戻したノートの
     端にもかかる（段差にしないため。段差にしたいなら set_transition(value=0)）。
     無音にした（mute_notes）ノートは音が戻る（範囲の外の無音は残す）。
@@ -1838,6 +1838,7 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
         return _ok(changeset=cs.id, removed=len(b_rm), added=0, note_ids=[],
                    boundary_ids=list(boundary_ids), total_edits=len(p.edits))
     pitched = {n.id for n in TM.pitched_notes(p)}
+    block_ids = {n.id for n in TM.blocks(p)}      # タイミングを戻す対象（ノート・子音・息）
     spans = {n.id: (n.start_sec, n.end_sec) for n in p.take_notes if n.id in ids}
     span_list = list(spans.values())
     window = None
@@ -1873,10 +1874,10 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
         rm += [e.id for e in p.edits if e.kind in ("connection", "transition")
                and e.id not in rm
                and lo - 1e-9 <= p.edit_span(e)[0] and p.edit_span(e)[1] <= hi + 1e-9]
-        outside = [i for i in ids if i in pitched and i in spans
+        outside = [i for i in ids if i in block_ids and i in spans
                    and (spans[i][1] <= lo or spans[i][0] >= hi)]
     else:
-        outside = [i for i in ids if i in pitched]
+        outside = [i for i in ids if i in block_ids]
     if outside:
         plan = TM.plan_reset_timing(p, outside)
         r_ids, t_specs, _ = TM.realize(p, plan, 1.0)

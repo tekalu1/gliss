@@ -737,7 +737,8 @@ abs_cents_median_before}`。
 ### `reset_to_original(note_ids?, start_sec?, end_sec?, boundary_ids?, whole_track?)`
 
 `reset_to_original` はピッチの編集を外し（範囲のピッチ編集と鉛筆は、そのノートにかかる部分だけ外す）、タイミングは頭・尻を元の位置へ戻す計画で組み直す
-（接続された隣は伸び縮みで合わせる。後ろはずれない）。戻したノートは原音のサンプルそのもの。
+（接続された隣は伸び縮みで合わせる。後ろはずれない）。**`note_ids` に子音（`unvoiced`）・息（`breath`）を渡しても、音程のあるノートと同じくタイミングが戻る**
+（承認済み（2026-10-10）。以前は音程のあるノートだけで、動かした子音・息のタイミングが戻らなかった。ピッチの編集は音程のあるノートにしか無い）。戻したノートは原音のサンプルそのもの。
 無音にした（`mute_notes`）ノートは音が戻る。フェード（`set_fade`）も外れる（そのノートの頭のイン・尻のアウト）。
 `boundary_ids`（`get_phonemes` の `boundaries[].id`）を渡すと、その音素の境目を動かした編集（`move_boundary`）を外す
 （画面の音素の右クリック「子音｜母音の境目を元に戻す」。`export_view_data` の `phonemes.boundaries[].moved`）。
