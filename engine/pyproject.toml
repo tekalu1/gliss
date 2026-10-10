@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vocal-engine"
-version = "0.1.0b15"
+version = "0.1.0"
 description = "Gliss（歌声のピッチ・タイミング編集ツール）の Python エンジン（解析・非破壊編集・レンダリング・MCP サーバー）"
 requires-python = ">=3.13"
 license = { text = "GPL-3.0-or-later" }
