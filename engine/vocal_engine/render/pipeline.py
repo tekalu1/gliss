@@ -743,6 +743,85 @@ class Renderer:
         return te - j                                               # j = te - d
 
 
+CUT_MARGIN_SEC = 0.06    # 区切りの点は、区間（束ねて広げた後）からこれ以上離す
+
+
+def clean_cuts(segments, t0, t1, sr, n_frames, margin_sec=CUT_MARGIN_SEC):
+    """`render_range(t0, t1, segments, fit_out_sec=t1 - t0)` を、点 c で [t0, c) と [c, t1) に分けて
+    別々に作っても（それぞれ fit_out_sec はその長さ）**サンプル単位で同じ**になる c の範囲。
+    フレーム（クリップ内のサンプル番号）の [[a, b], ...]（両端を含む）。
+
+    c が満たすこと（`render_range` の出力の決め方をなぞって確かめる。再合成はしない）:
+      - c が原音のままの隙間の中にあり、その隙間の出力の位置が元の位置からずれていない
+        （手前の伸縮・移動・無音の挿入・切り取りの差し引きが 0。出力のサンプル = 元のサンプル）。
+      - その隙間の前後の区間がどちらも移動していない（隙間が移動を吸収していない）。
+      - 区間から margin_sec 以上離れている（区切った側でも、つなぎ目の 20 ms のクロスフェードと
+        `bundle_short_segments` が隙間から借りる幅が、元と同じに取れる）。
+    そうなら区切った両側は、どちらも c の付近が原音のまま元の位置にあり、c をまたぐつなぎ目も無い。
+    t0・t1 そのものも区切りとして含める（窓の端）。"""
+    hx = max(1, int(round(XFADE_MS / 2000.0 * sr)))
+    fade = 2 * hx
+    segs = [s for s in segments if not s.is_identity() and getattr(s, "fade", None) is None
+            and ((s.end_sec > t0 and s.start_sec < t1)
+                 or (s.silence_sec > 0 and t0 <= s.start_sec <= t1))]
+    segs.sort(key=lambda s: (s.start_sec, s.end_sec))
+    segs = bundle_short_segments(segs, t0, t1, fade / float(sr))
+    min_gap = MIN_GAP_MS / 1000.0
+    m = int(np.ceil(margin_sec * sr))
+    ia, ib = int(round(t0 * sr)), int(round(t1 * sr))
+    pos = [t0]
+
+    def slot(out_sec):
+        a = int(round(pos[0] * sr))
+        pos[0] += max(0.0, out_sec)
+        return max(0, int(round(pos[0] * sr)) - a)
+
+    def src_len(a_sec, b_sec):
+        return max(0, min(n_frames, int(round(b_sec * sr))) - max(0, int(round(a_sec * sr))))
+
+    out = []
+
+    def gap(a_sec, b_sec, out_sec, clean, want=None):
+        """原音の [a_sec, b_sec) の隙間を出力に置く。clean なら区切れる範囲を足す。"""
+        o = int(round(pos[0] * sr))
+        n = slot(out_sec) if want is None else want
+        if not clean or abs(n - src_len(a_sec, b_sec)) > 1 or o != max(0, int(round(a_sec * sr))):
+            return
+        lo = o if abs(a_sec - t0) < 1e-12 else o + m
+        hi = o + n if abs(b_sec - t1) < 1e-12 else o + n - m
+        if hi >= lo:
+            out.append([lo, hi])
+
+    cursor, m_prev = t0, 0.0
+    for sg in segs:
+        if sg.silence_sec > 0:
+            t = sg.start_sec
+            if t > cursor:
+                gap(cursor, t, t - cursor, abs(m_prev) < 1e-9)
+                cursor = t
+            slot(sg.silence_sec)
+            continue
+        s, e = max(t0, sg.start_sec), min(t1, sg.end_sec)
+        if e <= s:
+            continue
+        gap_src = s - cursor
+        gap_out = gap_src + (sg.move_ms - m_prev) / 1000.0
+        if gap_src > 0:
+            if gap_out < min_gap:
+                gap_out = min(gap_src, min_gap)
+            gap(cursor, s, gap_out, abs(m_prev) < 1e-9 and abs(sg.move_ms) < 1e-9)
+        slot((e - s) * sg.ratio)
+        cursor, m_prev = e, sg.move_ms
+    if t1 - cursor > 0:
+        done = int(round(pos[0] * sr)) - ia
+        gap(cursor, t1, None, abs(m_prev) < 1e-9, want=max(0, (ib - ia) - done))
+    if not out or out[0][0] > ia:                    # 窓の頭はいつでも区切り（何も作らない側）
+        out.insert(0, [ia, ia])
+    if out[-1][1] < ib:
+        out.append([ib, ib])
+    return out
+
+
 def _ncc(seg, ref, te):
     """seg を ref に対して j = 0..2te サンプルずらしたときの正規化相互相関（j = te がずらさない）。足りなければ None。"""
     m = len(ref)
