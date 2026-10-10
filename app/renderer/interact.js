@@ -882,7 +882,7 @@ function openPop(x, y) {
   popPlans = plans;
   $('#popPitchShape').checked = true;
   choosePopPlan();
-  $('#popScope').textContent = S.sel.length ? `選択 ${S.sel.length} ノート` : '全体';
+  $('#popScope').textContent = ids.length ? `選択 ${ids.length} ノート` : '全体';   // 子音・息は数えない（計画の対象も音程ノートだけ）
   $('#popPitch').value = 0; $('#popPitchV').textContent = '0%';
   $('#popTime').value = 0; $('#popTimeV').textContent = '0%';
   pop.hidden = false;

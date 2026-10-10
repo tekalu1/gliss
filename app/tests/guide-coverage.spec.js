@@ -227,6 +227,23 @@ test('(5) 選択範囲のノートだけを描く', async () => {
   expect(errors).toEqual([]);
 });
 
+test('(5b) ポップアップの数は音程ノートだけ数える（子音・息だけを選んだときは「全体」）', async () => {
+  const ids = await win.evaluate(() => ({
+    pitched: window.__app.allNotes().map((n) => n.id),
+    block: window.__app.S.notes.find((n) => n.kind === 'unvoiced' || n.kind === 'breath')?.id,
+  }));
+  test.skip(!ids.block, '素材に子音・息が無い');
+  const scope = async (sel) => {
+    await win.evaluate((s) => { window.__app.S.sel = s; window.__app.render(); }, sel);
+    await openGuide();
+    const text = await win.locator('#popScope').textContent();
+    await closeGuide();
+    return text;
+  };
+  expect(await scope([ids.pitched[0], ids.pitched[1], ids.block])).toBe('選択 2 ノート');
+  expect(await scope([ids.block])).toBe('全体');
+});
+
 test('(6) 確かな頭の組が無いガイド: 「タイミングを合わせられない」と出し、タイミングは動かない', async () => {
   await app.close();
   await launch(OTHER, `${PROJECT}-other`);
