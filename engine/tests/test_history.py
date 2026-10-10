@@ -335,7 +335,8 @@ def test_continuous_curve_over_a_gap_is_not_smoothed(tmp_path):
     from vocal_engine.project.model import Target
     plain = Project.open(CLIP_A, None, project_dir=str(tmp_path / "a"))
     plain.analyze()
-    rows = [(a, b) for a, b, c, _ in TM.connections(plain) if c and b.start_sec - a.end_sec > 0.03]
+    # つなぎの相手は beta.10 までの既定（子音をはさんだ短い隙間も接続。pitch.transitions）
+    rows = [(a, b) for a, b, c, _ in TM.connections(plain, legacy=True) if c and b.start_sec - a.end_sec > 0.03]
     assert rows, "隙間のある接続が無い"
     a, b = rows[0]
     L = b.end_sec - a.start_sec

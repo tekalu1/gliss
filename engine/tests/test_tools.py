@@ -191,10 +191,17 @@ def test_transition_value_persists_and_popup_replaces(plain):
     # 自動に戻す = 上書きを外す
     m.set_transition(value=0.5, note_ids=["n010"], author="human")
     assert not [e for e in plain.edits if e.kind == "transition"]
-    rows = {(r["a"], r["b"]): r for r in m.list_connections()["connections"]}
+    seq = m.list_connections()["connections"]
+    rows = {(r["a"], r["b"]): r for r in seq}
     assert rows[("n010", "n011")]["transition"]["auto"] is True
     assert rows[("n010", "n011")]["transition"]["smoothing"] is True
-    assert "transition" not in rows[("n007", "n009")]
+    # 息を挟む音程ノートの組にはつなぎが無い（行は息との組で、そこにも transition は載らない）
+    from vocal_engine.project import pitch as PI
+    around = [(r1["a"], r2["b"]) for r1, r2 in zip(seq, seq[1:])
+              if r1["b_kind"] == "breath" and r2["a"] == r1["b"] and r1["a_kind"] == r2["b_kind"] == "note"]
+    assert around
+    assert all("transition" not in r for r in seq if "breath" in (r["a_kind"], r["b_kind"]))
+    assert not set(around) & {(t.a, t.b) for t in PI.transitions(plain) if t.kind == "boundary"}
 
 
 def test_unedited_boundaries_stay_original(plain, tmp_path):
