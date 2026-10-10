@@ -840,7 +840,7 @@ public:
                 expect (tools::shouldSyncAfter (tool, ok), tool);
 
             for (auto* tool : { "list_tracks", "list_notes", "get_pitch", "export_view_data", "track_overview", "engine_info",
-                                "prep_status", "render_audition", "plan_edit", "project_status" })
+                                "prep_status", "render_audition", "plan_edit", "project_status", "select_track" })
                 expect (! tools::shouldSyncAfter (tool, ok), tool);
 
             expect (! tools::shouldSyncAfter ("shift_pitch", parseJson (R"({"ok":false,"error":"x"})")));

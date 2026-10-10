@@ -29,12 +29,14 @@ juce::File pythonForTests()
 
 // 偽のエンジン: 呼ばれるたびに state.json を読み、修飾ごとに {rev, state, windows, pending} を返す。
 // ara_render_dirty は since が前に返した版と違えば reset、windows なら 100 フレームの窓（中身は 0.5。delay 秒かかる）。
+// more なら、その版で more 回は続き（版は「<版>~<n>」）を返す。呼ばれた順を calls.txt に書く（修飾 since）。
 const char* fakeEngine = R"PY(import json, os, sys, time
 d = os.path.dirname(os.path.abspath(__file__))
 pcm = os.path.join(d, 'win.f32')
 with open(pcm, 'wb') as f:
     f.write(b'\x00\x00\x00\x3f' * 100)
 last = {}
+batches = {}
 def state():
     # 試験の書き手は置き換え（ReplaceFile）で書くが、置き換えの最中は開けないことがある: 少し待って読み直す
     for attempt in range(100):
@@ -76,12 +78,19 @@ for line in sys.stdin:
     elif name == 'ara_render_dirty':
         aid = args['ara_id']
         m = mods[aid]
+        with open(os.path.join(d, 'calls.txt'), 'a', encoding='utf-8') as f:
+            f.write('%s %s
+' % (aid, args.get('since')))
+        n = batches.get((aid, m['rev']), 0) + 1
+        batches[(aid, m['rev'])] = n
+        more = n <= int(m.get('more') or 0)
+        token = m['rev'] + ('~%d' % n if more else '')
         reset = args.get('since') is None or args.get('since') != last.get(aid)
-        last[aid] = m['rev']
+        last[aid] = token
         win = [{'start_frame': 0, 'frames': 100, 'byte_offset': 0}] if m.get('windows') and not m.get('pending') else []
         if win:
             time.sleep(float(m.get('delay') or 0))     # 再合成が長いとき
-        reply(msg['id'], {'ok': True, 'rev': m['rev'], 'reset': reset, 'more': False, 'restore': [], 'windows': win,
+        reply(msg['id'], {'ok': True, 'rev': token, 'reset': reset, 'more': more, 'restore': [], 'windows': win,
                           'path': pcm if win else None, 'sr': 44100, 'channels': 1, 'source_frames': 1000,
                           'analysis_pending': bool(m.get('pending'))})
     elif name == 'ara_notes':
@@ -334,6 +343,52 @@ public:
             sync.shutdown();
         }
 
+        beginTest ("an edit cuts a long continuation short, renders the edited modification first, then finishes the rest");
+        {
+            write ("a0:e0", "s0", "b0:f0", "t0", {}, false, false, 0.0, true);
+            Recorder rec;
+            DocumentSync sync (config, options, rec.callbacks());
+            sync.setModel (twoModifications());
+            expect (waitUntil ([&] { return rec.count (rec.content, "mod2", false) > 0; }, 15000), "first render caught up");
+            settle (sync);
+
+            // 修飾 1 の再合成が 20 回の続き（各 0.15 秒）になる。その途中で修飾 2 を編集する
+            const auto calls = dir.getChildFile ("calls.txt");
+            const auto callOrder = [&]
+            {
+                juce::StringArray lines;
+                lines.addLines (calls.loadFileAsString());
+                lines.removeEmptyStrings();
+                juce::StringArray out;
+                for (const auto& l : lines)
+                    out.add (l.upToFirstOccurrenceOf (" ", false, false));
+                return out;
+            };
+            calls.deleteFile();
+            rec.clear();
+            write ("a0:e1", "s0", "b0:f0", "t0", {}, false, false, 0.15, true, 0.0, 20);
+            sync.requestEditSync();
+            expect (waitUntil ([&] { return callOrder().size() >= 3; }, 10000), "continuation running");
+            write ("a0:e1", "s0", "b0:f1", "t0", {}, false, false, 0.15, true, 0.0, 20);
+            sync.requestEditSync();
+            expect (waitUntil ([&] { return rec.count (rec.content, "mod2", true) > 0; }, 10000), "edited modification rendered");
+            auto order = callOrder();
+            const auto firstMod2 = order.indexOf ("mod2");
+            expect (firstMod2 > 0 && firstMod2 < 15, order.joinIntoString (","));
+
+            // 打ち切った続きは、版の印（since）を引き継いで最後まで作る（初めからやり直さない）
+            expect (waitUntil ([&] { return sync.getModStatus ("mod").state == "ready"; }, 15000), "continuation finished");
+            settle (sync);
+            order = callOrder();
+            int modBatches = 0;
+            for (const auto& id : order)
+                modBatches += id == "mod" ? 1 : 0;
+            expectEquals (modBatches, 21, order.joinIntoString (","));
+            expectEquals (sync.getModStatus ("mod").rev, juce::String ("a0:e1"));
+            expect (calls.loadFileAsString().contains ("mod a0:e1~"), "resumed from the continuation");
+            sync.shutdown();
+        }
+
         beginTest ("an old archive without guides takes the restored guides as the host's");
         {
             write ("a0:e0", "s0", "a0:f0", "t0", { { "mod", "mod2" } });
@@ -363,15 +418,16 @@ private:
 
     void write (const char* rev, const char* state, const char* rev2, const char* state2,
                 const std::map<juce::String, juce::String>& guides, bool pending = false, bool renderChanged = false,
-                double delay = 0.0, bool windows2 = false, double delay2 = 0.0)
+                double delay = 0.0, bool windows2 = false, double delay2 = 0.0, int more = 0)
     {
         auto* g = new juce::DynamicObject();
         for (const auto& [k, v] : guides)
             g->setProperty (juce::Identifier (k), v);
 
-        const auto mod = [] (const char* r, const char* s, bool windows, bool p, double d)
+        const auto mod = [] (const char* r, const char* s, bool windows, bool p, double d, int n)
         {
             auto* o = new juce::DynamicObject();
+            o->setProperty ("more", n);
             o->setProperty ("rev", r);
             o->setProperty ("state", s);
             o->setProperty ("windows", windows);
@@ -381,8 +437,8 @@ private:
         };
 
         auto* mods = new juce::DynamicObject();
-        mods->setProperty ("mod", mod (rev, state, true, pending, delay));
-        mods->setProperty ("mod2", mod (rev2, state2, windows2, false, delay2));
+        mods->setProperty ("mod", mod (rev, state, true, pending, delay, more));
+        mods->setProperty ("mod2", mod (rev2, state2, windows2, false, delay2, 0));
 
         auto* root = new juce::DynamicObject();
         root->setProperty ("mods", juce::var (mods));
