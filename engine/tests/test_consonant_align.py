@@ -2,6 +2,8 @@
 """子音・息を、音程のあるノートと揃える（2026-10-10 承認。エンジン側。素材なし・合成のノート列）。
 
 - オリジナルに戻す（reset_to_original）が、子音・息のタイミング（頭・尻）も元に戻す（音程のあるノートと同じ）
+- フェード（set_fade）が子音・息にも付く。音が変わる（書き出し）・画面のデータ（export_view_data）に載る・
+  オリジナルに戻すで外れる・分割でイン は左／アウトは右に残る・無音（区間ではない）と無いノートは断る
 """
 import json
 
@@ -138,3 +140,86 @@ def test_reset_of_an_apart_breath_restores_its_timing_and_keeps_the_gaps(mcp):
     after = _edges(p)
     for nid, e in before.items():
         assert after[nid] == pytest.approx(e, abs=1e-6), nid
+
+
+# ================================================================ フェード
+@pytest.mark.parametrize("kind_id,fi,fo", [("n01", 0.05, 0.08), ("n03", 0.06, 0.0)])
+def test_fade_on_a_consonant_or_breath_changes_only_the_volume_inside(mcp, tmp_path, kind_id, fi, fo):
+    m, p, src = mcp(TOUCHING)
+    n = next(x for x in p.take_notes if x.id == kind_id)
+    r = _ok(m.set_fade(note_ids=[kind_id], fade_in_sec=fi, fade_out_sec=fo, author="human"))
+    assert r["changeset"]
+    assert r["fades"][kind_id] == [fi, fo]
+    a, b, sr = _export(p, tmp_path / "out.wav", src)
+    s0, s1 = int(round(n.start_sec * sr)), int(round(n.end_sec * sr))
+    diff = np.flatnonzero(np.any(np.abs(a - b) > 1e-9, axis=1))
+    assert len(diff) and diff.min() >= s0 - 1 and diff.max() <= s1 + 1       # 区間の外は元のサンプルそのまま
+    m0 = int(round(fi * sr))
+    if m0:
+        u = (np.arange(m0) + 0.5) / m0
+        want = a[s0:s0 + m0, 0] * np.sin(0.5 * np.pi * u)
+        assert np.max(np.abs(b[s0:s0 + m0, 0] - want)) < 2e-4
+    o0 = s1 - int(round(fo * sr))
+    if fo:
+        u = (np.arange(s1 - o0) + 0.5) / (s1 - o0)
+        assert np.max(np.abs(b[o0:s1, 0] - a[o0:s1, 0] * np.cos(0.5 * np.pi * u))) < 2e-4
+    mid = slice(s0 + m0 + 2, o0 - 2)
+    assert np.array_equal(a[mid], b[mid])
+    # 画面のデータ（export_view_data）は音程のあるノートと同じキー
+    d = _view(p)[kind_id]
+    assert d["fade_in_sec"] == pytest.approx(fi) and d["fade_out_sec"] == pytest.approx(fo)
+    assert d["edited"] is True and d["pitch_editable"] is False
+    assert all(v["fade_in_sec"] == 0 and v["fade_out_sec"] == 0
+               for k, v in _view(p).items() if k != kind_id)
+    ln = {x["id"]: x for x in _ok(m.list_notes(kind="all"))["notes"]}
+    assert ln[kind_id]["fade_in_sec"] == pytest.approx(fi)
+    # 再生・試聴の経路（render_region）も書き出しと同じ中身
+    from vocal_engine.render.region import render_region
+    y, _ = render_region(p, 0.0, p.duration_sec, channels="all")
+    assert y.shape[0] == a.shape[0] and np.max(np.abs(y[:, 0] - b[:, 0])) < 1e-4
+    _ok(m.undo())
+    a, b, _ = _export(p, tmp_path / "back.wav", src)
+    assert np.array_equal(a, b)
+
+
+def test_fade_on_a_consonant_is_clamped_split_and_reset(mcp):
+    m, p, _ = mcp(TOUCHING)
+    L = 0.20
+    _ok(m.set_fade(note_ids=["n01"], fade_in_sec=L, fade_out_sec=L, author="human"))
+    d = _view(p)["n01"]
+    assert d["fade_in_sec"] + d["fade_out_sec"] == pytest.approx(L, abs=1e-4)          # 区間の長さに収める
+    assert _ok(m.set_fade(note_ids=["n01"], fade_in_sec=d["fade_in_sec"], author="human"))["changeset"] is None
+    _ok(m.set_fade(note_ids=["n01"], fade_in_sec=0.04, fade_out_sec=0.05, author="human"))
+    # 分割: イン は左の片、アウトは右の片
+    _ok(m.split_note(sec=0.60, note_id="n01", author="human"))
+    ns = _view(p)
+    left = next(v for v in ns.values() if abs(v["start_sec"] - 0.50) < 1e-3 and v["kind"] == "unvoiced")
+    right = next(v for v in ns.values() if abs(v["end_sec"] - 0.70) < 1e-3 and v["kind"] == "unvoiced")
+    assert left["id"] != right["id"]
+    assert left["fade_in_sec"] == pytest.approx(0.04) and left["fade_out_sec"] == 0
+    assert right["fade_in_sec"] == 0 and right["fade_out_sec"] == pytest.approx(0.05)
+    _ok(m.undo())
+    # 両方 0 = フェードを消す
+    r = _ok(m.set_fade(note_ids=["n01"], fade_in_sec=0, fade_out_sec=0, author="human"))
+    assert r["changeset"]
+    assert not any(e.kind == "fade" for e in p.edits)
+    _ok(m.undo())
+    # 隣（音程のあるノート）のフェードは残し、息のフェードと子音のフェードはオリジナルに戻すで外れる
+    _ok(m.set_fade(note_ids=["n02", "n03"], fade_in_sec=0.03, author="human"))
+    _ok(m.reset_to_original(note_ids=["n01"], author="human"))
+    fes = [e for e in p.edits if e.kind == "fade"]
+    assert sorted(e.params["note_id"] for e in fes) == ["n02", "n03"]
+    _ok(m.reset_to_original(note_ids=["n03"], author="human"))
+    assert [e.params["note_id"] for e in p.edits if e.kind == "fade"] == ["n02"]
+
+
+def test_fade_still_refuses_unknown_ids_and_no_value(mcp):
+    m, p, _ = mcp(TOUCHING)
+    bad = m.set_fade(note_ids=["n999"], fade_in_sec=0.1)
+    assert bad["ok"] is False and "n999" in bad["error"]
+    assert m.set_fade(note_ids=["n01"])["ok"] is False
+    # 無音は区間ではない（kind=silence のノートがあっても付けられない）
+    p._take_notes = sorted(list(p.take_notes) + [_note(90, 1.8, 2.0, "silence")], key=lambda n: n.start_sec)
+    p._notes_cache = None
+    bad = m.set_fade(note_ids=["n90"], fade_in_sec=0.1)
+    assert bad["ok"] is False and "n90" in bad["error"]
