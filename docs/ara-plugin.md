@@ -96,7 +96,7 @@ DocumentController がエンジン（`McpClient`。`plugin/src/engine`）を **1
   打ち切る前に保存するものの変化（ガイドの指定など）を知らせ、続けて途中まで作った音の知らせを送る。
   続きの残っている修飾（手元の版が `<版>~<n>`）は後に回し、編集した修飾の音を先に作る。
 - エンジンは `ara_render_dirty` の再合成をロックの外で行う（`engine/docs/MCP.md` の「差分の再合成」）。同期が長い窓を作っている間も、
-  画面の編集と描画データは待たない。
+  画面の編集と描画データは待たない。描画データは、0.2 秒以内に終わる見込みの再合成だけ、その確定を先に通す（編集した音を遅らせない）。
 - `plugin.log` の段ごとの時間: `sync: cycle <ms> ms (revs, render … for <修飾の数>, notify, notes, archives)`（何かを作った・取った周だけ）・
   `sync: ara_render_dirty … (call <ms> ms, apply <ms> ms)`・`sync: notified content changed (…) queue <ms> ms, notify <ms> ms`
   （メッセージスレッドで待った時間と、ホストへの知らせの時間）。エンジンの側は `engine.log` の `render op=ara_render_dirty` と `edit op=` の行。

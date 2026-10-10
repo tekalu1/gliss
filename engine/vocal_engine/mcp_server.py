@@ -62,6 +62,49 @@ def _locked():
         yield
 
 
+# ロックの外で再合成している ARA の窓（ara_render_dirty）→ 確定まで終わる見込みの時刻（perf_counter。None = 分からない）
+_flights = {}
+_flights_cv = threading.Condition()
+RENDER_YIELD_SEC = 0.2          # 描画データは、ロックの外の再合成がこの秒以内に終わる見込みなら、その確定を先に通す
+YIELD_TOOLS = {"export_view_data"}
+
+
+@contextlib.contextmanager
+def _render_flight(eta_sec):
+    """ロックの外で窓を再合成して確定するまで（ara_render_dirty）。eta_sec: 終わるまでの見込みの秒（None = 分からない）。"""
+    key = object()
+    with _flights_cv:
+        _flights[key] = None if eta_sec is None else time.perf_counter() + eta_sec
+    try:
+        yield
+    finally:
+        with _flights_cv:
+            del _flights[key]
+            _flights_cv.notify_all()
+
+
+def _yield_to_renders():
+    """描画データを組み立てる前に、もうすぐ終わる再合成の確定を待つ（RENDER_YIELD_SEC まで）。
+
+    組み立て（曲全体で 0.1 秒を超える）が先にロックを取ると、作り終えた窓の確定がその後ろで待ち、
+    編集した音が鳴るのが遅れる（ロックの中で作っていた頃は、確定が先だった）。
+    終わる見込みが分からない・遠い再合成（長い窓・初回の下ごしらえ）は待たない。待った秒は lock_wait に足す。"""
+    if _lock._is_owned():                   # ロックを握ったまま呼ばれた（ara_relay の中継）: 待つと確定と行き詰まる
+        return
+    t = time.perf_counter()
+    deadline = t + RENDER_YIELD_SEC
+    with _flights_cv:
+        while _flights:
+            ends = list(_flights.values())
+            if any(e is None or e > deadline for e in ends):
+                break
+            left = deadline - time.perf_counter()
+            if left <= 0:
+                break
+            _flights_cv.wait(left)
+    _lock_stat.wait = getattr(_lock_stat, "wait", 0.0) + time.perf_counter() - t
+
+
 # ---------------------------------------------------------------- 共通
 def _ok(**kw):
     return dict(ok=True, **kw)
@@ -221,6 +264,8 @@ def _tool(fn=None, *, lock=True):
                 if lock:
                     if f.__name__ in SETTLE_TOOLS:
                         _settle_before_lock()
+                    if f.__name__ in YIELD_TOOLS:
+                        _yield_to_renders()
                     with _locked():
                         t_apply = time.perf_counter()
                         r = f(*a, **kw)
