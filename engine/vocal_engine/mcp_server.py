@@ -147,6 +147,26 @@ def _resolve_target(note_id=None, start_sec=None, end_sec=None, phoneme_id=None)
     return Target.range(t0, t1)
 
 
+# 表示のツール: エンジンのロックを取る前に、今のトラックの裏の準備（順番待ち・準備中）の終わりを待つ
+# （2026-10-10 承認）。ロックの中で待つと、その間ほかのトラックの音作り（ara_render_dirty）が止まる
+SETTLE_TOOLS = frozenset({"export_view_data", "list_notes", "get_pitch"})
+
+
+def _settle_before_lock():
+    p = _state.get("project")                 # ロックの外なので目安（違っていても、中の front がいつもどおり待つ）
+    if p is None or p._take_f0 is not None:
+        return
+    from . import prep
+    if not prep.enabled():
+        return
+    try:
+        t = time.perf_counter()
+        if prep.settle(p.dir):
+            log.get("tool").info("settle wait=%.2f（ロックの外で裏の準備を待った）", time.perf_counter() - t)
+    except Exception as e:                    # noqa: BLE001  待てなくても、ロックの中でいつもどおり待つ
+        log.get("tool").warning("裏の準備を待てない: %s", e)
+
+
 def _tool(fn=None, *, lock=True):
     """例外を JSON に畳んで返す（MCP のエラーにすると原因が分かりにくいため）。
 
@@ -199,6 +219,8 @@ def _tool(fn=None, *, lock=True):
             try:
                 t_apply = t_summary = None
                 if lock:
+                    if f.__name__ in SETTLE_TOOLS:
+                        _settle_before_lock()
                     with _locked():
                         t_apply = time.perf_counter()
                         r = f(*a, **kw)
@@ -2565,7 +2587,7 @@ def cancel_job(job_id: str) -> dict:
 
 
 @_tool(lock=False)
-def prep_status() -> dict:
+def prep_status(visible: list | None = None, playhead_sec: float | None = None) -> dict:
     """**画面向け**: トラックごとの裏の準備（issue #63）の状態。エンジンのロックを握らないので、
     ほかの処理の最中でもすぐ返る。
 
@@ -2574,8 +2596,14 @@ def prep_status() -> dict:
              "queued"（待ち）/ "failed"（失敗。error。選んだときに表でもう一度解析する）
       paused: 表の重い処理・一時停止の間、次の段へ進まずに待っている
     running: 今準備しているトラックの id（無ければ null）。
+    visible・playhead_sec（省略可）: 画面が今見ているトラックの id（前ほど先）と再生位置（ソングの秒）。
+      渡すと、裏の準備は編集対象 → 見ているトラック → 残りは再生位置から順に進み、DAW の差分の再合成
+      （ara_render_dirty）も再生位置に近い窓から返す（DAW で開いたとき。2026-10-10 承認）。曲は変えない。
     """
     from . import prep
+    s = _state.get("session")
+    if s is not None and (visible is not None or playhead_sec is not None):
+        prep.set_focus(s.dir, visible, playhead_sec)
     return _ok(**prep.overview())
 
 
@@ -2814,6 +2842,9 @@ def main():
         log.get().exception("アドオンを読めなかった")
     log.get().info("=== vocal_engine MCP サーバー起動（%s / pid %d）", __version__, os.getpid())
     server = build_server()
+    from . import warmup
+    warmup.mark_ready()
+    warmup.start()                               # librosa・numba・モデルを裏で読んでおく（ロックは取らない）
     try:
         server.run(transport="stdio")
     finally:

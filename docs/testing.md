@@ -61,6 +61,10 @@ F0 のモデルや既定を替えて素材のテストが落ちたら、環境�
 画面の編集の段階の時間は、曲の作業場所の `screen.log`（`engine.log` の隣。曲を開く前は既定のログの場所）に 1 行ずつ残る:
 `screen op=pitch queued= 0.00 apply= 0.04 refresh= 0.12 total= 0.16`（秒。queued = 離してから送るまで、apply = エンジンが当てるまで、refresh = 当たってから画面に採るまで）。1 MB を超えたら 1 世代だけ残す。
 
+`engine/tests/test_speed.py` は、素材 C・C2 を開く速さ（初回・2 回目）と F0 の方式の往復（RMVPE → Gliss → RMVPE）の
+速さを、新しいエンジンのプロセスで測る。上限は開発機で 3 回測った中央値の 1.5 倍（2026-10-10 承認）。遅い PC では
+`GLISS_SPEED_SCALE`（倍率）で緩め、`GLISS_SPEED=0` で skip する。開くのを速く（遅く）したら、3 回測り直して中央値を書き換える。
+
 ### materials.json
 
 ```json

@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .. import HOP_S
+from .. import HOP_S, log
 from ..audio import frame_rms_db, read_mono
 
 RMVPE_THRESHOLD = 0.03
@@ -312,6 +312,8 @@ def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
     for est in order:
         try:
             t0 = time.perf_counter()
+            load_model(est, model_path=model_path, gliss_version=gliss_version)
+            t_load = time.perf_counter() - t0
             if est == "rmvpe":
                 f0, conf = _estimate_rmvpe(x, sr, n_frames, sweep, model_path, threshold)
             elif est == "gliss":
@@ -321,6 +323,8 @@ def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
             else:
                 f0, conf = _estimate_fcpe(x, sr, n_frames)
             elapsed = time.perf_counter() - t0
+            log.get("f0").info("f0 method=%s load=%.2f infer=%.2f frames=%d",
+                               est, t_load, elapsed - t_load, n_frames)
             rms = frame_rms_db(x, sr, n_frames, HOP_S)
             voiced = (f0 > 0) & (rms > energy_floor_db)
             f0 = np.where(voiced, f0, 0.0)
@@ -339,6 +343,16 @@ def estimate_f0(path=None, x=None, sr=None, estimator="rmvpe", sweep=False,
             if est == order[-1]:
                 raise
     raise last_err
+
+
+def load_model(est, model_path=None, gliss_version=None):
+    """方式のモデルを読んでおく（読んであれば何もしない）。解析の前と、起動直後の下ごしらえ（`warmup.py`）で呼ぶ。"""
+    if est == "rmvpe":
+        _rmvpe(model_path)
+    elif est == "gliss":
+        _gliss_session(gliss_version)
+    elif est == "praat":
+        import parselmouth  # noqa: F401
 
 
 def _estimate_rmvpe(x, sr, n_frames, sweep, model_path, threshold):

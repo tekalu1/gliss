@@ -527,6 +527,9 @@ class Preparer:
         self._guides = frozenset()      # ガイドとして使われているトラック id（先に準備する）
         self._current = None
         self._recent = []               # 最近選んだトラック（前ほど新しい）
+        self._focus = []                # 画面が見ているトラック（前ほど先。`set_focus`）
+        self._playhead = None           # 画面の再生位置（ソングの秒。`set_focus`）
+        self._spans = {}                # トラック id → (タイムラインの頭, 終わり)（秒）
         self._running = None
         self._claimed = {}              # 表が占有しているプロジェクトのディレクトリ → 数
         self._joining = {}              # 表が合流して待っているトラック id → 数
@@ -555,13 +558,14 @@ class Preparer:
             for it in self._items.values():
                 it.cancelled = True
             self._items, self._recent, self._current = {}, [], None
+            self._focus, self._playhead = [], None
             self._sdir = s.dir
             self._ph = {}                       # 前の曲の音素の仕事はやめる（走っていれば区間の間で止まる）
         if current is not Ellipsis:
             self._current = current
             if current:
                 self._recent = [current] + [x for x in self._recent if x != current][:31]
-        want, order = {}, []
+        want, order, spans = {}, [], {}
         for t in s.tracks:
             if t["kind"] != "vocal" or not t.get("project_dir"):
                 continue
@@ -574,6 +578,8 @@ class Preparer:
                 continue
             tid = t["id"]
             order.append(tid)
+            off = float(t.get("offset_sec") or 0.0)
+            spans[tid] = (off, off + float(t.get("duration_sec") or 0.0))
             it = self._items.get(tid)
             if it is not None and it.sig == sig and _norm(it.pdir) == _norm(pdir):
                 if it.state == READY and not stamp_ok(pdir, sig):
@@ -591,7 +597,35 @@ class Preparer:
             if tid not in want:
                 it.cancelled = True
         self._items, self._order, self._guides = want, order, frozenset(s.guide_users())
+        self._spans = spans
         self._cv.notify_all()
+
+    def set_focus(self, sdir, visible=None, playhead_sec=None):
+        """画面が今見ているトラック（visible。前ほど先）と再生位置（ソングの秒）を準備の順番に使う
+        （DAW で開いたとき。2026-10-10 承認）: 編集対象 → 見ているトラック → 残りは再生位置から順に
+        （再生位置にかかるもの → 後ろへ近い順 → 前へ近い順）。違うセッションなら何もしない（False）。"""
+        with self._cv:
+            if sdir is None or self._sdir != sdir:
+                return False
+            if visible is not None:
+                self._focus = [str(x) for x in visible][:64]
+            if playhead_sec is not None:
+                self._playhead = float(playhead_sec)
+            self._cv.notify_all()
+            return True
+
+    def playhead(self, sdir):
+        """`set_focus` で知らされた再生位置（ソングの秒。知らされていなければ None）。"""
+        with self._cv:
+            return self._playhead if sdir is not None and self._sdir == sdir else None
+
+    def _from_playhead(self, tid):
+        """再生位置から順に並べる鍵: (0 = かかる / 1 = 後ろ / 2 = 前, 離れた秒)。"""
+        a, b = self._spans.get(tid, (0.0, 0.0))
+        ph = self._playhead
+        if ph is None or a <= ph <= b:
+            return (0, 0.0)
+        return (1, a - ph) if a > ph else (2, ph - b)
 
     @staticmethod
     def _from_stamp(it, state, entry):
@@ -815,6 +849,38 @@ class Preparer:
             return run                           # 取り消された準備が段の終わりに向かっている（すぐ離れる）
         return None
 
+    def settle(self, pdir, timeout=FRONT_WAIT_SEC):
+        """表示のツールがエンジンのロックを取る**前に**、このディレクトリの裏の準備（順番待ち・準備中）を最優先に
+        して終わりを待つ（`mcp_server._tool`。2026-10-10 承認）。ロックの中の `front` で待つと、その間ほかの
+        トラックの音作り（ara_render_dirty）まで止まる。占有はしない（その後の `front` がいつもどおり占有する）。
+        timeout を過ぎたらそのまま戻る（その後はいつもどおり）。待ったら True。"""
+        key = _norm(pdir)
+        if threading.current_thread() is self._thread:
+            return False
+        deadline = time.monotonic() + timeout
+        joined = None
+        waited = False
+        with self._cv:
+            try:
+                while True:
+                    it = self._must_wait(key)
+                    if it is None or time.monotonic() >= deadline:
+                        break
+                    waited = True
+                    if joined != it.tid:
+                        if joined is not None:
+                            self._unjoin(joined)
+                        joined = it.tid
+                        self._joining[joined] = self._joining.get(joined, 0) + 1
+                        it.defer_until = 0.0
+                        self._cv.notify_all()
+                        self._ensure_thread()
+                    self._cv.wait(0.2)
+            finally:
+                if joined is not None:
+                    self._unjoin(joined)
+        return waited
+
     @contextlib.contextmanager
     def front(self, pdir, wait=True):
         """表がこのディレクトリを自分で解析する（`store.PREP_FRONT`。ensure_analyzed・音素）。
@@ -928,16 +994,27 @@ class Preparer:
         if not cands:
             return None
 
+        hinted = bool(self._focus) or self._playhead is not None
+
+        def order(tid):
+            return self._order.index(tid) if tid in self._order else 999
+
         def rank(it):
             if it.tid in self._joining:
                 return (0, 0)
             if it.tid == self._current:
                 return (1, 0)
+            if hinted:
+                # 画面が見ている所を知らせた（DAW で開いた）: 見ているトラック → 再生位置から順に。
+                # ガイドの F0 はトラックの間で分け合う（`Project._shared_guide_f0`）ので、ガイドを先にしない
+                if it.tid in self._focus:
+                    return (2, self._focus.index(it.tid))
+                return (3, *self._from_playhead(it.tid), order(it.tid))
             if it.tid in self._guides:
                 return (2, 0)
             if it.tid in self._recent:
                 return (3, self._recent.index(it.tid))
-            return (4, self._order.index(it.tid) if it.tid in self._order else 999)
+            return (4, order(it.tid))
         return min(cands, key=rank)
 
     def _check(self, it):
@@ -1366,6 +1443,9 @@ is_ready = PREPARER.is_ready
 mark_ready = PREPARER.mark_ready
 join = PREPARER.join
 front = PREPARER.front
+settle = PREPARER.settle
+set_focus = PREPARER.set_focus
+playhead = PREPARER.playhead
 exclusive = PREPARER.exclusive
 foreground = PREPARER.foreground
 set_paused = PREPARER.set_paused
