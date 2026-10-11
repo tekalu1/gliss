@@ -1,5 +1,6 @@
 // 補正の度合いを色で見せる・元の長さ（issue #37。モック proposal/v4.html、2026-09-26 の決定）。
-// 2026-10-10: ガイドを青（薄い塗り＋1 px の青の縁・線も青）、AI の縁を紫、手動の帯を濃い塗り＋白の縁にし、対のガイド・差の札・凡例を足した。
+// 2026-10-10: ガイドを青（薄い塗り＋1 px の青の縁・線も青）、AI の縁を紫、手動の帯を濃い塗り＋白の縁にし、凡例を足した。
+// 2026-10-11: ホバーの強調はテイクのノートの帯の色の縁だけ（ガイドはホバー・選択で変えない。差の札も出さない）。
 //
 //   (1) 補正なし: 帯・線は黄。ガイドは青（薄い塗り＋1 px の縁、線 1.4 px 不透明）。橙の編集前の線・斜めの線は無い。
 //       トラックビューの波形もガイドは同じ青、伴奏は薄いグレー
@@ -25,7 +26,6 @@ const PROJECT = path.join(REPO, 'projects', '_test-colors');
 const USERDATA = `${PROJECT}-userdata`;
 const TAKE_C = '#e6d24a';
 const GUIDE_C = '#5aa2ff';
-const GUIDE_HI = '#bcd9ff';
 const AI_C = '#c08cff';
 const WHITE = '#ffffff';
 const SHOTS = path.join(REPO, 'scratchpad');
@@ -161,6 +161,8 @@ test('(4) 元の長さは選択したノートだけ、帯の上の細いグレ�
 });
 
 test('(4b) 手動の帯は塗りを濃く・白の縁（灰に見えない）。自動・補正なしの帯は縁なし', async () => {
+  await win.mouse.move(2, 2);                       // 前の試験のマウスが帯の上に残っていると、ホバーの縁が付く
+  await win.waitForFunction(() => window.__app.S.noteHover == null, null, { timeout: 10000 });
   const look = await win.evaluate(() => {
     const st = (p) => { const c = getComputedStyle(p); return { fo: +c.fillOpacity, so: +c.strokeOpacity, sw: c.strokeWidth, stroke: c.stroke }; };
     const man = [...document.querySelectorAll('#roll path[data-blob][data-man]')];
@@ -185,45 +187,50 @@ test('(4b) 手動の帯は塗りを濃く・白の縁（灰に見えない）。
   expect(lum(over(look.man[0][2].fo))).toBeGreaterThan(lum([0x4e, 0x4e, 0x54]) * 1.8);
 });
 
-test('(4c) ホバーしたノートと対のガイドの縁が明るくなり、差の札はホバーのときだけ出る', async () => {
+test('(4c) ホバーしたテイクのノートだけ帯の色の縁が付く。ガイドはホバー・選択で変わらず、差の札も出ない', async () => {
   await win.evaluate(() => { window.__app.S.sel = []; window.__app.S.noteHover = null; window.__app.render(); });
-  expect(await win.locator('#roll [data-guide-diff]').count()).toBe(0);
-  expect(await win.locator('#roll path[data-pair]').count()).toBe(0);
-  // 対のガイドのあるノートを探して、実際のマウスでホバーする
-  const id = await win.evaluate(async () => {
-    const A = window.__app;
-    for (const n of A.S.pitched) {
-      A.S.noteHover = n.id; A.render();
-      if (document.querySelector('#roll path[data-pair]')) { A.S.noteHover = null; A.render(); return n.id; }
-    }
-    A.S.noteHover = null; A.render();
-    return null;
+  const look = () => win.evaluate(() => {
+    const q = (s) => [...document.querySelectorAll(s)];
+    return {
+      guides: q('#roll path[data-guide]').map((p) => [p.getAttribute('fill-opacity'), p.getAttribute('stroke'), p.getAttribute('stroke-width'),
+        p.getAttribute('stroke-opacity')].join(' ')),
+      blobs: Object.fromEntries(q('#roll path[data-blob]').map((p) => {
+        const c = getComputedStyle(p);
+        return [p.dataset.blob, { fill: p.getAttribute('fill'), stroke: c.stroke, sw: c.strokeWidth, so: +c.strokeOpacity, man: p.hasAttribute('data-man') }];
+      })),
+      pairs: q('#roll [data-pair]').length,
+      tips: q('#roll [data-guide-diff]').length,
+    };
   });
-  expect(id).not.toBeNull();
+  const rgb = (hex) => `rgb(${[1, 3, 5].map((k) => parseInt(hex.slice(k, k + 2), 16)).join(', ')})`;
+  const base = await look();
+  expect(base.guides.length).toBeGreaterThan(0);
+  expect(new Set(base.guides)).toEqual(new Set(['0.16 #5aa2ff 1 0.9']));
+  expect(base.pairs).toBe(0);
+  expect(base.tips).toBe(0);
+  const id = await win.evaluate(() => window.__app.S.pitched.find((n) => n.end_sec - n.start_sec > 0.2).id);
   const box = await win.locator(`#roll rect[data-note="${id}"]:not([data-edge])`).first().boundingBox();
   await win.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 3 });
   await win.waitForFunction((i) => window.__app.S.noteHover === i, id, { timeout: 10000 });
-  const pair = await win.evaluate(() => {
-    const p = document.querySelector('#roll path[data-pair]');
-    const tip = document.querySelector('#roll [data-guide-diff]');
-    return {
-      stroke: p?.getAttribute('stroke'), width: +p?.getAttribute('stroke-width'), fo: +p?.getAttribute('fill-opacity'),
-      tip: tip?.textContent || null,
-      others: [...document.querySelectorAll('#roll path[data-guide]:not([data-pair])')].map((q) => q.getAttribute('stroke')),
-    };
-  });
-  expect(pair.stroke).toBe(GUIDE_HI);
-  expect(pair.width).toBeGreaterThan(1);
-  expect(pair.fo).toBeGreaterThan(0.16);
-  for (const c of pair.others) expect(c).toBe(GUIDE_C);
-  expect(pair.tip).toMatch(/^ガイド(より [+−]\d+ cent|と同じ高さ)・(\d+ ms (遅い|早い)|同じ時刻)$/);
-  // 離すと札は消える（選択だけでは札を出さない）
+  const hov = await look();
+  // ホバーしたテイクのノートの帯だけ、帯の色の縁 1.6px
+  expect(hov.blobs[id].stroke).toBe(rgb(hov.blobs[id].fill));
+  expect(hov.blobs[id].sw).toBe('1.6px');
+  expect(hov.blobs[id].so).toBe(1);
+  for (const [k, b] of Object.entries(hov.blobs)) if (k !== id && !b.man) expect(b.stroke, k).toBe('none');
+  // ガイドは変わらない。対の印も札も無い
+  expect(hov.guides).toEqual(base.guides);
+  expect(hov.pairs).toBe(0);
+  expect(hov.tips).toBe(0);
+  // 離すと縁は消える。選択だけでもガイドは変わらない
   await win.mouse.move(2, 2);
   await win.waitForFunction(() => window.__app.S.noteHover == null, null, { timeout: 10000 });
-  expect(await win.locator('#roll [data-guide-diff]').count()).toBe(0);
+  expect((await look()).blobs[id].stroke).toBe(base.blobs[id].stroke);
   await win.evaluate((i) => { window.__app.S.sel = [i]; window.__app.render(); }, id);
-  expect(await win.locator('#roll path[data-pair]').count()).toBe(1);
-  expect(await win.locator('#roll [data-guide-diff]').count()).toBe(0);
+  const sel = await look();
+  expect(sel.guides).toEqual(base.guides);
+  expect(sel.pairs).toBe(0);
+  expect(sel.tips).toBe(0);
   await win.evaluate(() => { window.__app.S.sel = []; window.__app.render(); });
 });
 
