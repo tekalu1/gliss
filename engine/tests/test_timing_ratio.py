@@ -309,6 +309,36 @@ def test_manual_note_is_skipped_unless_included(proj):
     _sane(proj)
 
 
+def test_plan_with_replaces_sees_the_state_before_the_popup(proj):
+    """ポップアップの中で「手で直したノートも含める」を変えると、画面は前回の確定を取り消した状態で計画を作り直す
+    （plan_edit(replaces=)）。曲は書き換えず、確定（apply_plan(replaces=)）は作り直さずにそのまま当たる。"""
+    from vocal_engine import mcp_server as S
+    from vocal_engine.project import timing as TM
+    _ok(S.set_correction_strength(timing=1.0))
+    ns = _notes(proj)
+    n = ns[3]
+    TM.apply_plan(proj, TM.plan_move(proj, [n.id]), 0.02, author="human")      # 手で 20 ms 遅らせた
+    h = proj.edited_sec(n.start_sec)
+    live = len([c for c in proj.changesets if not c.undone])
+    ids = [ns[2].id, n.id]
+    pl = _ok(S.plan_edit(op="guide", note_ids=ids, include_manual=True))
+    cs = _ok(S.apply_plan(pl["plan_id"], timing=0.4))["changeset"]
+    after = _pos(proj)
+    assert proj.edited_sec(n.start_sec) != pytest.approx(h, abs=TOL)
+    # 確定した後の状態では、含めて当て直したノートはもう手で直したノートではない
+    assert n.id not in _ok(S.plan_edit(op="guide", note_ids=ids))["timing_ratio"]["excluded_manual"]
+    pl2 = _ok(S.plan_edit(op="guide", note_ids=ids, replaces=cs))
+    assert pl2["timing_ratio"]["excluded_manual"] == [n.id]
+    assert not next(c for c in proj.changesets if c.id == cs).undone
+    assert np.max(np.abs(_pos(proj) - after)) < TOL                            # 曲は確定した後のまま
+    r = _ok(S.apply_plan(pl2["plan_id"], timing=0.4, replaces=cs))
+    assert not r["replanned"]
+    assert proj.edited_sec(n.start_sec) == pytest.approx(h, abs=TOL)           # 除いた: 手の位置のまま
+    assert _timing(proj)[ns[2].id] == 0.4
+    assert len([c for c in proj.changesets if not c.undone]) == live + 1
+    _sane(proj)
+
+
 # ---------------------------------------------------------------- ゆずる・届かない
 def test_detached_previous_tail_yields(proj_gap):
     """全部 0% から、隙間を挟んだ後のノートだけ 100%: 頭が前のノートの尻を追い越すので、前の尻がゆずる。

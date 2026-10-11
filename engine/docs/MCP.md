@@ -731,7 +731,7 @@ abs_cents_median_before}`。
 `timing_possible=false`（確かな頭の組が 1 つも無いガイド。別の演奏など）のときは `timing_message`
 （「このガイドとはタイミングを合わせられない…」）が付き、タイミングは 1 つも動かない。
 
-### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?, fit?, include_manual?, restart?)` / `apply_plan(plan_id, x?, pitch?, replaces?, pitch_center?, pitch_shape?, include_manual?, restart?, timing?)`
+### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?, fit?, include_manual?, restart?, replaces?)` / `apply_plan(plan_id, x?, pitch?, replaces?, pitch_center?, pitch_shape?, include_manual?, restart?, timing?)`
 
 `op="guide"` で `fit=true` なら、タイミング・ピッチとも 100% で当てたときの `fit`（上の `correct_to_guide` と同じ）も返す
 （包絡を測るので初回は 1〜2 秒かかる。画面は使わない）。計画の `info.one_to_many` は 1 対多のノート
@@ -766,6 +766,9 @@ abs_cents_median_before}`。
 状態は計画を作ったときと同じなので、同じ計画がそのまま当たる。取り消した changeset は「捨てた」印
 （`discarded`）が付き、`redo` で戻らない。外から編集されて状態が変わって
 いたら同じ引数で計画を作り直す（`replanned: true`）。
+`plan_edit` の `replaces` は、その changeset を取り消した状態で計画を作る（曲は書き換えない）。画面はポップアップの中で
+「手で直したノートも含める」・「今の状態で合わせ直す」を変えたとき、前回の確定を渡して開く前の状態から作り直す
+（確定も同じ changeset を `replaces` で取り消してから当てるので、プレビューと結果が同じ計画になる）。
 
 `op="guide"` の線の形の計画（path の `strength` がある）は、音程を**ノートごとの割合**で当てる（下の `set_correction_strength`）:
 `pitch_center` / `pitch_shape` = 音程・線の形の割合 0〜1（省くとそのノートの今の割合のまま）、`include_manual` = 合わせた後に

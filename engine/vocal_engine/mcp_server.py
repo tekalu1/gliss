@@ -1742,7 +1742,8 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
               detach: bool = False, start_sec: float = None, end_sec: float = None,
               threshold_cents: float = 0.0, threshold_ms: float = 0.0,
               match_pitch_shape: bool = True, edited_notes: str = "adjust",
-              fit: bool = False, include_manual: bool = False, restart: list = None) -> dict:
+              fit: bool = False, include_manual: bool = False, restart: list = None,
+              replaces: str = None) -> dict:
     """**計画**を作る（まだ編集しない）。画面がドラッグの開始・「ガイドに合わせる」を開いた時点で呼ぶ。
 
     計画 = 「節（ノートの頭・尻・音素境界）の編集後の秒 = cur + d × x」。
@@ -1763,10 +1764,35 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
     guide では**ノートごとのタイミングの割合**のプレビュー `timing_ratio`（2026-10-11 承認）も返す（中身の JSON には
     節の動きも入る）。確定は `apply_plan(plan_id, timing=割合)`。include_manual・restart はそのプレビューと確定に使う
     （合わせた後に手で直したノートも含める・変えられないノートを今の状態から合わせ直す。apply_plan にも同じ値を渡す）。
+    replaces: その changeset を取り消した状態で計画を作る（ポップアップの中の当て直しの前の状態。確定は
+    `apply_plan(replaces=)` で同じ changeset を取り消してから当てるので、計画がそのまま当たる）。曲は書き換えない。
     """
-    from .project import timing as TM
     p = _project()
     p.reload_if_changed()
+    with _without_changeset(p, replaces):
+        return _plan_edit(p, op, note_id, note_ids, side, detach, start_sec, end_sec, threshold_cents,
+                          threshold_ms, match_pitch_shape, edited_notes, fit, include_manual, restart)
+
+
+@contextlib.contextmanager
+def _without_changeset(p, replaces):
+    """changeset を取り消した状態を一時的に作る（保存しない。抜けると元の編集リストに戻す）。"""
+    c = next((c for c in p.changesets if c.id == replaces), None) if replaces else None
+    if c is None or c.undone or any(o.get("op") == "lyrics" for o in c.ops):
+        yield
+        return
+    c.undone = True
+    p._replay()
+    try:
+        yield
+    finally:
+        c.undone = False
+        p._replay()
+
+
+def _plan_edit(p, op, note_id, note_ids, side, detach, start_sec, end_sec, threshold_cents,
+               threshold_ms, match_pitch_shape, edited_notes, fit, include_manual, restart):
+    from .project import timing as TM
     if op == "edge":
         if not note_id or side not in ("start", "end"):
             raise ProjectError("edge には note_id と side（start / end）が要る")
