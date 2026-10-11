@@ -23,7 +23,12 @@
 #   6d. GlissHostCheck --ara-preview-playback: the same, for a host that gives no region to any editor renderer (Studio Pro): only the
 #      playback renderers have regions, and the instance that asked (the editor window's owner) is not the one that has the
 #      previewed modification; the preview must come from the instance whose playback renderer has it
-#   Checks 1-3, 5, 6, 6b, 6c and 6d run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
+#   6e. GlissHostCheck --ara-preview-owner: three instances (tracks A, B, C; A and C share one modification) all processed, as Studio
+#      Pro does for the tracks that solo mutes; the preview of the shared modification is added only by the instance on the track
+#      of the last non-empty selection ("@selection" of the test bridge), whatever order the instances are processed in; with no
+#      selection (or no candidate in the selected track) the first processed instance still adds it. plugin.log's "preview: stop"
+#      lines name the track of the instance that added it
+#   Checks 1-3, 5, 6, 6b, 6c, 6d and 6e run with the engine disabled (GLISS_ENGINE_DISABLED). With the real engine (python of the main
 #   worktree's .venv, cwd = this worktree's engine, Praat for the pitch, a temporary work folder):
 #   7. ARA SDK TestHost, all test cases
 #   8. GlissARATest (plugin/tests/aratest): a test edit (GLISS_TEST_EDIT) -> render -> archive -> restore in another work
@@ -242,6 +247,23 @@ try {
            GLISS_PLUGIN_LOG_FILE = (Join-Path $work 'ara-preview-playback-plugin.log') }
     $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
     Report 'GlissHostCheck --ara-preview-playback (the preview comes from the instance that plays the modification)' ($code -eq 0) "exit=$code $summary"
+    if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
+
+    # 6e. three instances on one document (A and C share a modification): the preview goes to the track of the last non-empty selection
+    $ownerBridge = Join-Path $work 'ara-preview-owner-bridge'
+    if (Test-Path $ownerBridge) { [System.IO.Directory]::Delete($ownerBridge, $true) }
+    New-Item -ItemType Directory -Force $ownerBridge | Out-Null
+    $ownerLog = Join-Path $work 'ara-preview-owner-plugin.log'
+    [System.IO.File]::Delete($ownerLog)
+    $report = Join-Path $work 'ara-preview-owner-report.txt'
+    $code = Invoke-Checked $hostCheck @('--ara-preview-owner', $report, $gliss, $ownerBridge) 'ara-preview-owner' `
+        @{ GLISS_ENGINE_DISABLED = '1'; GLISS_TEST_BRIDGE_DIR = $ownerBridge; GLISS_PLUGIN_LOG_FILE = $ownerLog }
+    $summary = (Get-Content $report -ErrorAction SilentlyContinue | Select-String 'RESULT').Line
+    $stops = @(Get-Content $ownerLog -ErrorAction SilentlyContinue | Select-String -SimpleMatch 'preview: stop')
+    $stopsA = @($stops | Where-Object { $_.Line.Contains('track="Track A"') }).Count
+    $stopsC = @($stops | Where-Object { $_.Line.Contains('track="Track C"') }).Count
+    Report 'GlissHostCheck --ara-preview-owner (the preview is added on the track of the last selection)' `
+        ($code -eq 0 -and $stopsA -ge 13 -and $stopsC -ge 5) "exit=$code $summary stopLines(trackA=$stopsA trackC=$stopsC)"
     if ($code -ne 0 -and (Test-Path $report)) { Get-Content $report | Write-Host }
 
     if (-not $EnginePython -or -not (Test-Path $EnginePython)) {

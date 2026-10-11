@@ -76,7 +76,8 @@ private:
 #if GLISS_TEST_HOOKS
 /** 試験用（GLISS_TEST_BRIDGE_DIR。CMake の GLISS_TEST_HOOKS のビルドだけ）: 画面の engineCall の代わり。フォルダの <名前>.call.json（{tool, args}）を順に
     engineCall に渡し、答えを <名前>.result.json に書く（plugin/tests/aratest の GlissARATest -changes が使う）。tool が "@preview" のときは
-    画面の preview の代わり（{tool: "@preview", op, args}。GlissHostCheck --ara-preview が使う）。
+    画面の preview の代わり（{tool: "@preview", op, args}。GlissHostCheck --ara-preview が使う）、"@selection" のときは DAW の選択の知らせの
+    代わり（{tool: "@selection", args: {regions, sequences}}。GlissHostCheck --ara-preview-owner が使う）。
     args の文字列 "@ara:<修飾の persistentID>" はその修飾のトラックの id に置き換える。メッセージスレッドで動く。 */
 class GlissDocumentController::TestBridge final : private juce::Timer
 {
@@ -124,8 +125,68 @@ private:
         // 本物の GlissEditor が足すもの（EditorWebView の preview）と同じ名前
         if (tool == "@preview")
             owner.preview (request.getProperty ("op", "start").toString(), args, std::move (answer));
+        else if (tool == "@selection")
+            answer (select (args));
         else
             owner.engineCall (tool, args, std::move (answer));
+    }
+
+    /** "@selection": DAW が選択を知らせた代わり（{regions: [リージョン名], sequences: [トラック名]}。空の配列は空の選択）。
+        ホストの ARAViewSelection（リージョン・リージョン列の ref の並び）を作り、本物のエディタが受けるのと同じ editorSelectionChanged に渡す。 */
+    juce::var select (const juce::var& args)
+    {
+        auto* controller = owner.getDocumentController();
+        auto* document = controller != nullptr ? controller->getDocument<juce::ARADocument>() : nullptr;
+
+        if (document == nullptr)
+            return object ({ { "ok", false }, { "error", "no document" } });
+
+        const auto namesOf = [&args] (const char* key)
+        {
+            juce::StringArray out;
+
+            if (const auto* list = args.getProperty (key, {}).getArray())
+                for (const auto& v : *list)
+                    out.add (v.toString());
+
+            return out;
+        };
+        const auto regionNames = namesOf ("regions");
+        const auto sequenceNames = namesOf ("sequences");
+        std::vector<ARA::ARAPlaybackRegionRef> regionRefs;
+        std::vector<ARA::ARARegionSequenceRef> sequenceRefs;
+        juce::StringArray missing = regionNames;
+
+        for (auto* sequence : document->getRegionSequences<juce::ARARegionSequence>())
+        {
+            if (sequenceNames.contains (juce::convertOptionalARAString (sequence->getName())))
+                sequenceRefs.push_back (ARA::PlugIn::toRef (static_cast<ARA::PlugIn::RegionSequence*> (sequence)));
+
+            for (auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
+            {
+                const auto name = juce::convertOptionalARAString (region->getName());
+
+                if (regionNames.contains (name))
+                {
+                    regionRefs.push_back (ARA::PlugIn::toRef (static_cast<ARA::PlugIn::PlaybackRegion*> (region)));
+                    missing.removeString (name);
+                }
+            }
+        }
+
+        if (! missing.isEmpty() || (int) sequenceRefs.size() != sequenceNames.size())
+            return object ({ { "ok", false }, { "error", "selection names not found" } });
+
+        ARA::ARAViewSelection raw {};
+        raw.structSize = ARA::kARAViewSelectionMinSize;
+        raw.playbackRegionRefsCount = (ARA::ARASize) regionRefs.size();
+        raw.playbackRegionRefs = regionRefs.empty() ? nullptr : regionRefs.data();
+        raw.regionSequenceRefsCount = (ARA::ARASize) sequenceRefs.size();
+        raw.regionSequenceRefs = sequenceRefs.empty() ? nullptr : sequenceRefs.data();
+        raw.timeRange = nullptr;
+        const ARA::PlugIn::ViewSelection selection (controller, &raw);
+        owner.editorSelectionChanged (this, selection);
+        return object ({ { "ok", true }, { "regions", (int) regionRefs.size() }, { "sequences", (int) sequenceRefs.size() } });
     }
 
     GlissDocumentController& owner;
