@@ -36,6 +36,7 @@ open_project(take_path, guide_path?, lyrics?, guide_lyrics?)   ← テイクの 
      ├ move_boundary / stretch / move_note                  ← 直す（タイミング。後ろはずらさない）
      ├ list_connections / set_connection                    ← 隣との接続 / 切り離し（となだらかさ）
      ├ correct_to_guide(pitch_strength, timing_strength, pitch_mode) ← ガイドへ寄せる（pitch_mode="contour" = 区間カーブ）
+     ├ get_correction_strength / set_correction_strength    ← 寄せた音程の割合を読む / 後から変える（ノートごと）
      ├ apply_edits(edits=[...])                             ← 音程の編集をまとめて当てる（取り消し 1 回）
      ├ plan_edit → apply_plan                               ← 計画を作って確定（画面が使う）
      └ render_preview / render_region / render_audition / render_view / remeasure / list_changes   ← 確かめる
@@ -381,6 +382,8 @@ Gliss の F0 はモデルの版も解析キャッシュとアーカイブの `f0
             "iqr_semitones": 1.2, "rms_peak_db": -12.4, "text": null, "confidence": 0.74}]}
 ```
 
+「ガイドに合わせる」で音程を寄せたノートには `guide_strength`（`{state, center, shape}`。下の `get_correction_strength` と同じ中身）が付く。
+
 **歌詞があると各ノートに `phonemes`（重なる音素）と `text`（読み）が付く**（段階2）。
 音符の境目と音素の境目は一致しないので、**重なりで持たせている**。
 
@@ -672,6 +675,10 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
   26% → 95%）。同じ素材で `"note"` は 13.8 セント（±10 以内 42%）。
 - `max_shift_cents`: これを超える寄せは飛ばす（別の音・オクターブ違いのテイクを間違って寄せない）。`"note"` は結果の
   `skipped_large_notes`、`"contour"` は `contour.skipped_segments`。
+- **割合の記録**（承認済み（2026-10-11）。段階 1 = 音程だけ）: `"shape"` の音程は、ノートごとの割合（音程 `center` = 線の形 `shape` =
+  `pitch_strength`）と、割合を後から変えるための材料を changeset に記録する（下の「割合の記録の形」）。返り値の `strength` に
+  寄せたノートの割合（`get_correction_strength` の `notes[]` と同じ行）が付く。割合を後から変えるのは `set_correction_strength`。
+  `"note"` / `"contour"` は記録しない。
 
 ```json
 {"ok": true, "changeset": "c001", "x": 0.7, "pairs": 10, "matched_notes": 14,
@@ -717,7 +724,7 @@ abs_cents_median_before}`。
 `timing_possible=false`（確かな頭の組が 1 つも無いガイド。別の演奏など）のときは `timing_message`
 （「このガイドとはタイミングを合わせられない…」）が付き、タイミングは 1 つも動かない。
 
-### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?, fit?)` / `apply_plan(plan_id, x?, pitch?, replaces?)`
+### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?, fit?)` / `apply_plan(plan_id, x?, pitch?, replaces?, pitch_center?, pitch_shape?, include_manual?, restart?)`
 
 `op="guide"` で `fit=true` なら、タイミング・ピッチとも 100% で当てたときの `fit`（上の `correct_to_guide` と同じ）も返す
 （包絡を測るので初回は 1〜2 秒かかる。画面は使わない）。計画の `info.one_to_many` は 1 対多のノート
@@ -752,6 +759,57 @@ abs_cents_median_before}`。
 状態は計画を作ったときと同じなので、同じ計画がそのまま当たる。取り消した changeset は「捨てた」印
 （`discarded`）が付き、`redo` で戻らない。外から編集されて状態が変わって
 いたら同じ引数で計画を作り直す（`replanned: true`）。
+
+`op="guide"` の線の形の計画（path の `strength` がある）は、音程を**ノートごとの割合**で当てる（下の `set_correction_strength`）:
+`pitch_center` / `pitch_shape` = 音程・線の形の割合 0〜1（省くとそのノートの今の割合のまま）、`include_manual` = 合わせた後に
+手で直したノートも変える（既定は変えない）、`restart` = 変えられない（stale）ノートのうち、今の状態から合わせ直す id。
+`pitch`（0 より大きい）は `pitch_center = pitch_shape = pitch` で手で直したノートも含める（今までの呼び方）。
+path の `strength` = `{version, sig, hop, notes: {ノート: {sel, fresh, state, reason, center, shape, manual, src, edits}}, materials}`。
+画面はポップアップのつまみを動かす間、これと同じ式（`app/renderer/strength.js`）で線を描く。
+
+### `get_correction_strength(note_ids?, start_sec?, end_sec?)`
+
+「ガイドに合わせる」で寄せた音程の**ノートごとの割合**を読む（画面の G のポップアップと同じ。承認済み（2026-10-11））。
+対象は `note_ids` か範囲。省くと記録のあるノート全部。
+
+```json
+{"ok": true,
+ "notes": [{"note": "n003", "state": "ok", "center": 0.7, "shape": 0.7, "manual": false, "reason": null},
+           {"note": "n006", "state": "stale", "center": 1.0, "shape": 1.0, "manual": false,
+            "reason": "テイクを解析し直した"}],
+ "summary": {"center": {"mixed": false, "min": 0.7, "max": 0.7, "mean": 0.7},
+             "shape": {"mixed": false, "min": 0.7, "max": 0.7, "mean": 0.7}},
+ "stale": ["n006"], "manual": []}
+```
+
+- `state`: `ok`（割合を変えられる）/ `stale`（変えられない。`reason` に理由）/ `none`（記録が無い。0% として扱う）。
+  stale の理由: テイクを解析し直した・ガイドを差し替えた／解析し直した・ノートが分割／結合された・補正の線が外された
+  （描き直し・オリジナルに戻す）・材料が無い・新しい版で付けた補正。
+- `center` = 音程（ノートの中心）、`shape` = 線の形（揺れ）の割合 0〜1。
+- `manual`: 合わせた後に手で直した（鉛筆・ずらし）。`set_correction_strength` は既定では変えない。
+- `summary`: stale を除いた選んだノートの割合の範囲（`mixed` = ノートごとに違う。画面は「混在」と出す）。
+
+### `set_correction_strength(note_ids?, start_sec?, end_sec?, center?, shape?, include_manual?, restart?, author?)`
+
+「ガイドに合わせる」の**音程の割合を後から変える**。1 つの changeset（`undo` 1 回で割合も線も戻る）。タイミングは変えない。
+
+- `center` / `shape`: 0〜1。省いた側はノートごとの今の割合のまま。**割合を「足す」のではなく「その割合にする」**
+  （70% のノートに 30% を渡すと 30% になり、もう一度 70% にすると前と同じ線に戻る。同じ割合なら `changeset: null`）。
+- 記録の無いノート（`none`）は 0% として扱い、今の（編集後の）音程からその割合だけ寄せる。
+- 両方 0 のノートは補正の線を外す（記録も外す）。
+- 隣のノートと割合が違う境目は、両側 20 ms（計 40 ms。短いノートでは長さの 1/3 まで）でなだらかにつなぐ。
+  隣が変えられないノート（手で直した・別の補正・外した）なら、その今の線へ 40 ms でつなぐ。
+- 寄せた後に入れた `shift_pitch`・`set_pitch_curve(mode="offset")` は差分として残る。
+- `include_manual=true`: 合わせた後に手で直したノートも変える（手の分は差分として残る）。既定は飛ばして `skipped.manual`。
+- `restart=true`: 変えられない（stale）ノートを今の状態から合わせ直す。既定は飛ばして `skipped.stale`。
+
+返り値: `{changeset, notes, summary, skipped: {manual, stale}, next}`（`notes` / `summary` は変えた後の `get_correction_strength` と同じ）。
+
+**割合の記録の形**（`project/strength.py`）: ガイドの changeset に、出した鉛筆（`pitch_draw`）のほかに
+`{"op": "recipe", "kind": "guide", "version": 1, "sig": {...}, "notes": {ノート: {"pitch": {"center", "shape"}, "edits", "src", "span"}}, "material": [...]}`
+を入れる（材料は補正前の音程と 100% の目標の差を 1/1000 半音の整数で持つ）。「オリジナルに戻す」・割合 0% は
+`{"op": "recipe_void", "notes": [...]}`。編集リストは `add` / `remove` しか見ないので、**この記録を知らない前の版のエンジンも、
+同じ編集・同じ音のまま開く**。捨てた changeset（ポップアップの当て直し）の材料は、ほかの記録が参照していなければ消す。
 
 #### `mute_notes(note_ids?, start_sec?, end_sec?)`（issue #17）
 
@@ -795,7 +853,7 @@ abs_cents_median_before}`。
 無音にした（`mute_notes`）ノートは音が戻る。フェード（`set_fade`）も外れる（そのノートの頭のイン・尻のアウト）。
 `boundary_ids`（`get_phonemes` の `boundaries[].id`）を渡すと、その音素の境目を動かした編集（`move_boundary`）を外す
 （画面の音素の右クリック「子音｜母音の境目を元に戻す」。`export_view_data` の `phonemes.boundaries[].moved`）。
-これも取り消せる（`undo`）。
+これも取り消せる（`undo`）。戻したノートの「ガイドに合わせる」の割合の記録も外れる（`recipe_void`。`get_correction_strength` で `none`）。
 
 **範囲（`start_sec` / `end_sec`）で渡したとき**は、範囲（とそこにかかる音程のノート）の音程・タイミング・無音・フェード・接続・
 なだらかさの編集を**全部外す**。範囲の中は書き出しで元のファイルとサンプル一致になる。タイミングの編集（stretch / crop / silence /

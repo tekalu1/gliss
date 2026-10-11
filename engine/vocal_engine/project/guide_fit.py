@@ -133,7 +133,7 @@ def plan_fit(project, plan, timing=1.0, pitch=1.0, note_ids=None):
             tm = 69.0 + 12.0 * np.log2(f[ok] / 440.0) + (curp.get(n.id, n.pitch_midi) - n.pitch_midi)
             before = np.abs(tm - gm) * 100.0
             am = tm.copy()
-            if plan.pitch_draws:
+            if plan.pitch_draws or getattr(plan, "strength", None):
                 tt = t[ok]
                 if len(ct):
                     k = np.clip(np.searchsorted(ct, tt), 0, len(ct) - 1)
