@@ -1,14 +1,36 @@
 # -*- coding: utf-8 -*-
-"""「ガイドに合わせる」の割合を後から変えるための記録（recipe。2026-10-11 承認の段階 1 = 音程だけ）。
+"""「ガイドに合わせる」の割合を後から変えるための記録（recipe。2026-10-11 承認の段階 1 = 音程を変える。
+タイミングは記録だけを残し、割合を変える操作は次の段）。
 
 ガイドの changeset に、出した鉛筆（`pitch_draw`）とは別に次の op を入れる。編集リスト（`_live_edits`）は
 `add` / `remove` しか見ないので、前の版のエンジンはこの op を読み飛ばし、同じ編集・同じ音のまま開く。
 
     {"op": "recipe", "kind": "guide", "version": 1, "sig": {"take", "guide"}, "hop": 0.01,
      "notes": {ノート: {"pitch": {"center": 0〜1, "shape": 0〜1}, "edits": [鉛筆の id（区切りの順）],
-                        "src": 材料を持つ changeset, "span": [ノートの頭, 尻]}},
-     "material": [区切り, ...]}                       # 新しく合わせたノートがあるときだけ
-    {"op": "recipe_void", "notes": [ノート, ...]}      # 「オリジナルに戻す」・割合 0% で外した
+                        "src": 材料を持つ changeset,                 # ← 音程の部（作り直したノートだけ）
+                        "timing": 0〜1,                              # ← タイミングの部（今かかっている割合）
+                        "span": [ノートの頭, 尻]}},
+     "material": [区切り, ...],                      # 新しく合わせたノートがあるときだけ
+     "timing_nodes": [節, ...]}                      # タイミングの部のあるノートの節（同じ op の中）
+    {"op": "recipe_void", "notes": [ノート, ...], "parts": ["pitch"]}
+                     # 割合 0% で音程の線を外した。parts が無ければ両方（「オリジナルに戻す」）
+
+ノートの記録は**部ごと**に引き当てる: 音程は "pitch" のある最後の項、タイミングは "timing" のある最後の項
+（同じ op に両方あることも、片方だけのこともある）。
+
+**節**（timing_nodes の 1 つ）= `{"note": 持ち主のノート, "src": 素材の秒, "side": "l" | "r",
+"role": "anchor" | "interp" | "end", "d": 100% の動き（秒）}`。d は `_repair` と全体の縮め（reach）の後の
+`plan.d`（補間の値も凍結）。節は `src` と `side` で引き当てる（骨組みの節の番号は毎回変わる）。持ち主は
+ノートの頭（アタック・近くの頭を含む組）→ そのノート、接続された境目（前の尻 = 次の頭）→ 次のノート、
+切り離した尻 → そのノート、休みの手前の音節の終わり → そのノート。ノートの中の音素の境目は持たない
+（`timing._timing_nodes`）。位置は「0% の位置 + timing × d」（0% の位置 = 今の位置 − timing × d）。
+
+timing は確定したときのタイミングの強度（x）。x = 0 でも節は残す（後から割合を上げられる）。x = 0 の確定は、
+生きているタイミングの記録（ok）のあるノートには書かない（前の割合と節のまま）。
+
+版（version）は 1 のまま: 足したのは項と op の中の新しい欄だけで、前の版（記録を読まない）は今までどおり
+読み飛ばす。timing の無い記録（音程だけを残した、この形より前の記録）は、タイミングの状態を
+`unsupported`（タイミングの割合は変えられない）として読む。
 
 **区切り**（seg）= 1 つの連続した対応区間（run）の中の 1 ノートぶんのフレーム:
 `{"n": ノート, "i0": 最初のフレーム, "m0": 補正前の MIDI（1/1000 半音。先頭の値と、後は前との差）,
@@ -49,6 +71,7 @@ REASONS = {
     "guide": "ガイドを差し替えた・解析し直した",
     "notes": "ノートが分割・結合された",
     "edits": "補正の線が外された（描き直し・オリジナルに戻す）",
+    "unsupported": "前の版で付けた補正（タイミングの動きを残していない）",
 }
 
 
@@ -283,8 +306,13 @@ def _ratio(ent):
     return float(p.get("center", 0.0)), float(p.get("shape", 0.0))
 
 
-def recipes(project):
-    """(材料 {changeset: op}, ノート → 生きている最後の記録 (op, entry) | None（外した）)。"""
+def _voids(op, part):
+    return part in (op.get("parts") or ("pitch", "timing"))
+
+
+def recipes(project, part="pitch"):
+    """(材料 {changeset: op}, ノート → 生きている最後の記録 (op, entry) | None（外した）)。
+    part = "pitch"（音程の部）か "timing"（タイミングの部）。"""
     mats, latest = {}, {}
     for cs in project.changesets:
         for op in cs.ops:
@@ -295,32 +323,51 @@ def recipes(project):
                 if cs.undone:
                     continue
                 for nid, ent in (op.get("notes") or {}).items():
-                    latest[nid] = (op, ent)
-            elif k == "recipe_void" and not cs.undone:
+                    if part in ent:
+                        latest[nid] = (op, ent)
+            elif k == "recipe_void" and not cs.undone and _voids(op, part):
                 for nid in op.get("notes") or []:
                     latest[nid] = None
     return mats, latest
 
 
 def states(project, note_ids=None, sig=None):
-    """{ノート: {"state": "ok" | "stale" | "none", "center", "shape", "manual", "reason", "src", "edits"}}。
-    none = 割合の記録が無い（0% として扱い、動かすと今の状態から合わせる）。"""
+    """{ノート: {"state": "ok" | "stale" | "none", "center", "shape", "manual", "reason", "src", "edits",
+    "timing_state", "timing", "timing_manual", "timing_reason"}}。
+    none = 割合の記録が無い（0% として扱い、動かすと今の状態から合わせる）。
+
+    タイミング: timing_state = ok（記録の節がある）/ stale（変えられない。timing_reason）/ none（記録が無い。
+    timing は 0.0）/ unsupported（音程の記録だけがある前の形。タイミングの割合は分からず、timing は None）。
+    timing_manual = 合わせた後にタイミングを手で直した（`correction.origins`）。"""
     from .correction import origins
     sig = project_sig(project) if sig is None else sig
     mats, latest = recipes(project)
+    _, tlatest = recipes(project, "timing")
     live = {e.id for e in project.edits}
     tn = {n.id: n for n in project.take_notes if n.kind == "note"}
-    _, pit = origins(project)
+    tim, pit = origins(project)
     ids = list(tn) if note_ids is None else [i for i in note_ids if i in tn]
     out = {}
     for nid in ids:
         row = {"state": "none", "center": 0.0, "shape": 0.0, "manual": pit.get(nid) == "manual",
-               "reason": None, "src": None, "edits": []}
+               "reason": None, "src": None, "edits": [],
+               "timing_state": "none", "timing": 0.0, "timing_manual": tim.get(nid) == "manual",
+               "timing_reason": None}
         out[nid] = row
+        trec = tlatest.get(nid)
+        if trec is not None:
+            top, tent = trec
+            row["timing"] = float(tent.get("timing") or 0.0)
+            why = _timing_stale(top, tent, sig, tn.get(nid), nid)
+            row["timing_state"] = "stale" if why else "ok"
+            row["timing_reason"] = REASONS.get(why) if why else None
         rec = latest.get(nid)
         if rec is None:
             continue
         op, ent = rec
+        if trec is None:
+            row["timing_state"], row["timing"] = "unsupported", None
+            row["timing_reason"] = REASONS["unsupported"]
         row["center"], row["shape"] = _ratio(ent)
         row["src"] = ent.get("src")
         row["edits"] = list(ent.get("edits") or [])
@@ -351,6 +398,32 @@ def _stale(op, ent, mats, sig, note, live, nid):
     if len(eds) != sum(1 for s in mop["material"] if s.get("n") == nid):
         return "material"
     return None
+
+
+def _timing_stale(op, ent, sig, note, nid):
+    """タイミングの記録が使えない理由（使えれば None）。節は同じ op の timing_nodes にある。"""
+    if int(op.get("version", 1)) > VERSION:
+        return "version"
+    if not any(n.get("note") == nid for n in op.get("timing_nodes") or []):
+        return "material"
+    osig = op.get("sig") or {}
+    if sig is None or osig.get("take") != sig.get("take"):
+        return "take"
+    if osig.get("guide") != sig.get("guide"):
+        return "guide"
+    span = ent.get("span") or [None, None]
+    if note is None or span[0] is None or abs(float(span[0]) - note.start_sec) > 1e-6 \
+            or abs(float(span[1]) - note.end_sec) > 1e-6:
+        return "notes"
+    return None
+
+
+def timing_nodes(project, nid):
+    """ノートの生きているタイミングの記録の節（無ければ []）。"""
+    rec = recipes(project, "timing")[1].get(nid)
+    if rec is None:
+        return []
+    return [dict(n) for n in rec[0].get("timing_nodes") or [] if n.get("note") == nid]
 
 
 # ================================================================ 計画で使う
@@ -520,10 +593,46 @@ def realize(project, strength, center=None, shape=None, include_manual=False, re
                                   if s["n"] in fresh_made]
             out.append(op)
         if void:
-            out.append({"op": "recipe_void", "notes": void})
+            out.append({"op": "recipe_void", "notes": void, "parts": ["pitch"]})
         return out
 
     return removes, specs, ops
+
+
+def with_timing(project, base, rec, x):
+    """記録の op を作る関数 base（音程。None もある）に、タイミングの部を足した関数を返す。
+
+    rec = `plan.recipe_timing`（{"sig", "hop", "nodes": {ノート: [節]}}）、x = 確定したタイミングの強度。
+    x > 0 なら選んだノート全部に割合 x と節を書く。x = 0 なら、生きているタイミングの記録（ok）が無いノートだけに
+    0.0 と節を書く（記録のあるノートは前の割合と節のまま）。書くノートが無ければ base をそのまま返す。"""
+    x = float(x or 0.0)
+    nodes = rec.get("nodes") or {}
+    if x > 1e-12:
+        write = sorted(nodes)
+    else:
+        st = states(project, list(nodes), sig=rec.get("sig"))
+        write = sorted(n for n in nodes if (st.get(n) or {}).get("timing_state") != "ok")
+    if not write:
+        return base
+    spans = {n.id: [n.start_sec, n.end_sec] for n in project.take_notes}
+    ratio = round(min(max(x, 0.0), 1.0), 6)
+
+    def ops(cs_id, edits):
+        out = list(base(cs_id, edits) or []) if base is not None else []
+        op = next((o for o in out if o.get("op") == "recipe"), None)
+        if op is None:
+            op = {"op": "recipe", "kind": "guide", "version": VERSION, "sig": rec["sig"],
+                  "hop": rec["hop"], "notes": {}}
+            out.insert(0, op)
+        for nid in write:
+            ent = op["notes"].setdefault(nid, {})
+            ent["timing"] = ratio
+            ent.setdefault("span", spans.get(nid))
+        op["timing_nodes"] = sorted((dict(n) for nid in write for n in nodes[nid]),
+                                    key=lambda n: (n["src"], n["side"], n["note"]))
+        return out
+
+    return ops
 
 
 def _stored(s):

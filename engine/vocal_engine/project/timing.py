@@ -543,6 +543,7 @@ class Plan:
     pitch_curve: list = field(default_factory=list)        # [[素材の秒, 現在 Hz, ガイド Hz, 端の重み], ...]
     pitch_draws: list = field(default_factory=list)        # 連続した対応・有声区間の鉛筆 spec
     strength: dict | None = None                           # ノートごとの割合と材料（project/strength.py）
+    recipe_timing: dict | None = None                      # 記録に残すタイミングの 100% の動き（`_timing_nodes`）
     pairs: list = field(default_factory=list)              # ガイドとの対応（ノートの組。音程）
     timing: list = field(default_factory=list)             # ガイドに合わせる頭（1 対 1 の組）
     notes: list = field(default_factory=list)              # ノートごとの対応と理由（ガイドのみ。issue #53）
@@ -1118,8 +1119,9 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
                 pitch[nid] = c
     # ---- タイミング: テイクの発音の頭（ノートの頭）をガイドの頭（基準は gt.basis）へ（1 対 1 の組だけ）
     #      基準点の間のノートは前後の基準点に合わせて比例で（interpolate。issue #53）
+    end_knots = []
     anchors, soft, timing, cover = _guide_anchors(project, st, tm, gt, sel, threshold_ms,
-                                                  interpolate=interpolate)
+                                                  interpolate=interpolate, ends_out=end_knots)
     wanted = dict(anchors)
     anchors, repaired = _repair(st, anchors, soft=soft)
     used_pairs = []
@@ -1141,6 +1143,13 @@ def plan_guide(project, note_ids=None, threshold_cents=0.0, threshold_ms=0.0,
         reach = max(0.0, plan.x_hi)
         plan.d = plan.d * reach
     plan.x_lo, plan.x_hi = 0.0, 1.0
+    # 割合の記録に残す 100% の動き（節ごとに凍結。後からタイミングの割合を変えるため。project/strength.py）
+    from . import strength as SG
+    rec_sig = sg_sig if match_pitch_shape else SG.project_sig(project)
+    if rec_sig is not None:
+        plan.recipe_timing = {"sig": rec_sig, "hop": float(project.take_f0.hop_s),
+                              "nodes": _timing_nodes(st, plan.d, anchors, soft, end_knots,
+                                                     sel & set(tn))}
     matched = {i for pr in used_pairs for i in pr["take"]}
     for e in timing:                     # 100% で目標に届くか（追い越し・短すぎで戻した頭は届かない）
         probe = 1e-6 if e.get("kind") == "end" else 0.0      # 音節の終わりは手前の極限
@@ -1409,7 +1418,7 @@ def _note_at(st, t):
     return None
 
 
-def _guide_anchors(project, st, tm, gt, sel, threshold_ms=0.0, interpolate=True):
+def _guide_anchors(project, st, tm, gt, sel, threshold_ms=0.0, interpolate=True, ends_out=None):
     """ガイドの組（発音の頭どうし）→ 節の目標（編集後の秒での移動量）。
 
     - テイクの発音の頭 t をガイドの頭（`pr.target_sec`。タイムライン上の位置、置き場所の違う素材は
@@ -1425,7 +1434,7 @@ def _guide_anchors(project, st, tm, gt, sel, threshold_ms=0.0, interpolate=True)
       なら、残りも同じフレーズの前後の基準点に合わせて比例で（`_interp_targets`。issue #53）。
       これらは**ゆずれる目標**（`soft`）: 追い越し・短すぎになるときは、こちらを先に戻す
 
-    返り値: (目標, ゆずれる節, 基準点の一覧, {組: 補間の目標})。"""
+    返り値: (目標, ゆずれる節, 基準点の一覧, {組: 補間の目標})。ends_out（リスト）には音節の終わりの節を足す。"""
     anchors, soft, timing = {}, set(), []
     if gt is None:
         return anchors, soft, timing, {}
@@ -1519,6 +1528,8 @@ def _guide_anchors(project, st, tm, gt, sel, threshold_ms=0.0, interpolate=True)
             continue
         used[key] = True
         anchors[k] = d
+        if ends_out is not None:
+            ends_out.append(k)
         timing.append(dict(e, note=nid, take_sec=round(t, 4), target_sec=round(tm.at(t, "left") + d, 4),
                            cur_sec=round(tm.at(t, "left"), 4), d_sec=round(d, 4)))
     hard = dict(anchors)
@@ -1531,6 +1542,44 @@ def _guide_anchors(project, st, tm, gt, sel, threshold_ms=0.0, interpolate=True)
         anchors[k] = v
         soft.add(k)
     return anchors, soft, timing, cover
+
+
+def _timing_nodes(st, d, anchors, soft, ends, sel):
+    """「ガイドに合わせる」の 100% の動き（`_repair`・`reach` の後の d）を節ごとに凍結したもの（割合の記録の
+    `timing_nodes`。project/strength.py）。{ノート: [{"note", "src", "side", "role", "d"}, ...]}。
+
+    持ち主: 頭の組（アタック・すぐ近くの頭・接続の境目 = 前の尻を含む）は**頭のノート**、頭の無い組（切り離した尻）は
+    そのノート、組の無い節は目標を付けたもの（ノートの中の発音の頭・休みの手前の音節の終わり）だけそのノート。
+    ノートの中の音素の境目・端は持たない。role: anchor = 確かな頭の組の目標、interp = ゆずれる目標（比例・隣の間）か
+    目標の無い頭（solve の値をそのまま凍結）、end = 切り離した尻・音節の終わり。sel のノートの節だけ。"""
+    hard = {k for k in anchors if k not in soft}
+    ends = set(ends)
+    out = {}
+
+    def put(k, nid, role):
+        kn = st.knots[k]
+        out.setdefault(nid, []).append({"note": nid, "src": round(kn.src, 6),
+                                        "side": "l" if kn.side == "left" else "r",
+                                        "role": role, "d": round(float(d[k]), 6)})
+    for u, ks in st.units.items():
+        if u in st.fixed_units or not ks:
+            continue
+        heads = [k for k in ks if st.knots[k].role in ("note_start", "attack")]
+        if heads:
+            owner = st.knots[heads[0]].note
+            role = "anchor" if any(k in hard for k in ks) else "interp"
+        else:
+            owner = st.knots[ks[0]].note
+            role = "end"
+        if owner in sel:
+            for k in ks:
+                put(k, owner, role)
+    for k, kn in enumerate(st.knots):
+        if kn.unit is None and k in anchors and kn.note in sel:
+            put(k, kn.note, "end" if k in ends else ("interp" if k in soft else "anchor"))
+    for v in out.values():
+        v.sort(key=lambda n: (n["src"], n["side"]))
+    return out
 
 
 def _syllable_end_pairs(project, gt):
@@ -1969,7 +2018,9 @@ def apply_plan(project, plan, x=None, pitch=None, author="human", label=None,
     記録のあるノートはその割合に**する**（同じ割合なら何もしない）、無いノートは今の状態からその割合だけ寄せる。
     include_manual = 合わせた後に手で直したノートも含める（既定は含めない）。restart = 変えられない（stale）
     ノートのうち、今の状態から合わせ直すもの。pitch（0 より大きい）は pitch_center = pitch_shape = pitch で、
-    手で直したノートも、変えられないノートも（今の状態から）含める（今までの呼び方）。"""
+    手で直したノートも、変えられないノートも（今の状態から）含める（今までの呼び方）。
+    「ガイドに合わせる」は、選んだノートのタイミングの割合（x。0 も）と 100% の動き（`plan.recipe_timing`）も
+    同じ記録に残す（x = 0 のときは、生きているタイミングの記録のあるノートはそのまま。project/strength.py）。"""
     removes, specs, info = ([], [], {"x": 0.0})
     if x is not None and abs(float(x)) > 0:
         removes, specs, info = realize(project, plan, x)
@@ -2019,6 +2070,10 @@ def apply_plan(project, plan, x=None, pitch=None, author="human", label=None,
                 specs.append({"kind": "pitch_shift", "target": Target.note(nid),
                               "params": {"cents": v},
                               "note": "ガイドへ %.0f%%" % (float(pitch) * 100)})
+    if plan.recipe_timing is not None:
+        # タイミングの割合（今の xs）と 100% の動きを、音程と同じ記録の op に残す（project/strength.py）
+        from . import strength as SG
+        extra = SG.with_timing(project, extra, plan.recipe_timing, xs)
     if not specs and not removes:
         return None, info
     # 「ガイドに合わせる」は自動、ほか（端・移動のドラッグ・オリジナルに戻す）は手動（issue #37。project/correction.py）
