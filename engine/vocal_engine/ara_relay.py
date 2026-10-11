@@ -57,7 +57,7 @@ FORBIDDEN = frozenset({"new_project", "load_project", "open_project", "save_proj
                        "split_track", "join_track", "mute_track_range"})
 # 呼んでも曲を変えないツール（外部の変更の番号を進めない。EngineCalls.cpp の shouldSyncAfter と同じ考え）
 READ_ONLY = frozenset({"export_view_data", "track_overview", "prep_status", "engine_info", "asr_status",
-                       "project_status", "plan_edit", "render_audition", "inspect_lyrics_score",
+                       "project_status", "plan_edit", "get_correction_strength", "render_audition", "inspect_lyrics_score",
                        "cancel_job", "render_region", "render_preview", "render_view", "remeasure",
                        "transcribe", "pause_prep", "select_track", "get_job", "phoneme_status"})
 # セッション（トラックの一覧・ガイド・テンポ）を変えうるもの: 画面に session-changed も知らせる

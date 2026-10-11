@@ -41,20 +41,34 @@ void GlissEditorRenderer::releaseResources()
 
 bool GlissEditorRenderer::coversModification (const juce::String& araId) const
 {
-    if (hasRegionOfModification (getPlaybackRegions<juce::ARAPlaybackRegion>(), araId))
-        return true;
-
-    for (const auto* sequence : getRegionSequences<juce::ARARegionSequence>())
-        if (hasRegionOfModification (sequence->getPlaybackRegions<juce::ARAPlaybackRegion>(), araId))
-            return true;
-
-    return false;
+    return findEditorSequence (araId, {}).found;
 }
 
 bool GlissEditorRenderer::playbackCoversModification (const juce::String& araId) const
 {
-    return pair != nullptr && pair->playback != nullptr
-        && hasRegionOfModification (pair->playback->getPlaybackRegions<juce::ARAPlaybackRegion>(), araId);
+    return findPlaybackSequence (araId, {}).found;
+}
+
+SequenceMatch GlissEditorRenderer::findEditorSequence (const juce::String& araId,
+                                                       const std::vector<const juce::ARARegionSequence*>& only) const
+{
+    if (const auto match = findSequenceOfModification (getPlaybackRegions<juce::ARAPlaybackRegion>(), araId, only); match.found)
+        return match;
+
+    for (const auto* sequence : getRegionSequences<juce::ARARegionSequence>())
+        if (const auto match = findSequenceOfModification (sequence->getPlaybackRegions<juce::ARAPlaybackRegion>(), araId, only); match.found)
+            return match;
+
+    return {};
+}
+
+SequenceMatch GlissEditorRenderer::findPlaybackSequence (const juce::String& araId,
+                                                         const std::vector<const juce::ARARegionSequence*>& only) const
+{
+    if (pair == nullptr || pair->playback == nullptr)
+        return {};
+
+    return findSequenceOfModification (pair->playback->getPlaybackRegions<juce::ARAPlaybackRegion>(), araId, only);
 }
 
 void GlissEditorRenderer::closeTrace()

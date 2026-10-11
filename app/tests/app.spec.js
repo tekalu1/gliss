@@ -209,7 +209,7 @@ test('(6) ガイドに合わせるのスライダー', async () => {
   // 開いた時点でエンジンが 100% の計画を返す。input（動かしている間）は計画に強度を
   // 掛けて描くだけ、change（離した）で同じ計画を確定する
   await win.waitForFunction(() => window.__app.plan()?.kind === 'guide', null, { timeout: 60000 });
-  await expect(win.locator('#popPitchShape')).toBeChecked();
+  await expect(win.locator('#popShape')).toBeVisible();
   const before = await win.evaluate(() => window.__app.shapes());
   const curveBefore = await win.evaluate(() => window.__app.editedCurve());
   await win.evaluate(() => {

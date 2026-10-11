@@ -162,7 +162,8 @@ def test_export_tool_is_registered():
     assert {"measure_against_guide", "apply_edits"} <= set(names)           # ノートごとの残差・まとめて当てる
     assert "set_render_version" in names                # 描画の版を見る・替える
     assert {"analyze_phonemes", "phoneme_status", "set_auto_phonemes"} <= set(names)    # 音素の解析（2026-10-10 承認）
-    assert len(m.TOOLS) == 87
+    assert {"get_correction_strength", "set_correction_strength"} <= set(names)    # 合わせる割合（2026-10-11 承認）
+    assert len(m.TOOLS) == 89
 
 
 @pytest.mark.parametrize("subtype", ["FLOAT", "PCM_16"])

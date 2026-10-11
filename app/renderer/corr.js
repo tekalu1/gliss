@@ -10,7 +10,7 @@
 // 色の定義は palette.js（黄 → 橙 → 赤の列・手動の白・無音の線）
 import { MANUAL, MUTED_LINE, RAMP } from './palette.js';
 import {
-  COLORS, S, editedCurve, frameNoteIds, isMuted, noteFrames, pitchDelta, strokeData, warp,
+  COLORS, S, editedCurve, frameNoteIds, isMuted, noteFrames, pitchDelta, strengthPreview, strokeData, warp,
 } from './state.js';
 
 const EPS_SEC = 1e-4;
@@ -134,6 +134,11 @@ export function pitchCorr(n) {
         break;
       }
     }
+  }
+  const sp = strengthPreview();          // 音程の割合（ガイドに合わせる）のプレビュー
+  if (!shape && sp?.size) {
+    const [a, b] = noteFrames().get(n.id) || [0, -1];
+    for (let i = a; i <= b && !shape; i++) shape = sp.has(i);
   }
   if (Math.abs(d) < 1e-9 && !st && !shape) return eng;
   let amount = Math.abs((n.cents || 0) + d * 100);

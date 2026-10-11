@@ -35,6 +35,9 @@ public:
     bool coversModification (const juce::String& araId) const;
     /** 同じインスタンスの PlaybackRenderer が、この修飾のリージョンを持つか（EditorRenderer にリージョンを割り当てないホストの手掛かり）。 */
     bool playbackCoversModification (const juce::String& araId) const;
+    /** 上の 2 つの、この修飾のリージョンが載っているトラックを返す版。only に並べたトラックのリージョンだけを見る（空ならどれでもよい）。 */
+    SequenceMatch findEditorSequence (const juce::String& araId, const std::vector<const juce::ARARegionSequence*>& only) const;
+    SequenceMatch findPlaybackSequence (const juce::String& araId, const std::vector<const juce::ARARegionSequence*>& only) const;
     /** 同じインスタンスの PlaybackRenderer と結ぶ（GlissProcessor::didBindToARA）。 */
     void linkInstance (std::shared_ptr<RendererPair> pairIn) { pair = std::move (pairIn); }
 

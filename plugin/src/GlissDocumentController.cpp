@@ -76,7 +76,8 @@ private:
 #if GLISS_TEST_HOOKS
 /** 試験用（GLISS_TEST_BRIDGE_DIR。CMake の GLISS_TEST_HOOKS のビルドだけ）: 画面の engineCall の代わり。フォルダの <名前>.call.json（{tool, args}）を順に
     engineCall に渡し、答えを <名前>.result.json に書く（plugin/tests/aratest の GlissARATest -changes が使う）。tool が "@preview" のときは
-    画面の preview の代わり（{tool: "@preview", op, args}。GlissHostCheck --ara-preview が使う）。
+    画面の preview の代わり（{tool: "@preview", op, args}。GlissHostCheck --ara-preview が使う）、"@selection" のときは DAW の選択の知らせの
+    代わり（{tool: "@selection", args: {regions, sequences}}。GlissHostCheck --ara-preview-owner が使う）。
     args の文字列 "@ara:<修飾の persistentID>" はその修飾のトラックの id に置き換える。メッセージスレッドで動く。 */
 class GlissDocumentController::TestBridge final : private juce::Timer
 {
@@ -124,8 +125,68 @@ private:
         // 本物の GlissEditor が足すもの（EditorWebView の preview）と同じ名前
         if (tool == "@preview")
             owner.preview (request.getProperty ("op", "start").toString(), args, std::move (answer));
+        else if (tool == "@selection")
+            answer (select (args));
         else
             owner.engineCall (tool, args, std::move (answer));
+    }
+
+    /** "@selection": DAW が選択を知らせた代わり（{regions: [リージョン名], sequences: [トラック名]}。空の配列は空の選択）。
+        ホストの ARAViewSelection（リージョン・リージョン列の ref の並び）を作り、本物のエディタが受けるのと同じ editorSelectionChanged に渡す。 */
+    juce::var select (const juce::var& args)
+    {
+        auto* controller = owner.getDocumentController();
+        auto* document = controller != nullptr ? controller->getDocument<juce::ARADocument>() : nullptr;
+
+        if (document == nullptr)
+            return object ({ { "ok", false }, { "error", "no document" } });
+
+        const auto namesOf = [&args] (const char* key)
+        {
+            juce::StringArray out;
+
+            if (const auto* list = args.getProperty (key, {}).getArray())
+                for (const auto& v : *list)
+                    out.add (v.toString());
+
+            return out;
+        };
+        const auto regionNames = namesOf ("regions");
+        const auto sequenceNames = namesOf ("sequences");
+        std::vector<ARA::ARAPlaybackRegionRef> regionRefs;
+        std::vector<ARA::ARARegionSequenceRef> sequenceRefs;
+        juce::StringArray missing = regionNames;
+
+        for (auto* sequence : document->getRegionSequences<juce::ARARegionSequence>())
+        {
+            if (sequenceNames.contains (juce::convertOptionalARAString (sequence->getName())))
+                sequenceRefs.push_back (ARA::PlugIn::toRef (static_cast<ARA::PlugIn::RegionSequence*> (sequence)));
+
+            for (auto* region : sequence->getPlaybackRegions<juce::ARAPlaybackRegion>())
+            {
+                const auto name = juce::convertOptionalARAString (region->getName());
+
+                if (regionNames.contains (name))
+                {
+                    regionRefs.push_back (ARA::PlugIn::toRef (static_cast<ARA::PlugIn::PlaybackRegion*> (region)));
+                    missing.removeString (name);
+                }
+            }
+        }
+
+        if (! missing.isEmpty() || (int) sequenceRefs.size() != sequenceNames.size())
+            return object ({ { "ok", false }, { "error", "selection names not found" } });
+
+        ARA::ARAViewSelection raw {};
+        raw.structSize = ARA::kARAViewSelectionMinSize;
+        raw.playbackRegionRefsCount = (ARA::ARASize) regionRefs.size();
+        raw.playbackRegionRefs = regionRefs.empty() ? nullptr : regionRefs.data();
+        raw.regionSequenceRefsCount = (ARA::ARASize) sequenceRefs.size();
+        raw.regionSequenceRefs = sequenceRefs.empty() ? nullptr : sequenceRefs.data();
+        raw.timeRange = nullptr;
+        const ARA::PlugIn::ViewSelection selection (controller, &raw);
+        owner.editorSelectionChanged (this, selection);
+        return object ({ { "ok", true }, { "regions", (int) regionRefs.size() }, { "sequences", (int) sequenceRefs.size() } });
     }
 
     GlissDocumentController& owner;
@@ -1053,6 +1114,25 @@ void GlissDocumentController::editorSelectionChanged (const void* view, const ju
         in.sequences.push_back (std::move (s));
     }
 
+    // 試聴の担当を決める手掛かり: 選んだリージョンのトラックと、選んだリージョン列。何も選んでいない通知は覚え直さない
+    {
+        std::vector<const juce::ARARegionSequence*> sequences;
+        const auto add = [&sequences] (const juce::ARARegionSequence* sequence)
+        {
+            if (sequence != nullptr && std::find (sequences.begin(), sequences.end(), sequence) == sequences.end())
+                sequences.push_back (sequence);
+        };
+
+        for (auto* region : selection.getPlaybackRegions<juce::ARAPlaybackRegion>())
+            add (region->getRegionSequence<juce::ARARegionSequence>());
+
+        for (auto* sequence : selection.getRegionSequences<juce::ARARegionSequence>())
+            add (sequence);
+
+        if (! sequences.empty())
+            selectedSequences = std::move (sequences);
+    }
+
     const auto before = selectionPolicy.currentModification();
     const auto decision = selectionPolicy.decide (in);
 
@@ -1484,36 +1564,96 @@ void GlissDocumentController::previewLocal (const juce::var& arg, Completion don
     });
 }
 
+namespace
+{
+/** ログの引用符の中に書くトラック名（引用符は読みを崩すので置き換える。名前が無いときは "-"）。 */
+juce::String trackNameForLog (const juce::String& name)
+{
+    return name.isEmpty() ? juce::String ("-") : name.replaceCharacter ('"', '\'');
+}
+} // namespace
+
+std::vector<const juce::ARARegionSequence*> GlissDocumentController::liveSelectedSequences()
+{
+    // ドキュメントから消えたトラックの番地を持ち続けない（同じ番地に別のトラックができても、選んだことにしない）
+    auto* document = getDocumentController()->getDocument<juce::ARADocument>();
+    std::vector<const juce::ARARegionSequence*> live;
+
+    if (document != nullptr)
+        for (auto* sequence : document->getRegionSequences<juce::ARARegionSequence>())
+            if (std::find (selectedSequences.begin(), selectedSequences.end(), sequence) != selectedSequences.end())
+                live.push_back (sequence);
+
+    selectedSequences = live;
+    return live;
+}
+
 void GlissDocumentController::targetPreview (const juce::var& arg, const char* mode)
 {
     const auto araId = arg.getProperty ("ara_id", {}).toString();
     const auto requester = (std::uint64_t) (juce::int64) arg.getProperty ("requester", 0);
-    std::vector<std::uint64_t> editorCovering, playbackCovering;
+    std::vector<std::uint64_t> editorCovering, playbackCovering, selectedEditor, selectedPlayback;
     int renderers = 0;
+    previewTrackNames.clear();
+
+    // 試聴の音は、同じ修飾を載せたインスタンスのうち 1 つだけが足す。Studio Pro はソロでミュートされたトラックのインスタンスも処理し、
+    // ARA / VST3 からはミュートが見えないので、処理した順で決めると聞こえないトラックが担当になる。そこで、DAW で最後に選んだ
+    // （空でない）イベントのトラックのインスタンスを担当にする。選んだトラックに候補が無い・何も選んでいないときは従来どおり（絞れた順）
+    const auto selected = liveSelectedSequences();
 
     if (araId.isNotEmpty())
         for (auto* renderer : getDocumentController()->getEditorRenderers<GlissEditorRenderer>())
         {
             ++renderers;
 
-            if (renderer->coversModification (araId))
+            const auto editor = renderer->findEditorSequence (araId, {});
+            const auto playback = renderer->findPlaybackSequence (araId, {});
+
+            if (editor.found)
                 editorCovering.push_back (renderer->getRendererId());
 
-            if (renderer->playbackCoversModification (araId))
+            if (playback.found)
                 playbackCovering.push_back (renderer->getRendererId());
+
+            // トラック名はログ用（選んだトラックの名前を優先する）
+            auto named = renderer->findEditorSequence (araId, selected);
+
+            if (! named.found) named = renderer->findPlaybackSequence (araId, selected);
+            if (! named.found) named = editor.found ? editor : playback;
+
+            if (named.found)
+                previewTrackNames[renderer->getRendererId()] = named.sequence != nullptr
+                    ? juce::convertOptionalARAString (named.sequence->getName()) : juce::String();
+
+            if (! selected.empty())
+            {
+                if (renderer->findEditorSequence (araId, selected).found)
+                    selectedEditor.push_back (renderer->getRendererId());
+
+                if (renderer->findPlaybackSequence (araId, selected).found)
+                    selectedPlayback.push_back (renderer->getRendererId());
+            }
         }
 
+    const auto bySelection = ! selectedEditor.empty() || ! selectedPlayback.empty();
     const auto previousOwner = previewAudio->getStats().owner;
-    const auto choice = previewAudio->beginPreview (editorCovering, playbackCovering, requester, juce::Time::getMillisecondCounter());
+    const auto choice = bySelection
+        ? previewAudio->beginPreview (selectedEditor, selectedPlayback, requester, juce::Time::getMillisecondCounter())
+        : previewAudio->beginPreview (editorCovering, playbackCovering, requester, juce::Time::getMillisecondCounter());
     previewStarted = true;
 
     const auto range = arg.hasProperty ("start_sec")
         ? juce::String ((double) arg.getProperty ("start_sec", 0.0), 3) + "-" + juce::String ((double) arg.getProperty ("end_sec", 0.0), 3)
         : juce::String ("-");
+    juce::StringArray selectedNames;
+
+    for (const auto* sequence : selected)
+        selectedNames.add (trackNameForLog (juce::convertOptionalARAString (sequence->getName())));
 
     // どのトラックを選んでいて（ui-track）どのトラックを描いていたか（shown）は画面が添える。covered は、その修飾のリージョンが割り当たった
     // EditorRenderer の数 / 全部の数、playback は、同じインスタンスの PlaybackRenderer がその修飾のリージョンを持つ EditorRenderer の数。
-    // by は絞れた手掛かり（editor → playback → requester → none の順）、candidates は足してよい renderer の数
+    // by は絞れた手掛かり（editor → playback → requester → none の順）、candidates は足してよい renderer の数。
+    // daw-selected は DAW で最後に選んだトラック、by-selection は、そのトラックのインスタンスに絞ったか（0 なら従来の絞り方）
     diag::logAlways ("preview: start " + juce::String (mode) + " ara=" + araId + " note=" + arg.getProperty ("note", {}).toString()
                      + " range=" + range + " cents=" + juce::String ((double) arg.getProperty ("cents", 0.0), 1)
                      + " ui-track=" + arg.getProperty ("ui_track", {}).toString() + " shown=" + arg.getProperty ("shown_track", {}).toString()
@@ -1521,6 +1661,7 @@ void GlissDocumentController::targetPreview (const juce::var& arg, const char* m
                      + " playback=" + juce::String ((int) playbackCovering.size())
                      + " by=" + PreviewAudio::toString (choice.by) + " candidates=" + juce::String ((int) choice.ids.size())
                      + " narrowed=" + juce::String (previewAudio->getStats().narrowed ? 1 : 0)
+                     + " daw-selected=\"" + selectedNames.joinIntoString (",") + "\" by-selection=" + juce::String (bySelection ? 1 : 0)
                      + " requester=" + juce::String ((juce::int64) requester) + " owner=" + juce::String ((juce::int64) previousOwner));
 }
 
@@ -1532,8 +1673,12 @@ void GlissDocumentController::stopPreviewAudio()
     {
         previewStarted = false;
         const auto stats = previewAudio->getStats();
+        // track は、音を足したインスタンス（足していなければ所有者）のトラック名（実機で、聞こえないトラックが担当になっていないかを見る）
+        const auto who = stats.playedBy != 0 ? stats.playedBy : stats.owner;
+        const auto track = previewTrackNames.find (who);
         diag::logAlways ("preview: stop played-by=" + juce::String ((juce::int64) stats.playedBy) + " narrowed=" + juce::String (stats.narrowed ? 1 : 0)
-                         + " handovers=" + juce::String (stats.handovers));
+                         + " handovers=" + juce::String (stats.handovers)
+                         + " track=\"" + (track != previewTrackNames.end() ? trackNameForLog (track->second) : juce::String ("-")) + "\"");
     }
 
     previewAudio->stop();
