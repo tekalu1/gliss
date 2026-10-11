@@ -224,11 +224,13 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
   await blob('n005').click();
   await win.locator('#bMacro').click();
   await win.waitForFunction(() => window.__app.plan()?.kind === 'guide', null, { timeout: 60000 });
-  await expect(win.locator('#popPitchShape')).toBeChecked();
+  await expect(win.locator('#popShape')).toBeVisible();
   const sourceCurve = await win.evaluate(() => window.__app.editedCurve());
   const halfHz = await win.evaluate(() => {
-    const el = document.querySelector('#popPitch');
-    el.value = '50'; el.dispatchEvent(new Event('input', { bubbles: true }));
+    for (const id of ['#popPitch', '#popShape']) {
+      const el = document.querySelector(id);
+      el.value = '50'; el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
     const S = window.__app.S;
     const row = S.plan.data.pitch_curve.find(([, h0, h1, w]) => w > 0.99 && Math.abs(h1 - h0) > 20);
     if (!row) return null;
@@ -244,8 +246,10 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
   expect(Math.abs(halfHz.actual - halfHz.expected)).toBeLessThan(0.003);
   expect(Math.abs(halfHz.actual - halfHz.geometric)).toBeGreaterThan(0.02);
   await win.evaluate(() => {
-    const el = document.querySelector('#popPitch');
-    el.value = '70'; el.dispatchEvent(new Event('input', { bubbles: true }));
+    for (const id of ['#popPitch', '#popShape']) {
+      const el = document.querySelector(id);
+      el.value = '70'; el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   });
   const shapeCurve = await win.evaluate(() => window.__app.editedCurve());
   const shapeColor = (await shapes()).find((n) => n.id === 'n005').line;
@@ -259,10 +263,12 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
     if (shapeCurve[i] != null && committedCurve[i] != null)
       expect(Math.abs(shapeCurve[i] - committedCurve[i]), `形のプレビュー ${i}`).toBeLessThan(0.005);
   }
-  await win.locator('#popPitchShape').uncheck();
+  await win.evaluate(() => {
+    const el = document.querySelector('#popShape');
+    el.value = '0'; el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  });
   await settle();
-  expect(await win.evaluate(() => window.__app.S.vd.edits.some((e) => e.kind === 'pitch_shift'))).toBe(true);
-  expect(await win.evaluate(() => window.__app.S.vd.edits.some((e) => e.kind === 'pitch_draw'))).toBe(false);
   const afterToggleBase = await win.evaluate(() => window.__app.editedCurve());
   await win.evaluate(() => {
     const el = document.querySelector('#popPitch');
@@ -278,19 +284,17 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
     if (afterTogglePreview[i] != null && afterToggleCommit[i] != null)
       expect(Math.abs(afterTogglePreview[i] - afterToggleCommit[i]), `OFF 後のスライダー ${i}`).toBeLessThan(0.005);
   }
-  await win.locator('#popPitchShape').check();
-  await settle();
-  expect(await win.evaluate(() => window.__app.S.vd.edits.some((e) => e.kind === 'pitch_draw'))).toBe(true);
-  expect(await win.evaluate(() => window.__app.S.vd.edits.some((e) => e.kind === 'pitch_shift'))).toBe(false);
   const backOnBase = await win.evaluate(() => window.__app.editedCurve());
   await win.evaluate(() => {
-    const el = document.querySelector('#popPitch');
-    el.value = '55'; el.dispatchEvent(new Event('input', { bubbles: true }));
+    for (const id of ['#popPitch', '#popShape']) {
+      const el = document.querySelector(id);
+      el.value = '55'; el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
   });
   const backOnPreview = await win.evaluate(() => window.__app.editedCurve());
   expect(backOnPreview.some((v, i) => v != null && backOnBase[i] != null
     && Math.abs(v - backOnBase[i]) > 0.05)).toBe(true);
-  await win.evaluate(() => document.querySelector('#popPitch').dispatchEvent(new Event('change', { bubbles: true })));
+  await win.evaluate(() => document.querySelector('#popShape').dispatchEvent(new Event('change', { bubbles: true })));
   await settle();
   const backOnCommit = await win.evaluate(() => window.__app.editedCurve());
   for (let i = 0; i < backOnPreview.length; i++) {
@@ -301,11 +305,10 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
   await win.keyboard.press('Control+z');
   await settle();
   await win.locator('#bMacro').click();
-  await expect(win.locator('#popPitchShape')).toBeChecked();
   // 計画が届いてから（スクリーンショットに対応の線・ステータス行が出る）
   await win.waitForFunction(() => window.__app.S.plan?.data?.kind === 'guide', null, { timeout: 60000 });
   await win.evaluate(() => {
-    for (const id of ['#popPitch', '#popTime']) {
+    for (const id of ['#popPitch', '#popShape', '#popTime']) {
       const el = document.querySelector(id);
       el.value = '100';
       el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -314,8 +317,7 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
   await win.screenshot({ path: path.join(APP, 'screenshots', 'screenshot-guide-select.png') });
   await win.keyboard.press('Escape');
   await win.locator('#bMacro').click();
-  await win.locator('#popPitchShape').uncheck();
-  await win.waitForFunction(() => window.__app.S.plan?.data?.params?.match_pitch_shape === false, null, { timeout: 60000 });
+  await win.waitForFunction(() => window.__app.S.plan?.data?.kind === 'guide', null, { timeout: 60000 });
   const one = await win.evaluate(() => window.__app.plan());
   const ops = await win.evaluate(() => window.__app.guideOpacity());
   const lit = ops.filter((o) => o.op > 0.1).map((o) => o.id);
@@ -335,11 +337,10 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
 
   const before = await shapes();
   await win.locator('#bMacro').click();
-  await expect(win.locator('#popPitchShape')).toBeChecked();
   // 計画が届いてから（スクリーンショットに対応の線・ステータス行が出る）
   await win.waitForFunction(() => window.__app.S.plan?.data?.kind === 'guide', null, { timeout: 60000 });
   await win.evaluate(() => {
-    for (const id of ['#popPitch', '#popTime']) {
+    for (const id of ['#popPitch', '#popShape', '#popTime']) {
       const el = document.querySelector(id);
       el.value = '100';
       el.dispatchEvent(new Event('input', { bubbles: true }));
@@ -348,8 +349,7 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
   await win.screenshot({ path: path.join(APP, 'screenshots', 'screenshot-guide-plan.png') });
   await win.keyboard.press('Escape');
   await win.locator('#bMacro').click();
-  await win.locator('#popPitchShape').uncheck();
-  await win.waitForFunction(() => window.__app.S.plan?.data?.params?.match_pitch_shape === false, null, { timeout: 60000 });
+  await win.waitForFunction(() => window.__app.S.plan?.data?.kind === 'guide', null, { timeout: 60000 });
   const plan = await win.evaluate(() => window.__app.plan());
   await win.evaluate(() => {
     for (const id of ['#popPitch', '#popTime']) {
@@ -373,11 +373,33 @@ test('(6) ガイドに合わせる: 対応だけ濃く、100% のプレビュー
   const after = await shapes();
   expectSame(preview, after, 'ガイド 100%');
 
-  // 音程: 対応するノートは計画どおり（= ガイドの中心）へ
-  const b = byId(before); const a = byId(after);
-  for (const [id, cents] of Object.entries(plan.pitchPlan)) {
-    expect(Math.abs(a.get(id).pitch - (b.get(id).pitch + cents / 100))).toBeLessThan(TOL_ST);
-  }
+  // 音程: 対応するノートは計画どおり（= ガイドの中心）へ。線の形は 0% のまま（音程だけ）なので、
+  // ノートの中の線が中心の差だけ平行に動く（帯の中心は動かさない。割合の記録。2026-10-11 承認）。
+  // 線（take_edited_midi）も計画の材料も、テイクの時刻のフレームで並ぶ
+  const moved = await win.evaluate(() => {
+    const { S } = window.__app;
+    const mat = S.plan.strMats?.new;
+    const curve = window.__app.editedCurve();
+    const { t0_sec: t0, hop_sec: hop } = S.vd.f0;
+    const out = {};
+    for (const [n, ks] of mat?.byNote || []) {
+      out[n] = { err: 0, frames: 0 };
+      for (const k of ks) {
+        const sg = mat.segs[k];
+        sg.t.forEach((t, i) => {
+          const v = curve[Math.round((t - t0) / hop)];
+          if (sg.w[i] < 1 || t < sg.s0 + 0.03 || t > sg.s1 - 0.03 || v == null) return;   // 境目のつなぎの外
+          out[n].err = Math.max(out[n].err, Math.abs(v - (sg.m0[i] + mat.C.get(n))));
+          out[n].frames++;
+        });
+      }
+    }
+    return out;
+  });
+  const ids = Object.keys(plan.pitchPlan);
+  expect(ids.length).toBeGreaterThan(0);
+  expect(ids.reduce((s, id) => s + (moved[id]?.frames || 0), 0)).toBeGreaterThan(0);
+  for (const id of ids) expect(moved[id]?.err ?? 0, id).toBeLessThan(TOL_ST);
   // タイミング: 発音の頭が「ガイドの頭 + 全体のずれ」（画面に描いているガイドの位置）へ（issue #12）。
   // プレビュー（計画の式）でも確定後でも同じ位置
   const reached = plan.timing.filter((e) => e.reached);
@@ -420,7 +442,7 @@ test('(7) 確定の途中でもう一度離しても、最後の値で当たる'
   const preview = await shapes();
   await win.waitForFunction(() => {
     const p = window.__app.plan();
-    return p && p.pitch0 === 0.8 && window.__app.idle();   // 当たった結果を画面に採るまで（S.busy は呼び出しの間だけ）
+    return p && p.str0?.center === 0.8 && window.__app.idle();   // 当たった結果を画面に採るまで（S.busy は呼び出しの間だけ）
   }, null, { timeout: 60000 });
   expectSame(preview, await shapes(), '続けて離す');
   const cs = await win.evaluate(() => window.__app.S.vd.history.changesets.filter((c) => !c.undone));

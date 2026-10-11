@@ -39,7 +39,7 @@ DEFAULT_ALLOW = {"edit": True, "save": False}
 EDIT_TOOLS = frozenset({
     "set_lyrics", "import_lyrics", "set_note_syllable",
     "shift_pitch", "set_pitch_curve", "move_note", "stretch", "move_boundary", "correct_to_guide",
-    "set_transition", "split_note", "merge_notes", "apply_plan", "set_connection",
+    "set_transition", "split_note", "merge_notes", "apply_plan", "set_correction_strength", "set_connection",
     "mute_notes", "unmute_notes", "set_fade", "reset_to_original", "undo", "redo", "apply_edits",
     "add_track", "remove_track", "set_track", "set_guide_track", "set_track_guide", "make_score_guide",
     "set_tempo",

@@ -311,8 +311,7 @@ test('形の計画に差分フレームがないノートは元の線色を保�
 test('(5) ガイドに合わせる = 自動（黄 → 赤）。スライダー中 = 確定後', async () => {
   await win.locator('#bMacro').click();
   await expect(win.locator('#pop')).toBeVisible();
-  await win.locator('#popPitchShape').uncheck();
-  await win.waitForFunction(() => window.__app.S.plan?.data?.params?.match_pitch_shape === false, null, { timeout: 60000 });
+  await win.waitForFunction(() => window.__app.S.plan?.data?.kind === 'guide', null, { timeout: 60000 });
   await win.evaluate(() => {
     for (const [id, v] of [['#popPitch', '30'], ['#popTime', '100']]) {
       const el = document.querySelector(id);

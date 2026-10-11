@@ -871,7 +871,7 @@ window.__app = {
   planWarp: (t) => planWarp(t),
   plan: () => (S.plan ? {
     id: S.plan.data.plan_id, kind: S.plan.data.kind, x: S.plan.x, pitch: S.plan.pitch,
-    x0: S.plan.x0, pitch0: S.plan.pitch0,
+    x0: S.plan.x0, pitch0: S.plan.pitch0, str0: S.plan.str0 || null,
     range: S.plan.data.x_range, snap: S.plan.data.snap_x,
     guides: [...S.plan.guides], takes: [...S.plan.takes], pitchPlan: S.plan.data.pitch,
     timing: S.plan.data.timing || [],
@@ -902,7 +902,7 @@ window.__app = {
   /** 画面の px（#roll の左上から）→ 近い境目（テスト用。ページ座標で渡す）。 */
   nearPair: (x, y) => { const r = document.querySelector('#roll').getBoundingClientRect(); return nearPair(x - r.left, y - r.top); },
   guideOpacity: () => [...document.querySelectorAll('#roll [data-guide]')]
-    .map((r) => ({ id: r.dataset.guide, op: +r.getAttribute('opacity') })),
+    .map((r) => ({ id: r.dataset.guide, op: +(r.getAttribute('fill-opacity') ?? r.getAttribute('opacity')) })),
   lyrics: () => S.lyrics,
   status: () => $('#status').textContent,
   // ツール・つなぎ・鉛筆

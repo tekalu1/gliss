@@ -305,7 +305,7 @@ def _tool(fn=None, *, lock=True):
 HISTORY_TOOLS = {
     "set_lyrics", "import_lyrics", "shift_pitch", "set_pitch_curve", "set_transition", "split_note", "merge_notes",
     "move_note", "stretch", "move_boundary", "correct_to_guide", "apply_plan", "set_connection",
-    "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
+    "set_correction_strength", "reset_to_original", "mute_notes", "unmute_notes", "set_fade", "set_tempo", "undo", "redo", "export_view_data", "list_changes", "list_tracks",
     "select_track", "add_track", "remove_track", "set_track", "set_guide_track", "set_track_guide",
     "make_score_guide",
     "split_track", "join_track",
@@ -1126,6 +1126,8 @@ def list_notes(start_sec: float = None, end_sec: float = None, kind: str = "note
             p.estimated_excluded_note_ids())
     from .project.fades import note_fades
     fades = note_fades(p)
+    from .project import strength as SG
+    gst = SG.states(p, [n.id for n in ns if n.kind == "note"]) if p.guide is not None else {}
     out = []
     for n in ns:
         d = {"id": n.id, "start_sec": n.start_sec, "end_sec": n.end_sec,
@@ -1136,6 +1138,10 @@ def list_notes(start_sec: float = None, end_sec: float = None, kind: str = "note
         if n.id in fades:                      # ノートのフェード（編集後の秒。set_fade）
             d["fade_in_sec"] = round(fades[n.id][0], 4)
             d["fade_out_sec"] = round(fades[n.id][1], 4)
+        g = gst.get(n.id)
+        if g is not None and g["state"] != "none":   # 「ガイドに合わせる」の音程の割合（get_correction_strength）
+            d["guide_strength"] = {"state": g["state"], "center": round(g["center"], 4),
+                                   "shape": round(g["shape"], 4)}
         if pres is not None:
             ov = [x for x in pres.overlapping(n.start_sec, n.end_sec)
                   if x.syllable_index not in hidden]
@@ -1529,13 +1535,14 @@ def _remember(plan):
     return plan
 
 
-def _apply_now(plan, x, author, label, note=None, pitch=None, hist=None):
-    """計画を作ってすぐ確定する（MCP の直接の編集ツール用）。hist: 取り消しの履歴に出す短い名前。"""
+def _apply_now(plan, x, author, label, note=None, pitch=None, hist=None, **strength):
+    """計画を作ってすぐ確定する（MCP の直接の編集ツール用）。hist: 取り消しの履歴に出す短い名前。
+    strength: 音程の割合（pitch_center / pitch_shape / include_manual / restart。`timing.apply_plan`）。"""
     from .project import timing as TM
     p = _project()
     want = x
     x = float(np.clip(x, plan.x_lo, plan.x_hi)) if x is not None else None
-    cs, info = TM.apply_plan(p, plan, x, pitch=pitch, author=author, label=label)
+    cs, info = TM.apply_plan(p, plan, x, pitch=pitch, author=author, label=label, **strength)
     if hist == "ノートの長さ" and (info.get("snapped") or (plan.set_connections and x)):
         hist = "ノートの長さ（接続の変更）"
     _rec(p, cs, hist or label)
@@ -1546,6 +1553,8 @@ def _apply_now(plan, x, author, label, note=None, pitch=None, hist=None):
            "snapped": bool(info.get("snapped")),
            "window_sec": info.get("window_sec"),
            "next": "render_preview / render_view / remeasure で確かめる。戻すなら undo"}
+    if "pitch_notes" in info:
+        out["strength_notes"] = info["pitch_notes"]
     if note and cs:
         out["note"] = note
     return _ok(**out)
@@ -1615,6 +1624,10 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
       結果の contour）。contour のときの対象（範囲・note_ids）は、その時刻にかかるガイドの区間
     - max_shift_cents: これを超える音程の寄せは飛ばす（別の音・オクターブ違いのテイクを間違って寄せない。
       note と contour で効く。note は結果の skipped_large_notes）
+    - **音程の割合**（shape のとき。2026-10-11）: ノートごとに割合を記録し、後から変えられる
+      （`get_correction_strength` / `set_correction_strength`）。記録のあるノートに掛け直すと、
+      pitch_strength は「さらに寄せる量」ではなく**その割合にする**（同じ割合なら何もしない）。
+      記録の無いノート・変えられなくなったノートは今の状態から寄せる。結果の `strength` は当てた後の割合
     対象: note_ids、または範囲（範囲に頭が入るノート）、省略で全体。
 
     結果の `correspondence` はノートごとの対応: guide（音程の対応。1 対多は同じ組の範囲）、
@@ -1668,7 +1681,10 @@ def correct_to_guide(start_sec: float = None, end_sec: float = None,
              "x": x, "window_sec": info.get("window_sec"), "contour": info.get("contour")}
     else:
         r = _apply_now(plan, float(timing_strength) or None, author, label,
-                       pitch=float(pitch_strength) or None, hist="ガイドに合わせる")
+                       pitch=float(pitch_strength) or None, hist="ガイドに合わせる",
+                       include_manual=edited_notes == "adjust")
+        if plan.strength is not None:
+            r["strength"] = _strength_rows(p, ids)
     if skipped_large:
         r["skipped_large_notes"] = skipped_large
     r.update(pairs=len(plan.pairs), matched_notes=plan.info.get("matched_notes"),
@@ -1778,11 +1794,18 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
 
 @_tool
 def apply_plan(plan_id: str, x: float = None, pitch: float = None, replaces: str = None,
-               author: str = "human", label: str = None) -> dict:
+               author: str = "human", label: str = None, pitch_center: float = None,
+               pitch_shape: float = None, include_manual: bool = None,
+               restart: list = None) -> dict:
     """`plan_edit` で作った計画を x（と pitch）で確定する。1 つの changeset。
 
     x: edge / move は秒、guide はタイミングの強度（0〜1）。範囲の外は端に丸める
-    pitch: guide のピッチの強度（0〜1）
+    pitch: guide のピッチの強度（0〜1）。線の形で合わせる計画では pitch_center = pitch_shape = pitch
+        （手で直したノートも含める）
+    pitch_center / pitch_shape: guide の音程（中心）・線の形（揺れ）の割合（0〜1）。省略した側は
+        ノートごとの今の割合のまま（記録の無いノートは 0）。画面の「ガイドに合わせる」の 2 本のスライダー
+    include_manual: 合わせた後に手で直したノートも含める（既定 含めない。手の分は差分として残る）
+    restart: 割合を変えられなくなったノート（解析し直した等）のうち、今の状態から合わせ直すもの（ノートの ID）
     replaces: 先に取り消す changeset（「ガイドに合わせる」のポップアップ内の当て直し。
         取り消した後の状態 = 計画を作ったときの状態なので、同じ計画がそのまま当たる）
     label: 取り消しの履歴に出す名前（既定は「ノートの長さ」など。画面の右クリック「つなぐ」が使う）
@@ -1801,12 +1824,118 @@ def apply_plan(plan_id: str, x: float = None, pitch: float = None, replaces: str
     t = None if x is None or float(x) == 0.0 else float(x)
     pv = None if pitch is None or float(pitch) == 0.0 else float(pitch)
     desc = {"edge": "端を %+.0f ms", "move": "移動 %+.0f ms"}.get(plan.kind)
-    desc = (desc % ((t or 0.0) * 1000)) if desc else (
-        "ガイドへ寄せる（ピッチ %.0f%% / タイミング %.0f%%）" % ((pv or 0) * 100, (t or 0) * 100))
+    if desc:
+        desc = desc % ((t or 0.0) * 1000)
+    elif pitch_center is not None or pitch_shape is not None:
+        desc = "ガイドへ寄せる（音程 %s / 線の形 %s / タイミング %.0f%%）" % (
+            _pct(pitch_center), _pct(pitch_shape), (t or 0) * 100)
+    else:
+        desc = "ガイドへ寄せる（ピッチ %.0f%% / タイミング %.0f%%）" % ((pv or 0) * 100, (t or 0) * 100)
     hist = label or {"edge": "ノートの長さ", "move": "ノートの移動"}.get(plan.kind, "ガイドに合わせる")
-    r = _apply_now(plan, t, author, desc, pitch=pv, hist=hist)
+    r = _apply_now(plan, t, author, desc, pitch=pv, hist=hist,
+                   pitch_center=None if pitch_center is None else float(pitch_center),
+                   pitch_shape=None if pitch_shape is None else float(pitch_shape),
+                   include_manual=include_manual, restart=list(restart or []))
     r["replanned"] = replanned
     r["plan_id"] = plan.id
+    return r
+
+
+def _pct(v):
+    return "そのまま" if v is None else "%.0f%%" % (float(v) * 100)
+
+
+def _strength_rows(p, ids=None):
+    """ノートごとの音程の割合（`project/strength.py`）。ids を省くと記録のあるノートだけ。"""
+    from .project import strength as SG
+    st = SG.states(p, ids)
+    out = []
+    for nid, r in st.items():
+        if ids is None and r["state"] == "none":
+            continue
+        out.append({"note": nid, "state": r["state"],
+                    "center": round(r["center"], 4), "shape": round(r["shape"], 4),
+                    "manual": r["manual"], "reason": r["reason"]})
+    return out
+
+
+def _strength_summary(rows):
+    """選んだノートの割合のまとめ（画面のポップアップの「混在」と同じ）。"""
+    out = {}
+    for k in ("center", "shape"):
+        vs = [r[k] for r in rows if r["state"] != "stale"]
+        if not vs:
+            out[k] = None
+            continue
+        lo, hi = min(vs), max(vs)
+        out[k] = {"mixed": hi - lo > 0.005, "min": round(lo, 4), "max": round(hi, 4),
+                  "mean": round(float(np.mean(vs)), 4)}
+    return out
+
+
+@_tool
+def get_correction_strength(note_ids: list = None, start_sec: float = None,
+                            end_sec: float = None) -> dict:
+    """「ガイドに合わせる」（線の形・shape）の**ノートごとの音程の割合**を読む（画面の G のポップアップと同じ）。
+
+    notes[]: state（ok = 割合を変えられる / stale = 変えられない（reason に理由。解析し直した・
+    ガイドを差し替えた・ノートを分割した・補正の線が外された など）/ none = 記録が無い（0% として扱う））、
+    center（音程）・shape（線の形 = 揺れ）の割合 0〜1、manual（合わせた後に手で直した。既定では割合を変えない）。
+    summary: 選んだノートの割合の範囲（mixed = ノートごとに違う）。対象: note_ids か範囲、省略で記録のあるノート全部。"""
+    p = _project()
+    p.reload_if_changed()
+    ids = None
+    if note_ids or start_sec is not None or end_sec is not None:
+        ids = _note_ids(None, note_ids, 0.0 if start_sec is None else start_sec,
+                        p.duration_sec + 1 if end_sec is None else end_sec)
+    rows = _strength_rows(p, ids)
+    return _ok(notes=rows, summary=_strength_summary(rows),
+               stale=[r["note"] for r in rows if r["state"] == "stale"],
+               manual=[r["note"] for r in rows if r["manual"]])
+
+
+@_tool
+def set_correction_strength(note_ids: list = None, start_sec: float = None, end_sec: float = None,
+                            center: float = None, shape: float = None,
+                            include_manual: bool = False, restart: bool = False,
+                            author: str = "ai") -> dict:
+    """「ガイドに合わせる」の**音程の割合を後から変える**（1 つの changeset。undo 1 回で戻る）。
+
+    center: 音程（ノートの中心）の割合 0〜1、shape: 線の形（揺れ）の割合 0〜1。省いた側はノートごとの
+    今の割合のまま。記録の無いノートは 0% として扱い、今の状態からその割合だけ寄せる。
+    割合 0（両方）のノートは補正の線を外す。隣と割合が違う境目は 40 ms ほどでなだらかにつなぐ。
+    include_manual: 合わせた後に手で直したノートも変える（手の分は差分として残る。既定は変えない）
+    restart: 変えられなくなった（stale）ノートを、今の状態から合わせ直す（既定は飛ばして skipped に返す）
+    タイミングは変えない（`correct_to_guide` の timing_strength）。対象: note_ids か範囲、省略で全体。"""
+    from .project import timing as TM
+    p = _project()
+    p.reload_if_changed()
+    if center is None and shape is None:
+        raise ProjectError("center か shape を渡す（0〜1）")
+    for v in (center, shape):
+        if v is not None and not 0.0 <= float(v) <= 1.0:
+            raise ProjectError("割合は 0〜1")
+    ids = None
+    if note_ids or start_sec is not None or end_sec is not None:
+        ids = _note_ids(None, note_ids, 0.0 if start_sec is None else start_sec,
+                        p.duration_sec + 1 if end_sec is None else end_sec)
+    plan = TM.plan_guide(p, ids, match_pitch_shape=True)
+    if plan.strength is None:
+        raise ProjectError("ガイドの音程が無い（analyze_take でガイドを解析する）")
+    before = {r["note"]: r for r in _strength_rows(p, ids or sorted(plan.strength["notes"]))}
+    stale = sorted(n for n, r in plan.strength["notes"].items() if r["sel"] and r["state"] == "stale")
+    label = "ガイドの割合を変える（音程 %s / 線の形 %s）" % (_pct(center), _pct(shape))
+    r = _apply_now(plan, None, author, label, hist="ガイドに合わせる",
+                   pitch_center=None if center is None else float(center),
+                   pitch_shape=None if shape is None else float(shape),
+                   include_manual=bool(include_manual), restart=stale if restart else [])
+    sel = [n for n, v in plan.strength["notes"].items() if v["sel"]]
+    after = _strength_rows(p, sel)
+    r.update(notes=after, summary=_strength_summary(after),
+             skipped={"manual": sorted(n for n in sel if before.get(n, {}).get("manual")
+                                       and not include_manual),
+                      "stale": [] if restart else stale},
+             next="戻すなら undo('%s')" % r.get("changeset"))
     return r
 
 
@@ -2125,7 +2254,11 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
         rm += [i for i in r_ids if i not in rm]
     if not rm and not specs:
         return _ok(changeset=None, removed=0, message="対象の編集が無かった")
-    cs = p.apply_changes(rm, specs, author=author, label="原音に戻す（%d ノート）" % len(ids))
+    from .project import strength as SG
+    void = sorted(set(ids) & {k for k, v in SG.recipes(p)[1].items() if v is not None})
+    extra = (lambda cs_id, made: [{"op": "recipe_void", "notes": void}]) if void else None
+    cs = p.apply_changes(rm, specs, author=author, label="原音に戻す（%d ノート）" % len(ids),
+                         extra_ops=extra)
     _rec(p, cs, "オリジナルに戻す")
     out = {"changeset": cs.id, "removed": len(rm), "added": len(specs), "note_ids": ids,
            "total_edits": len(p.edits)}
@@ -2817,7 +2950,8 @@ TOOLS = [open_project, set_lyrics, get_lyrics, list_utterances, set_note_syllabl
          get_phonemes, analyze_phonemes, phoneme_status, set_auto_phonemes,
          shift_pitch, set_pitch_curve, move_note, stretch, move_boundary, correct_to_guide,
          set_transition, split_note, merge_notes,
-         plan_edit, apply_plan, list_connections, set_connection,
+         plan_edit, apply_plan, get_correction_strength, set_correction_strength,
+         list_connections, set_connection,
          mute_notes, unmute_notes, set_fade, reset_to_original, undo, redo,
          render_preview, render_region, render_audition, render_view, export_wav,
          export_view_data, remeasure,

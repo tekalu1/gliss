@@ -110,7 +110,7 @@ def test_every_tool_is_classified():
         "open_project", "new_project", "load_project", "project_status",
         # 読む・測る・計画だけ・一時ファイル・画面向けの描画データ・ジョブ
         "get_lyrics", "list_utterances", "inspect_lyrics_score", "analyze_take", "get_pitch", "list_notes",
-        "list_deviations", "get_phonemes", "plan_edit", "list_connections", "render_audition", "render_view",
+        "list_deviations", "get_phonemes", "plan_edit", "get_correction_strength", "list_connections", "render_audition", "render_view",
         "remeasure", "list_changes", "get_job", "cancel_job", "engine_info",
             # ピッチ検出の方式を選ぶ（そのエンジンの既定。曲は変えない）
             "set_f0_estimator",
