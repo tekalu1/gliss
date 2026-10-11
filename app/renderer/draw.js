@@ -17,7 +17,6 @@ import {
 import { renderTempo } from './tempo.js';
 import { bandColor, desat, lineColorer } from './corr.js';
 import { GUIDE_LOOK as GL, MANUAL } from './palette.js';
-import { guideDiffText, guidePairOf } from './guidepair.js';
 import { createFollower } from './follow.js';
 import { syncLegend } from './legend.js';
 import { ARA, araEditorHead, araEditorRegion, araEditorTrack, araRegions, araScale } from './ara.js';
@@ -63,7 +62,7 @@ function editorLoopSegments() {
   }
   return out;
 }
-const { TAKE, GUIDE, GUIDE_HI, SEL, WAS, AI: AI_EDGE } = COLORS;
+const { TAKE, GUIDE, SEL, WAS, AI: AI_EDGE } = COLORS;
 
 let svg = null;
 let W = 1200;
@@ -768,27 +767,6 @@ export function corrText(id) {
   return lines;
 }
 
-/** ホバー・選択している 1 つのノート id（対のガイドを明るくする。ドラッグ中はドラッグ前の選択のまま）。 */
-function pairFocus() {
-  return (!S.drag && S.noteHover) || (S.sel.length === 1 ? S.sel[0] : null);
-}
-
-/** ホバーしたノートの「ガイドより +32 cent・40 ms 遅い」の札（ホバーのときだけ。ガイドに合わせるを開いている間は corrTip が出す）。 */
-function guideDiffTip() {
-  if (corrPlan() || !S.noteHover || S.drag || !S.showGuide || !S.vd?.guide) return '';
-  const text = guideDiffText(S.noteHover);
-  const n = S.byId.get(S.noteHover);
-  if (!text || !n) return '';
-  const [a, b] = spanOf(n);
-  const w = textW(text) + 14;
-  const h = 18;
-  const x = clamp(X((a + b) / 2) - w / 2, KEYS_W + 2, W - w - 2);
-  let y = Y(bandOf(n)) - blobHMax() - 34;
-  if (y < rollTop() + 4) y = Y(bandOf(n)) + blobHMax() + 12;
-  return `<g data-guide-diff="${n.id}" pointer-events="none"><rect x="${f1(x)}" y="${f1(y)}" width="${f1(w)}" height="${h}" rx="3" fill="#232326" stroke="${GUIDE_HI}" stroke-opacity=".7"/>`
-    + `<text x="${f1(x + w / 2)}" y="${f1(y + 12.5)}" font-size="11" text-anchor="middle" fill="${SEL}">${esc(text)}</text></g>`;
-}
-
 function corrTip() {
   if (!corrPlan() || !S.noteHover || S.drag) return '';
   const lines = corrText(S.noteHover);
@@ -891,12 +869,11 @@ export function render() {
   }
 
   // ---- ガイド（青の薄い塗り＋1 px の青の縁の小さな波形＋青の線。2026-10-10 承認: 塗り・縁・線の別でもテイク（塗りだけ）と見分ける）
-  // ホバー・選択したノート（1 つ）と対のガイドは、塗りを濃く・縁を明るく太く（guidepair.js）
+  // ガイドはホバー・選択で見た目を変えない（静かな参照。2026-10-11 承認。ホバーの強調はテイクのノートだけ）
   // 「ガイドに合わせる」を開いている間だけ、**対応付けたガイドノートだけ通常の濃さ**で、
   // 他は薄くする（何がどこへ動くかを読めるように。要素は足さず濃さだけ変える）。
   const hmax = blobHMax();
   if (S.showGuide && S.vd.guide) {
-    const pairId = guidePairOf(pairFocus())?.id;
     const focus = S.plan?.data?.kind === 'guide' ? S.plan.guides : null;
     const spans = [];
     for (const g of S.vd.guide_notes || []) {
@@ -905,9 +882,8 @@ export function render() {
       if (focus && on) spans.push([g.start_sec, g.end_sec]);
       const d = blobD(guideBlobPts(g, hmax));
       if (!d) continue;
-      const hi = pairId === g.id;
-      s += `<path data-guide="${g.id}"${hi ? ' data-pair="1"' : ''} d="${d}" fill="${GUIDE}" fill-opacity="${hi ? GL.fillPair : on ? GL.fill : GL.fillDim}"`
-        + ` stroke="${hi ? GUIDE_HI : GUIDE}" stroke-width="${hi ? GL.edgePairWidth : GL.edgeWidth}" stroke-opacity="${hi ? 1 : on ? GL.edge : GL.edgeDim}" pointer-events="none"/>`;
+      s += `<path data-guide="${g.id}" d="${d}" fill="${GUIDE}" fill-opacity="${on ? GL.fill : GL.fillDim}"`
+        + ` stroke="${GUIDE}" stroke-width="${GL.edgeWidth}" stroke-opacity="${on ? GL.edge : GL.edgeDim}" pointer-events="none"/>`;
     }
     const gs = S.vd.f0.guide_sec || []; const gm = S.vd.f0.guide_midi || [];
     if (focus) {
@@ -1012,7 +988,8 @@ export function render() {
     const bc = bandColor(n);
     const bd0 = blobsSplit(takeBlobs(n, hmax, npc), cxs);
     // 手動 = 白の帯は塗りを濃くして白の縁を付ける（index.html の [data-man]。暗い背景で灰に見えないように）
-    if (bd0.main) s += `<path class="blob" data-blob="${n.id}"${bc === MANUAL ? ' data-man="1"' : ''} d="${bd0.main}" fill="${bc}" pointer-events="none"/>`;
+    // style の --bc は、ホバーしたときの縁の色（index.html の #roll .nb:hover .blob）
+    if (bd0.main) s += `<path class="blob" data-blob="${n.id}"${bc === MANUAL ? ' data-man="1"' : ''} d="${bd0.main}" fill="${bc}" style="--bc:${bc}" pointer-events="none"/>`;
     // AI（Claude Code など）の編集が最後に当たっているノートは、帯の縁を AI の色に（state.js の aiNotesOf）
     if (bd0.main && S.aiNotes.has(n.id)) s += `<path data-ai="${n.id}" d="${bd0.main}" fill="none" stroke="${AI_EDGE}" stroke-width="1.2" stroke-opacity=".9" pointer-events="none"/>`;
     if (bd0.cons) s += `<path class="blob" data-cons="${n.id}" d="${bd0.cons}" fill="${desat(bc)}" pointer-events="none"/>`;
@@ -1198,7 +1175,7 @@ export function render() {
   s += `<rect data-keys="1" x="0" y="${ROLL_T}" width="${KEYS_W}" height="${f1(ROLL_B - ROLL_T)}" fill="transparent" style="cursor:default"/>`;
   // タイムスケールは帯・線の後に描く（縦に拡大・スクロールして上にはみ出した帯を隠す）
   s += scaleSvg();
-  s += tipStr + corrTip() + guideDiffTip();
+  s += tipStr + corrTip();
 
   // ---- 歌詞・音素レーン（かな 1 段＋音素 1 段。子音は暗く、母音は明るく）
   s += `<rect data-lane="1" x="0" y="${ROLL_B}" width="${W}" height="${LANE_H}" fill="#121214" style="cursor:text"/>`
