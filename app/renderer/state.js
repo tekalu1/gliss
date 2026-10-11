@@ -10,6 +10,7 @@
 // プレビューの規則を画面側に写さないので、ドラッグ中と離した後がずれない。
 
 import { COLORS } from './palette.js';
+import { parseMaterials, strengthDelta } from './strength.js';
 // 色の定義は palette.js（補正の度合いの色は corr.js）
 export { COLORS };
 
@@ -45,6 +46,8 @@ export const S = {
   // エンジンの計画（plan_edit）。{ data, x, x0, pitch, pitch0, guides }
   //   x / pitch    いまの値（タイミング / ピッチの強度。端・移動では x = 秒）
   //   x0 / pitch0  表示中の view data がすでに当たっている値（ポップアップ内の当て直し）
+  //   str / str0   音程の割合（ガイドに合わせる。{ center, shape, includeManual, restart }。null = 動かしていない）
+  //                のいまの値と、表示中の view data に当たっている値（strength.js）
   plan: null,
   pendingPlan: false,  // 端・移動のドラッグを離して、計画の確定を待っている間
   ph: null,            // export_view_data の phonemes ブロック（歌詞が無ければ null）
@@ -294,7 +297,8 @@ export function editedCurve() {
   const shape = S.plan?.data?.params?.match_pitch_shape ? S.plan?.shapeFrames : null;
   const shapeStrength = shape ? (S.plan.pitch || 0) - (S.plan.pitch0 || 0) : 0;
   const shapeMidi = ([h0, h1, w], strength) => 69 + 12 * Math.log2((h0 + strength * w * (h1 - h0)) / 440);
-  const hasPitch = S.local.pitch.size > 0 || !!(S.plan && S.plan.data && S.plan.data.pitch
+  const sp = strengthPreview();
+  const hasPitch = S.local.pitch.size > 0 || !!sp?.size || !!(S.plan && S.plan.data && S.plan.data.pitch
     && Object.keys(S.plan.data.pitch).length && (S.plan.pitch || 0) !== (S.plan.pitch0 || 0));
   const cc = planConnChanges();
   if (!hasPitch && !S.trPreview && !S.stroke && !S.strokesAside.length && !cc) return base;
@@ -311,6 +315,7 @@ export function editedCurve() {
         const frame = shape.get(i);
         out[i] += shapeMidi(frame, S.plan.pitch || 0) - shapeMidi(frame, S.plan.pitch0 || 0);
       }
+      if (sp?.has(i)) out[i] += sp.get(i);
     }
   }
   // 計画で接続が変わる境目（Alt の切り離し = つなぎが消える、吸着 = つなぎが生まれる）も
@@ -947,17 +952,39 @@ export function setBoundaryDrag(boundaryId, dt) {
   return d;
 }
 
-/** 計画を画面に載せる（`plan_edit` の JSON）。x / pitch は 0 から。 */
+/** 計画を画面に載せる（`plan_edit` の JSON）。x / pitch は 0 から。
+ *  音程の割合（data.strength）の計画は、載せたときの線（strView0）をプレビューの基準に持つ。 */
 export function setPlan(data, extra = {}) {
   const shapeFrames = new Map((data?.pitch_curve || []).map(([t, h0, h1, w]) => [frameIndex(t), [h0, h1, w]]));
+  const strength = data?.strength || null;
   S.plan = data ? {
     data, x: 0, x0: 0, pitch: 0, pitch0: 0,
     shapeFrames,
+    str: null, str0: null,
+    strMats: strength ? parseMaterials(strength) : null,
+    strView0: strength && S.vd ? S.vd.f0.take_edited_midi.slice() : null,
     guides: new Set((data.pairs || []).flatMap((p) => p.guide)),
     takes: new Set((data.pairs || []).flatMap((p) => p.take)),
     ...extra,
   } : null;
   invalidateWarp();
+}
+
+let _strCache = null;
+/** 音程の割合のプレビュー: フレーム → 足す半音（表示中の view data から、いまのつまみの値まで）。無ければ null。
+ *  式はエンジンの確定と同じ（strength.js）。値はつまみが変わったときだけ作り直す。 */
+export function strengthPreview() {
+  const pl = S.plan;
+  const st = pl?.data?.strength;
+  if (!st || !pl.strMats || (!pl.str && !pl.str0)) return null;
+  const key = JSON.stringify([pl.str, pl.str0]);
+  if (_strCache && _strCache.pl === pl && _strCache.key === key) return _strCache.map;
+  const v0 = pl.strView0;
+  const delta = strengthDelta(st, pl.strMats, pl.str, pl.str0, v0 ? (k) => v0[frameIndex(k * st.hop)] : null);
+  const map = new Map();
+  for (const [k, { d }] of delta) map.set(frameIndex(k * st.hop), d);
+  _strCache = { pl, key, map };
+  return map;
 }
 
 /** 計画の x を動かす（範囲で止める）。止めた後の値を返す。 */

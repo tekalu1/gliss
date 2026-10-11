@@ -548,9 +548,11 @@ export async function requestPlan(args) {
  *
  * ポップアップ（ガイドに合わせる）は `replaces` に前回の changeset を渡す。エンジンが
  * それを取り消してから**同じ計画**を当てるので、プレビューと確定が同じ基準になる
- * （取り消しの履歴でも前回の項目と入れ替わる = ポップアップ 1 回 = 取り消し 1 回）。 */
+ * （取り消しの履歴でも前回の項目と入れ替わる = ポップアップ 1 回 = 取り消し 1 回）。
+ * strength = 音程の割合 { center, shape, includeManual, restart }（計画に data.strength があるとき。
+ * center / shape = null はノートごとの今の割合のまま。`timing.apply_plan`）。 */
 export async function applyPlan({ planId, x = null, pitch = null, replaces = null, drag = true, label = null,
-  onTiming = null }) {
+  onTiming = null, strength = null }) {
   // ドラッグは結果を待たずに次へ（計画のプレビューは結果を採るまで残す）。ポップアップは当て直しの基準が要るので待つ
   let ok = false;
   const after = () => {
@@ -560,10 +562,12 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
     else if (S.plan && ok && S.plan.data.plan_id === planId) {   // 表示中の view data がこの値まで当たっている
       S.plan.x0 = x || 0;                // （スライダーの今の値ではなく、確定した値）
       S.plan.pitch0 = pitch || 0;
+      S.plan.str0 = strength;
       invalidateWarp();
     }
   };
-  if (!(Math.abs(x || 0) > 1e-9) && !(Math.abs(pitch || 0) > 1e-9) && !replaces) {
+  const str = strength && (strength.center != null || strength.shape != null) ? strength : null;
+  if (!(Math.abs(x || 0) > 1e-9) && !(Math.abs(pitch || 0) > 1e-9) && !replaces && !str) {
     ok = true;
     after();
     render();
@@ -572,6 +576,8 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
   const cs = await run(async () => {
     const r = await call('apply_plan', {
       plan_id: planId, x, pitch, replaces, author: AUTHOR, label,
+      ...(str ? { pitch_center: str.center, pitch_shape: str.shape, include_manual: !!str.includeManual,
+        restart: str.restart?.length ? str.restart : null } : {}),
     }, { busy: false });
     ok = true;
     if (r.snapped) status('接続した');

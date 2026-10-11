@@ -281,6 +281,19 @@ html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
 .pop label .l{width:4.5em}
 .pop input[type=range]{flex:1;accent-color:#d6d6d6;margin:0}
 .pop-v{font-variant-numeric:tabular-nums;width:3em;text-align:right;color:var(--fg)}
+.pop label .l,.pop .pop-v{flex:none}
+.pop input[type=range]{min-width:0}
+.pop .pop-v.mix{font-size:11px;color:#f0b35c}
+.pop-sub{color:var(--fg2);font-size:11px;margin:-2px 0 2px 5.4em}
+.pop-sub[hidden],.pop .fine[hidden],#popStale[hidden]{display:none}
+.pop hr{border:0;border-top:1px solid #34343a;margin:8px 0}
+.pop .chk{color:var(--fg)}
+.pop .chk input{accent-color:#d6d6d6;margin:0}
+.pop .chk input:disabled+span{opacity:.5}
+.pop .fine{color:var(--fg2);font-size:11px;margin:4px 0 0}
+.pop .warn{color:#f0b35c;font-size:11px;margin:6px 0 4px}
+#popStaleB{background:#2f2f34;border:0;color:var(--fg);font:inherit;padding:3px 10px;cursor:pointer}
+#popStaleB:hover{background:#3a3a40}
 /* 右クリックのメニュー（issue #17。モック v3 と同じ）: 左にチェックの列、右にキー、区切りは細い線 */
 .menu{padding:4px 0;min-width:210px;z-index:4;max-height:calc(100% - 4px);overflow-y:auto;scrollbar-width:thin;scrollbar-color:#3a3a3e transparent}
 .menu button{display:flex;width:100%;text-align:left;background:none;border:0;color:var(--fg);padding:4px 14px 4px 6px;font:inherit;font-size:12px;line-height:1.6;cursor:pointer}
@@ -493,9 +506,16 @@ html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
   <div class="status" id="status"></div>
   <div class="pop" id="pop" hidden role="dialog" aria-label="ガイドに合わせる">
     <div class="pop-t">ガイドに合わせる <span id="popScope">全体</span></div>
-    <label><span class="l">ピッチ</span><input type="range" id="popPitch" min="0" max="100" value="0" aria-label="ピッチの強度"><span class="pop-v" id="popPitchV">0%</span></label>
+    <label><span class="l">音程</span><input type="range" id="popPitch" min="0" max="100" value="0" aria-label="音程"><span class="pop-v" id="popPitchV">0%</span></label>
+    <div class="pop-sub" id="popPitchS" hidden></div>
+    <label><span class="l">線の形（揺れ）</span><input type="range" id="popShape" min="0" max="100" value="0" aria-label="線の形（揺れ）"><span class="pop-v" id="popShapeV">0%</span></label>
+    <div class="pop-sub" id="popShapeS" hidden></div>
+    <hr>
     <label><span class="l">タイミング</span><input type="range" id="popTime" min="0" max="100" value="0" aria-label="タイミングの強度"><span class="pop-v" id="popTimeV">0%</span></label>
-    <label><input type="checkbox" id="popPitchShape" checked>線の形もガイドに合わせる</label>
+    <hr>
+    <label class="chk"><input type="checkbox" id="popManual"><span id="popManualL">手で直したノートも含める（0）</span></label>
+    <div class="fine" id="popManualF" hidden>手で直したノートは動かしません。含めると、手で直した形は割合どおりに作り直されます。</div>
+    <div id="popStale" hidden><div class="warn" id="popStaleT"></div><button type="button" id="popStaleB">今の状態で合わせ直す</button></div>
   </div>
   <div class="pop" id="popTr" hidden role="dialog" aria-label="つなぎのなだらかさ">
     <div class="pop-t">つなぎのなだらかさ <span id="popTrScope">全体</span></div>
