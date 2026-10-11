@@ -10,6 +10,9 @@
 - 記録の op を読み飛ばす（前の版のエンジン）と同じ編集リストになる
 - 割合の違う隣との境目に段差が無い。100% は今までの「Hz で寄せる」と同じ線
 - オリジナルに戻すと記録も無くなる
+- タイミングの 100% の動き（timing_nodes）を記録に残す（割合を変える操作はまだ無い）: 頭ごとに節があり、
+  接続の境目は次のノートが持つ。d は計画の d と同じ。0.0 でも残り、保存・読み直しで変わらない。
+  timing の無い前の形の記録は「タイミングは変えられない」（unsupported）と読む
 """
 import copy
 import json
@@ -30,10 +33,12 @@ NOTES = [(0.5, 0.40, 60), (0.9, 0.40, 62), (1.3, 0.45, 64), (2.3, 0.5, 67), (2.8
 DUR = 4.0
 
 
-def _voice(transpose=0.0, seed=0, vib_hz=5.5, vib_c=30.0):
+def _voice(transpose=0.0, seed=0, vib_hz=5.5, vib_c=30.0, shift=None):
+    """shift = ノートごとに頭をずらす秒（尻はそのまま）。"""
     n = int(SR * DUR)
     y = np.zeros(n)
-    for st, d, midi in NOTES:
+    for (st, d, midi), sh in zip(NOTES, shift or [0.0] * len(NOTES)):
+        st, d = st + sh, d - sh
         a, b = int(st * SR), int((st + d) * SR)
         t = np.arange(b - a) / SR
         f0 = 440.0 * 2 ** ((midi + transpose - 69) / 12)
@@ -46,21 +51,40 @@ def _voice(transpose=0.0, seed=0, vib_hz=5.5, vib_c=30.0):
     return y.astype("float32")
 
 
-@pytest.fixture(scope="module")
-def seed(tmp_path_factory):
-    """解析は 1 回だけ。テストごとにキャッシュを写して開き直す。"""
+def _seed(tmp_path_factory, shift=None):
     from vocal_engine.project import Project
     base = tmp_path_factory.mktemp("strength")
     take, guide = str(base / "take.wav"), str(base / "guide.wav")
     sf.write(take, _voice(), SR, subtype="FLOAT")
-    sf.write(guide, _voice(0.5, 2, 4.5, 60.0), SR, subtype="FLOAT")
+    sf.write(guide, _voice(0.5, 2, 4.5, 60.0, shift), SR, subtype="FLOAT")
     p = Project.open(take, guide, project_dir=str(base / "seed"), memo=False)
     p.analyze()
     return take, guide, p.dir
 
 
+@pytest.fixture(scope="module")
+def seed(tmp_path_factory):
+    """解析は 1 回だけ。テストごとにキャッシュを写して開き直す。"""
+    return _seed(tmp_path_factory)
+
+
+@pytest.fixture(scope="module")
+def seed_t(tmp_path_factory):
+    """ガイドの頭がノートごとにずれた曲（タイミングの動きがある）。"""
+    return _seed(tmp_path_factory, [0.0, 0.05, -0.04, 0.06, 0.03])
+
+
 @pytest.fixture
 def proj(seed, tmp_path):
+    yield from _open(seed, tmp_path)
+
+
+@pytest.fixture
+def proj_t(seed_t, tmp_path):
+    yield from _open(seed_t, tmp_path)
+
+
+def _open(seed, tmp_path):
     from vocal_engine import mcp_server as S
     from vocal_engine.project import Project
     take, guide, d0 = seed
@@ -321,7 +345,10 @@ def test_zero_removes_the_line(proj):
     _ok(S.correct_to_guide(pitch_strength=0.7, timing_strength=0.0))
     _ok(S.set_correction_strength(center=0.0, shape=0.0))
     assert not [e for e in proj.edits if e.kind == "pitch_draw"]
-    assert not _ok(S.get_correction_strength())["notes"]
+    rows = _ok(S.get_correction_strength())["notes"]
+    assert rows and all(r["state"] == "none" for r in rows)
+    # 音程の線だけを外す（タイミングの記録 = 0.0 と節は残る）
+    assert all(r["timing_state"] == "ok" and r["timing"] == 0.0 for r in rows)
     _, _, e = _view(proj)
     assert np.nanmax(np.abs(e - orig)) < 1e-6
 
@@ -382,3 +409,123 @@ def test_full_strength_matches_previous_path(proj):
     _, _, now = _view(proj)
     assert np.nanmax(np.abs(legacy - before)) > 0.2
     assert np.nanmax(np.abs(now - legacy)) < 0.005           # 0.5 セント未満
+
+
+# ---------------------------------------------------------------- タイミングの 100% の動き（timing_nodes）
+def _key(k):
+    return (round(float(k.src), 6), "l" if k.side == "left" else "r")
+
+
+def _recipe_nodes(p):
+    """生きている記録の op の timing_nodes（changeset の順に並べたもの）。"""
+    return [n for c in p.changesets if not c.undone for op in c.ops
+            if op.get("op") == "recipe" for n in op.get("timing_nodes") or []]
+
+
+def test_timing_nodes_cover_heads_and_match_plan(proj_t):
+    """選んだノートごとに頭の節があり、接続の境目（前の尻 = 次の頭）は次のノートが持つ。d は計画の d。"""
+    from vocal_engine import mcp_server as S
+    from vocal_engine.project import timing as TM
+    plan = TM.plan_guide(proj_t)
+    st, nodes = plan.st, plan.recipe_timing["nodes"]
+    ids = [n.id for n in _notes(proj_t)]
+    assert sorted(nodes) == sorted(ids)
+    d_at = {}
+    for i, k in enumerate(st.knots):
+        d_at.setdefault(_key(k), []).append(float(plan.d[i]))
+    connected = 0
+    for nid in ids:
+        mine = {(n["src"], n["side"]): n for n in nodes[nid]}
+        assert all(n["note"] == nid and n["role"] in ("anchor", "interp", "end") for n in nodes[nid])
+        s, e = st.note_knots[nid]
+        assert _key(st.knots[s]) in mine                                 # 頭
+        for n in nodes[nid]:
+            assert any(abs(n["d"] - d) <= 1e-6 for d in d_at[(n["src"], n["side"])])
+        nxt = next((o for o in ids if st.note_knots[o][0] != s
+                    and st.knots[st.note_knots[o][0]].unit == st.knots[e].unit), None)
+        if nxt is not None:                                              # 接続の境目
+            connected += 1
+            assert _key(st.knots[e]) in {(n["src"], n["side"]) for n in nodes[nxt]}
+            assert _key(st.knots[e]) not in mine
+    assert connected >= 2
+    assert max(abs(n["d"]) for ns in nodes.values() for n in ns) > 0.02  # 頭がずれたぶん動く
+    # 当てた記録の節は、計画の節と同じ
+    _ok(S.correct_to_guide(pitch_strength=0.7, timing_strength=1.0))
+    want = sorted((n for ns in nodes.values() for n in ns), key=lambda n: (n["src"], n["side"], n["note"]))
+    assert _recipe_nodes(proj_t) == want
+    rows = _rows(_ok(S.get_correction_strength()))
+    assert all(rows[i]["timing_state"] == "ok" and rows[i]["timing"] == 1.0 for i in ids)
+
+
+def test_timing_nodes_round_trip(proj_t):
+    from vocal_engine import mcp_server as S
+    from vocal_engine.project import Project
+    _ok(S.correct_to_guide(pitch_strength=0.7, timing_strength=0.6))
+    nodes = _recipe_nodes(proj_t)
+    assert nodes
+    g = _ok(S.get_correction_strength())
+    assert all(x["timing_state"] == "ok" and x["timing"] == pytest.approx(0.6) for x in g["notes"])
+    proj_t.save()
+    q = Project.open(proj_t.take["path"], proj_t.guide["path"], project_dir=proj_t.dir, memo=False)
+    q.analyze()
+    assert json.dumps(_recipe_nodes(q)) == json.dumps(nodes)
+    S._state["project"] = q
+    g2 = _ok(S.get_correction_strength())
+    key = lambda r: [(x["note"], x["state"], x["center"], x["timing_state"], x["timing"]) for x in r["notes"]]
+    assert key(g2) == key(g)
+    ls = _ok(S.list_notes())["notes"]
+    assert all(d["guide_strength"]["timing"] == 0.6 for d in ls if d["kind"] == "note")
+
+
+def test_timing_zero_keeps_nodes_and_live_ratio(proj_t):
+    """タイミング 0.0 でも節を残す。記録（ok）のあるノートに 0.0 で合わせ直しても、前の割合と節のまま。"""
+    from vocal_engine import mcp_server as S
+    _ok(S.correct_to_guide(pitch_strength=0.7, timing_strength=0.0))
+    rows = _ok(S.get_correction_strength())["notes"]
+    assert rows and all(r["timing_state"] == "ok" and r["timing"] == 0.0 for r in rows)
+    assert max(abs(n["d"]) for n in _recipe_nodes(proj_t)) > 0.02
+    _ok(S.correct_to_guide(pitch_strength=0.7, timing_strength=0.5))
+    nodes = _recipe_nodes(proj_t)
+    _ok(S.correct_to_guide(pitch_strength=0.4, timing_strength=0.0))
+    rows = _ok(S.get_correction_strength())["notes"]
+    assert all(r["timing_state"] == "ok" and r["timing"] == 0.5 for r in rows)
+    assert all(r["center"] == pytest.approx(0.4) for r in rows if r["state"] == "ok")
+    assert _recipe_nodes(proj_t) == nodes                    # 0.0 の確定は節を書かない
+
+
+def test_old_recipe_reads_timing_unsupported(proj_t):
+    """timing の無い前の形の記録: 音程は今までどおり変えられ、タイミングは unsupported（割合は None）。"""
+    from vocal_engine import mcp_server as S
+    from vocal_engine.project import Project
+    _ok(S.correct_to_guide(pitch_strength=0.7, timing_strength=1.0))
+    for c in proj_t.changesets:
+        for op in c.ops:
+            if op.get("op") == "recipe":
+                op.pop("timing_nodes", None)
+                for ent in op["notes"].values():
+                    ent.pop("timing", None)
+    proj_t.save()
+    q = Project.open(proj_t.take["path"], proj_t.guide["path"], project_dir=proj_t.dir, memo=False)
+    q.analyze()
+    S._state["project"] = q
+    rows = _ok(S.get_correction_strength())["notes"]
+    assert rows and all(r["state"] == "ok" and r["timing_state"] == "unsupported" and r["timing"] is None
+                        and r["timing_reason"] for r in rows)
+    r = _ok(S.set_correction_strength(center=0.3, shape=0.3))
+    assert r["changeset"] and all(x["center"] == pytest.approx(0.3) for x in r["notes"] if x["state"] == "ok")
+
+
+def test_timing_record_follows_undo_reset_and_discard(proj_t):
+    from vocal_engine import mcp_server as S
+    ids = [n.id for n in _notes(proj_t)]
+    r = _ok(S.correct_to_guide(pitch_strength=0.7, timing_strength=1.0))
+    _ok(S.reset_to_original(note_ids=[ids[0]]))
+    rows = _rows(_ok(S.get_correction_strength(note_ids=ids)))
+    assert rows[ids[0]]["timing_state"] == "none" and rows[ids[1]]["timing_state"] == "ok"
+    proj_t.undo()                                            # オリジナルに戻すを取り消す
+    _ok(S.undo(changeset_id=r["changeset"]))
+    rows = _rows(_ok(S.get_correction_strength(note_ids=ids)))
+    assert all(rows[i]["timing_state"] == "none" for i in ids)
+    proj_t.discard(r["changeset"])
+    cs = proj_t.find_changeset(r["changeset"])
+    assert not [op for op in cs.ops if op.get("op") == "recipe" and "timing_nodes" in op]
