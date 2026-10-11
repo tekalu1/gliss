@@ -14,6 +14,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <vector>
 
 namespace gliss
 {
@@ -178,6 +179,8 @@ private:
     void targetPreview (const juce::var& arg, const char* mode);
     /** 試聴を止める（世代を進めて音を止め、始めていたら preview: stop の行を書く）。 */
     void stopPreviewAudio();
+    /** DAW で最後に選んだ（空でない）選択のトラック。選択が空のときは変えない。生きているトラックだけを返す（壊れたものは外す）。 */
+    std::vector<const juce::ARARegionSequence*> liveSelectedSequences();
     /** 準備した試聴のクリップを、取り消されていなければ EditorRenderer へ公開して done を呼ぶ（メッセージスレッドへ戻って行う）。 */
     void deliverPreview (std::weak_ptr<bool> token, std::shared_ptr<PreviewAudio> audio, std::uint64_t generation,
                          std::uint64_t cancellationEpoch, std::unique_ptr<PreviewAudio::Clip> clip, const juce::String& failure,
@@ -196,6 +199,10 @@ private:
     std::shared_ptr<PreviewAudio> previewAudio = std::make_shared<PreviewAudio>();
     std::atomic<std::uint64_t> previewGeneration { 0 };
     bool previewStarted = false;      // preview: start を書いて、まだ preview: stop を書いていない（メッセージスレッドだけ）
+    // DAW で最後に選んだ空でないイベントのトラック（リージョン列）。Studio Pro は空の選択を何度も送るので、空は覚え直さない。
+    // 試聴を足すインスタンスを、このトラックのものに絞る（メッセージスレッドだけ。壊れたトラックは liveSelectedSequences で外す）
+    std::vector<const juce::ARARegionSequence*> selectedSequences;
+    std::map<std::uint64_t, juce::String> previewTrackNames;   // 今の試聴で足しうる renderer の id → そのインスタンスのトラック名（preview: stop の行）
     std::atomic<bool> compare { false };
 
     // ホストにノートを「まだ無い」と答えた修飾（m:<ID>）・ソース（s:<ID>）。ホストの読み出しのスレッドとメッセージスレッドが触る
