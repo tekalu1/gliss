@@ -291,6 +291,51 @@ def test_syllable_ends_are_anchors_only_with_confirmed_lyrics(synth, tmp_path):
     shutil.rmtree(p.dir, ignore_errors=True)
 
 
+def test_note_timing_ratio_moves_syllable_end_and_keeps_consonants(synth, tmp_path):
+    """ノートごとのタイミングの割合（2026-10-11 承認）: 確定の歌詞で 100% に合わせた後、休みの手前の音節の終わりを
+    持つノートだけ 30% にすると、そのノートの頭と音節の終わりが一緒に 30% の位置へ動く。子音の長さは変わらず、
+    並びは入れ替わらず、ノートは 20 ms 以上。"""
+    from vocal_engine.project import strength as SG
+    from vocal_engine.project import timing as TM
+    guide, _ = synth
+    p = _open(tmp_path, guide, name="ratio")
+    text = M.text("C.lyrics")
+    p.set_lyrics(text, source="take")
+    p.set_lyrics(text, source="guide")
+    p.analyze_phonemes("take")
+    p.analyze_phonemes("guide")
+    plan = TM.plan_guide(p)
+    TM.apply_plan(p, plan, timing=1.0)
+    ends = {e["take_sec"] for e in plan.timing if e.get("kind") == "end"}
+    owner = None
+    for nid, ns in sorted(plan.recipe_timing["nodes"].items()):
+        mine = [x for x in ns if x["role"] == "end" and round(x["src"], 4) in ends]
+        if mine and any(abs(x["d"]) > 0.005 for x in mine):
+            owner = nid
+            break
+    assert owner, "休みの手前の音節の終わりを持つノートが無い"
+    keep = [(plan.st.knots[pc.a], plan.st.knots[pc.b]) for pc in plan.st.pieces if pc.mode == "keep"]
+    assert keep                                                  # 子音（長さを変えない区間）がある
+
+    def at(src, side):
+        return TM.current_map(p).at(src, "left" if side == "l" else "right")
+
+    nodes = SG.timing_nodes(p, owner)
+    before = {(x["src"], x["side"]): at(x["src"], x["side"]) for x in nodes}
+    lens = [TM.current_map(p).at(b.src, b.side) - TM.current_map(p).at(a.src, a.side) for a, b in keep]
+    _, info = TM.apply_plan(p, TM.plan_guide(p, [owner]), timing=0.3)
+    assert info["timing_ratio"]["notes"] == [owner] and not info["timing_ratio"]["unreachable"]
+    for x in nodes:
+        assert abs(at(x["src"], x["side"]) - (before[(x["src"], x["side"])] - 0.7 * x["d"])) < 1e-6, x
+    tm = TM.current_map(p)
+    assert np.allclose([tm.at(b.src, b.side) - tm.at(a.src, a.side) for a, b in keep], lens, atol=1e-6)
+    assert np.all(np.diff(np.asarray(tm.out)) >= -1e-9)
+    for n in p.take_notes:
+        if n.kind == "note":
+            assert p.edited_sec(n.end_sec) - p.edited_sec(n.start_sec) >= 0.02 - 1e-6
+    shutil.rmtree(p.dir, ignore_errors=True)
+
+
 def test_guide_without_anchors_reports_it(synth, tmp_path, monkeypatch):
     """確かな頭の組が 1 つも無いガイド（158 秒の曲のような別演奏）: タイミングは 1 つも動かさず、
     計画と MCP の結果に「合わせられない」と理由を出す。"""
