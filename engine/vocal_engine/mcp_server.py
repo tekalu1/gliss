@@ -1557,6 +1557,9 @@ def _apply_now(plan, x, author, label, note=None, pitch=None, hist=None, **stren
            "next": "render_preview / render_view / remeasure で確かめる。戻すなら undo"}
     if "pitch_notes" in info:
         out["strength_notes"] = info["pitch_notes"]
+    if "timing_ratio" in info:
+        out["timing"] = info.get("timing")
+        out["timing_ratio"] = info["timing_ratio"]
     if note and cs:
         out["note"] = note
     return _ok(**out)
@@ -1739,7 +1742,7 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
               detach: bool = False, start_sec: float = None, end_sec: float = None,
               threshold_cents: float = 0.0, threshold_ms: float = 0.0,
               match_pitch_shape: bool = True, edited_notes: str = "adjust",
-              fit: bool = False) -> dict:
+              fit: bool = False, include_manual: bool = False, restart: list = None) -> dict:
     """**計画**を作る（まだ編集しない）。画面がドラッグの開始・「ガイドに合わせる」を開いた時点で呼ぶ。
 
     計画 = 「節（ノートの頭・尻・音素境界）の編集後の秒 = cur + d × x」。
@@ -1757,6 +1760,9 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
     guide では `correspondence`（ノートごとの対応と理由。`correct_to_guide` と同じ）と `info.one_to_many`
     （テイクの 1 ノートに高さの違うガイドのノートが 2 つ以上重なる所）も返す。fit=True なら、タイミング・ピッチとも
     100% で当てたときの当てはまりの予測（`fit`。`correct_to_guide` と同じ。少し時間がかかる）。
+    guide では**ノートごとのタイミングの割合**のプレビュー `timing_ratio`（2026-10-11 承認）も返す（中身の JSON には
+    節の動きも入る）。確定は `apply_plan(plan_id, timing=割合)`。include_manual・restart はそのプレビューと確定に使う
+    （合わせた後に手で直したノートも含める・変えられないノートを今の状態から合わせ直す。apply_plan にも同じ値を渡す）。
     """
     from .project import timing as TM
     p = _project()
@@ -1777,6 +1783,8 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
                              threshold_ms=float(threshold_ms),
                              match_pitch_shape=bool(match_pitch_shape),
                              edited_notes=edited_notes)
+        plan.params["include_manual"] = bool(include_manual)
+        plan.params["restart"] = sorted(restart or [])
     else:
         raise ProjectError("op は edge / move / guide")
     _remember(plan)
@@ -1786,6 +1794,7 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
         extra["correspondence"] = TM.correspondence_summary(plan)
         if fit:
             extra["fit"] = _plan_fit(p, plan, 1.0, 1.0, ids)
+        extra["timing_ratio"] = _ratio_summary(p, plan)
     return _ok(plan_id=plan.id, kind=plan.kind, path=path,
                x_range=[round(plan.x_lo, 6), round(plan.x_hi, 6)],
                snap_x=None if plan.snap_x is None else round(plan.snap_x, 6),
@@ -1798,16 +1807,21 @@ def plan_edit(op: str, note_id: str = None, note_ids: list = None, side: str = N
 def apply_plan(plan_id: str, x: float = None, pitch: float = None, replaces: str = None,
                author: str = "human", label: str = None, pitch_center: float = None,
                pitch_shape: float = None, include_manual: bool = None,
-               restart: list = None) -> dict:
+               restart: list = None, timing: float = None) -> dict:
     """`plan_edit` で作った計画を x（と pitch）で確定する。1 つの changeset。
 
     x: edge / move は秒、guide はタイミングの強度（0〜1）。範囲の外は端に丸める
+    timing: guide の**ノートごとのタイミングの割合**（0〜1。2026-10-11 承認）。選んだノートのタイミングをこの割合に
+        する（記録の無いノートは今の状態からこの割合だけ寄せる）。x とは同時に使えない（x は 0.4.0 までの
+        「計画の 100% の動きを x 倍」のまま）。結果の `timing_ratio` に、変えたノート・ゆずった前のノート・
+        届かなかったノートを返す
     pitch: guide のピッチの強度（0〜1）。線の形で合わせる計画では pitch_center = pitch_shape = pitch
         （手で直したノートも含める）
     pitch_center / pitch_shape: guide の音程（中心）・線の形（揺れ）の割合（0〜1）。省略した側は
         ノートごとの今の割合のまま（記録の無いノートは 0）。画面の「ガイドに合わせる」の 2 本のスライダー
     include_manual: 合わせた後に手で直したノートも含める（既定 含めない。手の分は差分として残る）
     restart: 割合を変えられなくなったノート（解析し直した等）のうち、今の状態から合わせ直すもの（ノートの ID）
+        （timing を渡したとき、include_manual・restart を省くと plan_edit に渡した値を使う）
     replaces: 先に取り消す changeset（「ガイドに合わせる」のポップアップ内の当て直し。
         取り消した後の状態 = 計画を作ったときの状態なので、同じ計画がそのまま当たる）
     label: 取り消しの履歴に出す名前（既定は「ノートの長さ」など。画面の右クリック「つなぐ」が使う）
@@ -1825,9 +1839,24 @@ def apply_plan(plan_id: str, x: float = None, pitch: float = None, replaces: str
         replanned = True
     t = None if x is None or float(x) == 0.0 else float(x)
     pv = None if pitch is None or float(pitch) == 0.0 else float(pitch)
+    if timing is not None:
+        if plan.kind != "guide":
+            raise ProjectError("timing は guide の計画だけ（edge / move は x）")
+        if t is not None:
+            raise ProjectError("x と timing は同時に指定できない")
+        if not 0.0 <= float(timing) <= 1.0:
+            raise ProjectError("timing は 0〜1")
+        # 省いたら plan_edit に渡した値（プレビューと同じ）。pitch だけの呼び方は今までどおり
+        if include_manual is None:
+            include_manual = plan.params.get("include_manual")
+        if restart is None:
+            restart = plan.params.get("restart")
     desc = {"edge": "端を %+.0f ms", "move": "移動 %+.0f ms"}.get(plan.kind)
     if desc:
         desc = desc % ((t or 0.0) * 1000)
+    elif timing is not None:
+        desc = "ガイドへ寄せる（音程 %s / 線の形 %s / タイミングの割合 %.0f%%）" % (
+            _pct(pitch_center), _pct(pitch_shape), float(timing) * 100)
     elif pitch_center is not None or pitch_shape is not None:
         desc = "ガイドへ寄せる（音程 %s / 線の形 %s / タイミング %.0f%%）" % (
             _pct(pitch_center), _pct(pitch_shape), (t or 0) * 100)
@@ -1837,7 +1866,8 @@ def apply_plan(plan_id: str, x: float = None, pitch: float = None, replaces: str
     r = _apply_now(plan, t, author, desc, pitch=pv, hist=hist,
                    pitch_center=None if pitch_center is None else float(pitch_center),
                    pitch_shape=None if pitch_shape is None else float(pitch_shape),
-                   include_manual=include_manual, restart=list(restart or []))
+                   include_manual=include_manual, restart=list(restart or []),
+                   timing=None if timing is None else float(timing))
     r["replanned"] = replanned
     r["plan_id"] = plan.id
     return r
@@ -1867,8 +1897,11 @@ def _strength_rows(p, ids=None):
 def _strength_summary(rows):
     """選んだノートの割合のまとめ（画面のポップアップの「混在」と同じ）。"""
     out = {}
-    for k in ("center", "shape"):
-        vs = [r[k] for r in rows if r["state"] != "stale"]
+    for k in ("center", "shape", "timing"):
+        if k == "timing":
+            vs = [r[k] for r in rows if r["timing_state"] in ("ok", "none")]
+        else:
+            vs = [r[k] for r in rows if r["state"] != "stale"]
         if not vs:
             out[k] = None
             continue
@@ -1886,10 +1919,11 @@ def get_correction_strength(note_ids: list = None, start_sec: float = None,
     notes[]: state（ok = 割合を変えられる / stale = 変えられない（reason に理由。解析し直した・
     ガイドを差し替えた・ノートを分割した・補正の線が外された など）/ none = 記録が無い（0% として扱う））、
     center（音程）・shape（線の形 = 揺れ）の割合 0〜1、manual（合わせた後に手で直した。既定では割合を変えない）。
-    タイミング（記録だけ。割合を変える操作はまだ無い）: timing = 今かかっている割合 0〜1、timing_state（ok /
-    stale（timing_reason）/ none（記録が無い）/ unsupported（タイミングの動きを残していない前の形の記録。timing は null））、
-    timing_manual（合わせた後にタイミングを手で直した）。
-    summary: 選んだノートの割合の範囲（mixed = ノートごとに違う）。対象: note_ids か範囲、省略で記録のあるノート全部。"""
+    タイミング（2026-10-11 承認。`set_correction_strength(timing=)` で変える）: timing = 今かかっている割合 0〜1、
+    timing_state（ok = 変えられる / stale = 変えられない（timing_reason）/ none（記録が無い。0% として扱う）/
+    unsupported（タイミングの動きを残していない前の形の記録。timing は null））、
+    timing_manual（合わせた後にタイミングを手で直した。既定では割合を変えない）。
+    summary: 選んだノートの割合の範囲（center・shape・timing。mixed = ノートごとに違う）。対象: note_ids か範囲、省略で記録のあるノート全部。"""
     p = _project()
     p.reload_if_changed()
     ids = None
@@ -1904,23 +1938,26 @@ def get_correction_strength(note_ids: list = None, start_sec: float = None,
 
 @_tool
 def set_correction_strength(note_ids: list = None, start_sec: float = None, end_sec: float = None,
-                            center: float = None, shape: float = None,
+                            center: float = None, shape: float = None, timing: float = None,
                             include_manual: bool = False, restart: bool = False,
                             author: str = "ai") -> dict:
-    """「ガイドに合わせる」の**音程の割合を後から変える**（1 つの changeset。undo 1 回で戻る）。
+    """「ガイドに合わせる」の**音程・タイミングの割合を後から変える**（1 つの changeset。undo 1 回で戻る）。
 
     center: 音程（ノートの中心）の割合 0〜1、shape: 線の形（揺れ）の割合 0〜1。省いた側はノートごとの
     今の割合のまま。記録の無いノートは 0% として扱い、今の状態からその割合だけ寄せる。
     割合 0（両方）のノートは補正の線を外す。隣と割合が違う境目は 40 ms ほどでなだらかにつなぐ。
     include_manual: 合わせた後に手で直したノートも変える（手の分は差分として残る。既定は変えない）
     restart: 変えられなくなった（stale）ノートを、今の状態から合わせ直す（既定は飛ばして skipped に返す）
-    タイミングは変えない（`correct_to_guide` の timing_strength）。対象: note_ids か範囲、省略で全体。"""
+    timing: タイミングの割合 0〜1（2026-10-11 承認。省くとタイミングは変えない）。ノートの頭・切り離した尻・
+    休みの手前の音節の終わりを「0% の位置 + 割合 × 100% の動き」へ動かす。隙間を挟んだ前のノートの尻は
+    ゆずって短くなり、ゆずれないときは手前で止まる（`timing_ratio.unreachable`）。手で直したノート・
+    変えられないノートの扱いは音程と同じ（include_manual・restart）。対象: note_ids か範囲、省略で全体。"""
     from .project import timing as TM
     p = _project()
     p.reload_if_changed()
-    if center is None and shape is None:
-        raise ProjectError("center か shape を渡す（0〜1）")
-    for v in (center, shape):
+    if center is None and shape is None and timing is None:
+        raise ProjectError("center・shape・timing のどれかを渡す（0〜1）")
+    for v in (center, shape, timing):
         if v is not None and not 0.0 <= float(v) <= 1.0:
             raise ProjectError("割合は 0〜1")
     ids = None
@@ -1928,23 +1965,47 @@ def set_correction_strength(note_ids: list = None, start_sec: float = None, end_
         ids = _note_ids(None, note_ids, 0.0 if start_sec is None else start_sec,
                         p.duration_sec + 1 if end_sec is None else end_sec)
     plan = TM.plan_guide(p, ids, match_pitch_shape=True)
-    if plan.strength is None:
+    if plan.strength is None and (center is not None or shape is not None):
         raise ProjectError("ガイドの音程が無い（analyze_take でガイドを解析する）")
-    before = {r["note"]: r for r in _strength_rows(p, ids or sorted(plan.strength["notes"]))}
-    stale = sorted(n for n, r in plan.strength["notes"].items() if r["sel"] and r["state"] == "stale")
-    label = "ガイドの割合を変える（音程 %s / 線の形 %s）" % (_pct(center), _pct(shape))
+    if timing is not None and plan.recipe_timing is None:
+        raise ProjectError("ガイドのタイミングが無い（analyze_take でガイドを解析する）")
+    if plan.strength is not None:
+        sel = [n for n, v in plan.strength["notes"].items() if v["sel"]]
+    else:
+        sel = sorted(plan.params.get("note_ids") or [n.id for n in TM.pitched_notes(p)])
+    before = {r["note"]: r for r in _strength_rows(p, ids or sel)}
+    stale = set()
+    if plan.strength is not None and (center is not None or shape is not None):
+        stale |= {n for n, r in plan.strength["notes"].items() if r["sel"] and r["state"] == "stale"}
+    if timing is not None:
+        stale |= {n for n in sel if (before.get(n) or {}).get("timing_state") in ("stale", "unsupported")}
+    stale = sorted(stale)
+    label = "ガイドの割合を変える（音程 %s / 線の形 %s / タイミング %s）" % (
+        _pct(center), _pct(shape), _pct(timing))
     r = _apply_now(plan, None, author, label, hist="ガイドに合わせる",
                    pitch_center=None if center is None else float(center),
                    pitch_shape=None if shape is None else float(shape),
-                   include_manual=bool(include_manual), restart=stale if restart else [])
-    sel = [n for n, v in plan.strength["notes"].items() if v["sel"]]
+                   include_manual=bool(include_manual), restart=stale if restart else [],
+                   timing=None if timing is None else float(timing))
     after = _strength_rows(p, sel)
+    manual = sorted(n for n in sel if not include_manual and (
+        (before.get(n, {}).get("manual") and (center is not None or shape is not None))
+        or (before.get(n, {}).get("timing_manual") and timing is not None)))
     r.update(notes=after, summary=_strength_summary(after),
-             skipped={"manual": sorted(n for n in sel if before.get(n, {}).get("manual")
-                                       and not include_manual),
-                      "stale": [] if restart else stale},
+             skipped={"manual": manual, "stale": [] if restart else stale},
              next="戻すなら undo('%s')" % r.get("changeset"))
     return r
+
+
+def _ratio_summary(p, plan):
+    """計画のタイミングの割合のプレビュー（節の動きを除いたもの。中身の JSON には節も入る）。"""
+    from .project import timing_ratio as TR
+    if plan.recipe_timing is None:
+        return None
+    pv = TR.preview(p, plan, bool(plan.params.get("include_manual")), plan.params.get("restart") or ())
+    if pv is None:
+        return None
+    return {k: v for k, v in pv.items() if k not in ("knots", "pieces")}
 
 
 def _replan(p, plan):
@@ -1956,9 +2017,13 @@ def _replan(p, plan):
     if k == "move":
         return TM.plan_move(p, a["note_ids"])
     if k == "guide":
-        return TM.plan_guide(p, a.get("note_ids"), a.get("threshold_cents", 0.0),
+        plan = TM.plan_guide(p, a.get("note_ids"), a.get("threshold_cents", 0.0),
                              a.get("threshold_ms", 0.0), a.get("match_pitch_shape", True),
                              edited_notes=a.get("edited_notes", "adjust"))
+        for k in ("include_manual", "restart"):
+            if k in a:
+                plan.params[k] = a[k]
+        return plan
     if k == "range":
         return TM.plan_range_stretch(p, a["start_sec"], a["end_sec"], a["ratio"])
     if k == "reset":
