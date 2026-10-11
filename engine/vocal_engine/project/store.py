@@ -2415,16 +2415,17 @@ class Project:
         raise ProjectError("changeset が無い: %s" % changeset_id)
 
     def _drop_material(self, cs):
-        """捨てた changeset の割合の材料（`recipe` の material）を消す。ほかの changeset の記録が
-        材料として指していれば残す（割合を変えるのに要る）。"""
+        """捨てた changeset の割合の材料（`recipe` の material）とタイミングの節（timing_nodes）を消す。
+        材料は、ほかの changeset の記録が指していれば残す（割合を変えるのに要る）。節は同じ op の記録しか
+        指さないので、いつも消す。"""
         used = {ent.get("src") for c in self.changesets if c is not cs and not c.discarded
                 for o in c.ops if o.get("op") == "recipe"
                 for ent in (o.get("notes") or {}).values()}
-        if cs.id in used:
-            return
         for o in cs.ops:
             if o.get("op") == "recipe":
-                o.pop("material", None)
+                o.pop("timing_nodes", None)
+                if cs.id not in used:
+                    o.pop("material", None)
 
     def find_changeset(self, changeset_id):
         for c in self.changesets:

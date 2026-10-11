@@ -1139,9 +1139,11 @@ def list_notes(start_sec: float = None, end_sec: float = None, kind: str = "note
             d["fade_in_sec"] = round(fades[n.id][0], 4)
             d["fade_out_sec"] = round(fades[n.id][1], 4)
         g = gst.get(n.id)
-        if g is not None and g["state"] != "none":   # 「ガイドに合わせる」の音程の割合（get_correction_strength）
+        if g is not None and (g["state"] != "none" or g["timing_state"] != "none"):
+            # 「ガイドに合わせる」の音程・タイミングの割合（get_correction_strength）
             d["guide_strength"] = {"state": g["state"], "center": round(g["center"], 4),
-                                   "shape": round(g["shape"], 4)}
+                                   "shape": round(g["shape"], 4), "timing_state": g["timing_state"],
+                                   "timing": None if g["timing"] is None else round(g["timing"], 4)}
         if pres is not None:
             ov = [x for x in pres.overlapping(n.start_sec, n.end_sec)
                   if x.syllable_index not in hidden]
@@ -1846,16 +1848,19 @@ def _pct(v):
 
 
 def _strength_rows(p, ids=None):
-    """ノートごとの音程の割合（`project/strength.py`）。ids を省くと記録のあるノートだけ。"""
+    """ノートごとの音程・タイミングの割合（`project/strength.py`）。ids を省くと記録のあるノートだけ。"""
     from .project import strength as SG
     st = SG.states(p, ids)
     out = []
     for nid, r in st.items():
-        if ids is None and r["state"] == "none":
+        if ids is None and r["state"] == "none" and r["timing_state"] == "none":
             continue
         out.append({"note": nid, "state": r["state"],
                     "center": round(r["center"], 4), "shape": round(r["shape"], 4),
-                    "manual": r["manual"], "reason": r["reason"]})
+                    "manual": r["manual"], "reason": r["reason"],
+                    "timing_state": r["timing_state"],
+                    "timing": None if r["timing"] is None else round(r["timing"], 4),
+                    "timing_manual": r["timing_manual"], "timing_reason": r["timing_reason"]})
     return out
 
 
@@ -1881,6 +1886,9 @@ def get_correction_strength(note_ids: list = None, start_sec: float = None,
     notes[]: state（ok = 割合を変えられる / stale = 変えられない（reason に理由。解析し直した・
     ガイドを差し替えた・ノートを分割した・補正の線が外された など）/ none = 記録が無い（0% として扱う））、
     center（音程）・shape（線の形 = 揺れ）の割合 0〜1、manual（合わせた後に手で直した。既定では割合を変えない）。
+    タイミング（記録だけ。割合を変える操作はまだ無い）: timing = 今かかっている割合 0〜1、timing_state（ok /
+    stale（timing_reason）/ none（記録が無い）/ unsupported（タイミングの動きを残していない前の形の記録。timing は null））、
+    timing_manual（合わせた後にタイミングを手で直した）。
     summary: 選んだノートの割合の範囲（mixed = ノートごとに違う）。対象: note_ids か範囲、省略で記録のあるノート全部。"""
     p = _project()
     p.reload_if_changed()
@@ -2255,7 +2263,8 @@ def reset_to_original(note_ids: list = None, start_sec: float = None, end_sec: f
     if not rm and not specs:
         return _ok(changeset=None, removed=0, message="対象の編集が無かった")
     from .project import strength as SG
-    void = sorted(set(ids) & {k for k, v in SG.recipes(p)[1].items() if v is not None})
+    void = sorted(set(ids) & {k for part in ("pitch", "timing")
+                              for k, v in SG.recipes(p, part)[1].items() if v is not None})
     extra = (lambda cs_id, made: [{"op": "recipe_void", "notes": void}]) if void else None
     cs = p.apply_changes(rm, specs, author=author, label="原音に戻す（%d ノート）" % len(ids),
                          extra_ops=extra)
