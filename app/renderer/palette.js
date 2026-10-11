@@ -9,7 +9,7 @@
 
 export const COLORS = {
   TAKE: '#e6d24a',
-  // ガイド（帯の縁・ピッチの線・トラックビューの波形）と、ホバー・選択したノートと対のガイドの縁
+  // ガイド（帯の縁・ピッチの線・トラックビューの波形）と、トラックの「ガイド」の札の文字（GUIDE_HI）
   GUIDE: '#5aa2ff', GUIDE_HI: '#bcd9ff',
   SEL: '#f2f2f2',
   // 選択したノートの元の長さ（帯の上の細い線と両端の縦線）
@@ -33,8 +33,7 @@ export const MUTED_LINE = '#5c5c62';
 export const GUIDE_LOOK = {
   fill: 0.16,          // ガイドの帯の塗り
   fillDim: 0.08,       // 「ガイドに合わせる」を開いている間の、対応しないガイドの帯
-  fillPair: 0.3,       // ホバー・選択したノートと対のガイドの帯
-  edge: 0.9, edgeDim: 0.3, edgeWidth: 1, edgePairWidth: 1.8,
+  edge: 0.9, edgeDim: 0.3, edgeWidth: 1,
   lineWidth: 1.4,
 };
 

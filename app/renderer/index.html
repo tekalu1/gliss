@@ -270,6 +270,9 @@ html[data-mode=ara] #tv.short .th .g.ic{display:inline-flex}
 #roll .nb .blob[data-man]{fill-opacity:.45;stroke:var(--manual);stroke-opacity:.55;stroke-width:1}
 #roll .nb:hover .blob[data-man],#roll .nb.hov .blob[data-man]{fill-opacity:.62}
 #roll .nb.sel .blob[data-man]{fill-opacity:.75;stroke-opacity:.95}
+/* ホバーしたテイクのノートだけ、帯の色（draw.js が --bc に入れる）の縁 1.6px を付ける（2026-10-11 承認）。ガイドはホバー・選択で変えない。
+   子音の帯（data-cons）は縁なし。無音のノートの規則（下）は後ろにあるので勝つ */
+#roll .nb:hover .blob:not([data-cons]),#roll .nb.hov .blob:not([data-cons]){stroke:var(--bc);stroke-opacity:1;stroke-width:1.6;stroke-linejoin:round}
 .status{flex:0 0 auto;height:18px;line-height:18px;padding:0 10px;color:var(--fg3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .status.err{color:#e0897f}
 .pop,.menu{position:absolute;z-index:2;background:#232326;box-shadow:0 6px 20px rgba(0,0,0,.55)}
