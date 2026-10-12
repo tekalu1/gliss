@@ -550,9 +550,11 @@ export async function requestPlan(args) {
  * それを取り消してから**同じ計画**を当てるので、プレビューと確定が同じ基準になる
  * （取り消しの履歴でも前回の項目と入れ替わる = ポップアップ 1 回 = 取り消し 1 回）。
  * strength = 音程の割合 { center, shape, includeManual, restart }（計画に data.strength があるとき。
- * center / shape = null はノートごとの今の割合のまま。`timing.apply_plan`）。 */
+ * center / shape = null はノートごとの今の割合のまま。`timing.apply_plan`）。
+ * timing = タイミングの割合 0〜1（計画に data.timing_ratio があるとき。選んだノートをこの割合に。x とは一緒に使わない。
+ * 2026-10-11 承認）。手で直したノート・合わせ直すノート（includeManual・restart）は計画を作ったときの値を使う。 */
 export async function applyPlan({ planId, x = null, pitch = null, replaces = null, drag = true, label = null,
-  onTiming = null, strength = null }) {
+  onTiming = null, strength = null, timing = null }) {
   // ドラッグは結果を待たずに次へ（計画のプレビューは結果を採るまで残す）。ポップアップは当て直しの基準が要るので待つ
   let ok = false;
   const after = () => {
@@ -563,11 +565,12 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
       S.plan.x0 = x || 0;                // （スライダーの今の値ではなく、確定した値）
       S.plan.pitch0 = pitch || 0;
       S.plan.str0 = strength;
+      if (timing != null) S.plan.t0 = timing;
       invalidateWarp();
     }
   };
   const str = strength && (strength.center != null || strength.shape != null) ? strength : null;
-  if (!(Math.abs(x || 0) > 1e-9) && !(Math.abs(pitch || 0) > 1e-9) && !replaces && !str) {
+  if (!(Math.abs(x || 0) > 1e-9) && !(Math.abs(pitch || 0) > 1e-9) && !replaces && !str && timing == null) {
     ok = true;
     after();
     render();
@@ -575,7 +578,8 @@ export async function applyPlan({ planId, x = null, pitch = null, replaces = nul
   }
   const cs = await run(async () => {
     const r = await call('apply_plan', {
-      plan_id: planId, x, pitch, replaces, author: AUTHOR, label,
+      plan_id: planId, x: timing == null ? x : null, pitch, replaces, author: AUTHOR, label,
+      ...(timing != null ? { timing } : {}),
       ...(str ? { pitch_center: str.center, pitch_shape: str.shape, include_manual: !!str.includeManual,
         restart: str.restart?.length ? str.restart : null } : {}),
     }, { busy: false });

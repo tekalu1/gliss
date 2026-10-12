@@ -318,8 +318,9 @@ export function installKeys({ dialogOpen } = {}) {
     if (!combo) return;
     const id = commandFor(combo);
     if (!id) return;
-    // ボタンにフォーカスがあるときの Space / Enter はボタンを押す（ブラウザのまま）
+    // ボタンにフォーカスがあるときの Space / Enter はボタンを押す、チェックボックスの Space は切り替える（ブラウザのまま）
     if (e.target?.tagName === 'BUTTON' && (combo === 'Space' || combo === 'Enter')) return;
+    if (e.target?.tagName === 'INPUT' && e.target.type === 'checkbox' && combo === 'Space') return;
     e.preventDefault();
     if (e.altKey) window.api?.consumeAlt?.();   // Alt+X などの後に Alt を離してもメニューバーへ行かない
     if (!isEnabled(id)) {                       // 黙って何もしないのではなく、使えない理由を出す

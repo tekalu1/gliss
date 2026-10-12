@@ -10,7 +10,8 @@
 // 色の定義は palette.js（黄 → 橙 → 赤の列・手動の白・無音の線）
 import { MANUAL, MUTED_LINE, RAMP } from './palette.js';
 import {
-  COLORS, S, editedCurve, frameNoteIds, isMuted, noteFrames, pitchDelta, strengthPreview, strokeData, warp,
+  COLORS, S, editedCurve, frameNoteIds, isMuted, noteFrames, pitchDelta, planKnotsShown, strengthPreview, strokeData,
+  warp,
 } from './state.js';
 
 const EPS_SEC = 1e-4;
@@ -72,11 +73,9 @@ function timingPoints(n) {
       if (xs[k] > a && xs[k] < b) pts.push([xs[k], tm.out_sec[k], 'right']);
     }
   }
-  const ks = S.plan?.data?.knots;
-  if (ks) {
-    const x0 = S.plan.x0 || 0;
-    for (const [src, cur, d, side] of ks) {
-      if (src > a && src < b) pts.push([src, cur + d * x0, side === 'l' ? 'left' : 'right']);
+  if (S.plan) {
+    for (const [src, shown, side] of planKnotsShown()) {
+      if (src > a && src < b) pts.push([src, shown, side === 'l' ? 'left' : 'right']);
     }
   }
   if (S.local.btime.size) {
@@ -100,7 +99,15 @@ export function timingCorr(n) {
   if (!changed) return eng;
   if (amount <= EPS_SEC) return null;
   const ms = amount * 1000;
-  return { degree: Math.min(1, ms / ref().t), manual: S.plan?.data?.kind !== 'guide', amountMs: ms };
+  return { degree: Math.min(1, ms / ref().t), manual: S.plan?.data?.kind !== 'guide' || keepsManual(n, eng), amountMs: ms };
+}
+
+/** タイミングの割合（ガイドに合わせる）で動かすノートに入らず、隣にゆずって動くだけの手で直したノートは、
+ * 確定しても手動の印のまま（エンジンの `timing_ratio.realize` の unmarked）。 */
+function keepsManual(n, eng) {
+  const tr = S.plan?.data?.timing_ratio;
+  if (!eng?.manual || !tr) return false;
+  return ![...(tr.changed || []), ...(tr.fresh || [])].some((r) => r.note === n.id);
 }
 
 /** 鉛筆で描いている線がこのノートにかかるか。 */

@@ -549,6 +549,7 @@ class Plan:
     notes: list = field(default_factory=list)              # ノートごとの対応と理由（ガイドのみ。issue #53）
     info: dict = field(default_factory=dict)
     sig: tuple = ()
+    ratio_cache: dict = field(default_factory=dict, repr=False)   # タイミングの割合を変える骨組み（timing_ratio.py）
 
     def new_positions(self, x):
         return np.array([k.cur for k in self.st.knots]) + self.d * float(x)
@@ -2010,8 +2011,14 @@ def connection_specs(project, changes):
 
 # ================================================================ まとめて使う口
 def apply_plan(project, plan, x=None, pitch=None, author="human", label=None,
-               pitch_center=None, pitch_shape=None, include_manual=None, restart=None):
+               pitch_center=None, pitch_shape=None, include_manual=None, restart=None, timing=None):
     """計画を確定する（1 つの changeset）。x = タイミング、pitch = ピッチの強度（ガイドのみ）。
+
+    timing（「ガイドに合わせる」のみ。x とは同時に使えない）= 選んだノートの**タイミングの割合**（0〜1）に
+    する（project/timing_ratio.py）。記録のあるノートはその割合に、無いノートは今の状態からその割合だけ寄せる。
+    include_manual・restart は音程と同じ（手で直したノートも含める・変えられないノートを今の状態から合わせ直す）。
+    割合だけが変わって編集が変わらなくても、記録を変える changeset を 1 つ作る（取り消せる）。
+    x は今までどおり（計画の 100% の動きを x 倍。0.4.0 と同じ結果）。
 
     線の形で合わせる計画（`plan.strength` がある）は、音程を**ノートごとの割合**で当てる（project/strength.py）:
     pitch_center / pitch_shape = 音程（中心）・線の形（揺れ）の割合（None はそのノートの今の割合のまま）。
@@ -2022,9 +2029,19 @@ def apply_plan(project, plan, x=None, pitch=None, author="human", label=None,
     「ガイドに合わせる」は、選んだノートのタイミングの割合（x。0 も）と 100% の動き（`plan.recipe_timing`）も
     同じ記録に残す（x = 0 のときは、生きているタイミングの記録のあるノートはそのまま。project/strength.py）。"""
     removes, specs, info = ([], [], {"x": 0.0})
-    if x is not None and abs(float(x)) > 0:
+    ratio = None
+    if timing is not None:
+        if x is not None and abs(float(x)) > 0:
+            raise TimingError("x と timing は同時に指定できない（timing はノートごとの割合）")
+        from . import timing_ratio as TR
+        rp = TR.ratio_plan(project, plan, bool(include_manual), restart or ())
+        if rp is None:
+            raise TimingError("この計画ではタイミングの割合を変えられない（ガイドに合わせる計画のみ）")
+        removes, specs, info, writes, unmarked = TR.realize(project, rp, timing)
+        ratio = (rp, writes, unmarked)
+    elif x is not None and abs(float(x)) > 0:
         removes, specs, info = realize(project, plan, x)
-    xs = info.get("x", 0.0)
+    xs = 0.0 if ratio is not None else info.get("x", 0.0)
     conn = []
     if plan.set_connections and abs(xs) > 1e-12:
         conn += plan.set_connections
@@ -2070,19 +2087,26 @@ def apply_plan(project, plan, x=None, pitch=None, author="human", label=None,
                 specs.append({"kind": "pitch_shift", "target": Target.note(nid),
                               "params": {"cents": v},
                               "note": "ガイドへ %.0f%%" % (float(pitch) * 100)})
-    if plan.recipe_timing is not None:
+    if ratio is not None:
+        # ノートごとの割合と節（y・hold も）を、音程と同じ記録の op に残す（project/strength.py）
+        from . import strength as SG
+        rp, writes, unmarked = ratio
+        extra = SG.with_timing_ratio(project, extra, writes, rp.sig, rp.hop)
+        if not specs and not removes and not writes:
+            return None, info
+    elif plan.recipe_timing is not None:
         # タイミングの割合（今の xs）と 100% の動きを、音程と同じ記録の op に残す（project/strength.py）
         from . import strength as SG
         extra = SG.with_timing(project, extra, plan.recipe_timing, xs)
-    if not specs and not removes:
+    if ratio is None and not specs and not removes:
         return None, info
     # 「ガイドに合わせる」は自動、ほか（端・移動のドラッグ・オリジナルに戻す）は手動（issue #37。project/correction.py）
     cs = project.apply_changes(removes, specs, author=author,
                                label=label or "%s（%s）" % (plan.kind, plan.id),
                                origin="auto" if plan.kind == "guide" else "manual",
-                               extra_ops=extra)
+                               extra_ops=extra, unmarked=ratio[2] if ratio is not None else ())
     info["changeset"] = cs.id
-    log.get().info("plan %s を確定: x=%.4f 外した %d / 入れた %d", plan.id, xs,
+    log.get().info("plan %s を確定: x=%.4f timing=%s 外した %d / 入れた %d", plan.id, xs, timing,
                    len(removes), len(specs))
     return cs, info
 
@@ -2092,8 +2116,14 @@ def write_plan(project, plan, path=None):
     d = project.sub("cache")
     path = path or os.path.join(d, "plan-%s.json" % plan.id)
     tmp = path + ".tmp"
+    out = plan.to_json()
+    if plan.recipe_timing is not None:
+        # ノートごとのタイミングの割合のプレビュー（project/timing_ratio.py。画面のポップアップ）
+        from . import timing_ratio as TR
+        out["timing_ratio"] = TR.preview(project, plan, bool(plan.params.get("include_manual")),
+                                         plan.params.get("restart") or ())
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(plan.to_json(), f, ensure_ascii=False, separators=(",", ":"))
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
     from .store import replace_file
     replace_file(tmp, path)
     return os.path.abspath(path)

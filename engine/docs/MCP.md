@@ -36,7 +36,7 @@ open_project(take_path, guide_path?, lyrics?, guide_lyrics?)   ← テイクの 
      ├ move_boundary / stretch / move_note                  ← 直す（タイミング。後ろはずらさない）
      ├ list_connections / set_connection                    ← 隣との接続 / 切り離し（となだらかさ）
      ├ correct_to_guide(pitch_strength, timing_strength, pitch_mode) ← ガイドへ寄せる（pitch_mode="contour" = 区間カーブ）
-     ├ get_correction_strength / set_correction_strength    ← 寄せた音程の割合を読む / 後から変える（ノートごと）
+     ├ get_correction_strength / set_correction_strength    ← 寄せた音程・タイミングの割合を読む / 後から変える（ノートごと）
      ├ apply_edits(edits=[...])                             ← 音程の編集をまとめて当てる（取り消し 1 回）
      ├ plan_edit → apply_plan                               ← 計画を作って確定（画面が使う）
      └ render_preview / render_region / render_audition / render_view / remeasure / list_changes   ← 確かめる
@@ -679,10 +679,13 @@ Melodyne と同じく、**タイミングの編集はそのノートと隣以外
   `pitch_strength`）と、割合を後から変えるための材料を changeset に記録する（下の「割合の記録の形」）。返り値の `strength` に
   寄せたノートの割合（`get_correction_strength` の `notes[]` と同じ行）が付く。割合を後から変えるのは `set_correction_strength`。
   `"note"` / `"contour"` は音程の割合を記録しない。
-- **タイミングの記録**（承認済み（2026-10-11）。記録だけ。割合を後から変える操作はまだ無い）: `"shape"` / `"note"`（と `plan_edit(op="guide")` →
+- **タイミングの記録**（承認済み（2026-10-11））: `"shape"` / `"note"`（と `plan_edit(op="guide")` →
   `apply_plan`）は、選んだノートのタイミングの割合（`timing_strength`）と 100% の動き（`timing_nodes`）も同じ記録に残す。
   `timing_strength=0` でも 0.0 と動きを残す。ただし、生きているタイミングの記録（`timing_state: "ok"`）のあるノートに 0 で
   合わせ直したときは書かない（前の割合と動きのまま）。`"contour"` は記録しない。
+  割合を後から**ノートごとに**変えるのは `set_correction_strength(timing=…)` と `apply_plan(plan_id, timing=…)`（下の
+  「ノートごとのタイミングの割合」）。`correct_to_guide` の `timing_strength` は今までどおり、選んだ範囲を計画の 100% の動きの
+  `timing_strength` 倍にする（記録の割合は見ない）。
 
 ```json
 {"ok": true, "changeset": "c001", "x": 0.7, "pairs": 10, "matched_notes": 14,
@@ -728,7 +731,7 @@ abs_cents_median_before}`。
 `timing_possible=false`（確かな頭の組が 1 つも無いガイド。別の演奏など）のときは `timing_message`
 （「このガイドとはタイミングを合わせられない…」）が付き、タイミングは 1 つも動かない。
 
-### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?, fit?)` / `apply_plan(plan_id, x?, pitch?, replaces?, pitch_center?, pitch_shape?, include_manual?, restart?)`
+### `plan_edit(op, note_id?, note_ids?, side?, detach?, start_sec?, end_sec?, threshold_cents?, threshold_ms?, match_pitch_shape?, fit?, include_manual?, restart?, replaces?)` / `apply_plan(plan_id, x?, pitch?, replaces?, pitch_center?, pitch_shape?, include_manual?, restart?, timing?)`
 
 `op="guide"` で `fit=true` なら、タイミング・ピッチとも 100% で当てたときの `fit`（上の `correct_to_guide` と同じ）も返す
 （包絡を測るので初回は 1〜2 秒かかる。画面は使わない）。計画の `info.one_to_many` は 1 対多のノート
@@ -745,10 +748,10 @@ abs_cents_median_before}`。
 |---|---|---|
 | `edge` | `note_id` + `side`（`start` / `end`）。`detach=true` で接続を切って自分だけ（画面の Alt） | 秒（+ が後ろ） |
 | `move` | `note_id` / `note_ids` / 範囲 | 秒 |
-| `guide` | `note_ids` / 範囲 / 省略で全体 | タイミングの強度 0〜1（ピッチは `apply_plan` の `pitch`） |
+| `guide` | `note_ids` / 範囲 / 省略で全体 | タイミングの強度 0〜1（ピッチは `apply_plan` の `pitch`）。ノートごとの割合にするなら x の代わりに `timing`（下） |
 
 `plan_edit` の返り値: `{plan_id, path, x_range, snap_x, moving_knots, pitch_notes, pairs, info}`
-（guide では `correspondence` も。`correct_to_guide` と同じ）。
+（guide では `correspondence` も。`correct_to_guide` と同じ。ノートごとのタイミングの割合のプレビュー `timing_ratio` も（下））。
 `path` の JSON（画面が読む。MCP の結果に数値列を載せないため）の中身:
 `knots = [[編集前の秒, cur, d, "l"|"r"], ...]`、`pieces = ["s"|"k"|"g", ...]`（stretch / keep / gap）、
 `pitch = {note_id: 100% でのセント}`、`pitch_curve = [[テイクの秒, 現在の Hz, ガイドの Hz, 境目の重み], ...]`（guide の形状モード）、`pairs = [{take: [...], guide: [...]}]`（音程の対応。画面で濃くする
@@ -763,6 +766,9 @@ abs_cents_median_before}`。
 状態は計画を作ったときと同じなので、同じ計画がそのまま当たる。取り消した changeset は「捨てた」印
 （`discarded`）が付き、`redo` で戻らない。外から編集されて状態が変わって
 いたら同じ引数で計画を作り直す（`replanned: true`）。
+`plan_edit` の `replaces` は、その changeset を取り消した状態で計画を作る（曲は書き換えない）。画面はポップアップの中で
+「手で直したノートも含める」・「今の状態で合わせ直す」を変えたとき、前回の確定を渡して開く前の状態から作り直す
+（確定も同じ changeset を `replaces` で取り消してから当てるので、プレビューと結果が同じ計画になる）。
 
 `op="guide"` の線の形の計画（path の `strength` がある）は、音程を**ノートごとの割合**で当てる（下の `set_correction_strength`）:
 `pitch_center` / `pitch_shape` = 音程・線の形の割合 0〜1（省くとそのノートの今の割合のまま）、`include_manual` = 合わせた後に
@@ -771,9 +777,66 @@ abs_cents_median_before}`。
 path の `strength` = `{version, sig, hop, notes: {ノート: {sel, fresh, state, reason, center, shape, manual, src, edits}}, materials}`。
 画面はポップアップのつまみを動かす間、これと同じ式（`app/renderer/strength.js`）で線を描く。
 
+#### ノートごとのタイミングの割合（承認済み（2026-10-11）。案 T1。`project/timing_ratio.py`）
+
+`apply_plan(plan_id, timing=割合)`（0〜1）は、`op="guide"` の計画で選んだノートのタイミングを**その割合にする**
+（`x` とは同時に使えない。`x` は今までどおり「計画の 100% の動きを x 倍」で、0.4.0 と同じ結果）。
+
+- 位置は、ノートの節ごとに「0% の位置 + 割合 × 100% の動き（記録の `timing_nodes` の `d`）」。1 つの割合で、ノートの頭・
+  そのノートの切り離した尻・休みの手前の音節の終わりが一緒に動く。接続した境目は次のノートの割合で動く（前のノートの尻も一緒に）。
+  ノートの中の音素の境目は前後の節に合わせて伸び縮みし、子音の長さは保つ（今までと同じ骨組み）。
+- 全部のノートを同じ割合 s にすると、記録の無い曲では `apply_plan(x=s)` と同じ位置。100% は 0.4.0 と同じ。
+- 記録の無いノート（`timing_state: "none"`）は 0% として扱い、今の位置から計画の 100% の動きで寄せる。
+- 選んでいないノートの節は動かさない。ただし、動かすノートの頭が、隙間を挟んだ前のノートの切り離した尻を追い越すときは、
+  前のノートの尻が**ゆずって**短くなる（前のノートの記録が生きていて、手で直しておらず、動かさないときだけ）。ゆずれないとき
+  （手で直した・記録が無い・短すぎる）は、選んだノートが手前で止まる（**届かない**）。追い越し・短すぎの制約は破らない。
+- 割合の違うノートが並ぶときは、0% と 100% でそれぞれ制約を直し、間の割合はその 2 つを結ぶ（割合について線形）。
+- 合わせた後にタイミングを手で直したノート（`timing_manual`）は既定で変えない（`excluded_manual`。動かないので、隣も
+  そのノートにはゆずらせない）。`include_manual=true` なら変え、手で直したずれを残す（割合の差 × d だけ動かす）。
+- 変えられないノート（`unchangeable`。理由付き）: 解析し直した・ガイドを差し替えた（`restart` に入れれば今の状態から合わせ直す）、
+  分割・結合でノートの区切りが変わった（「ノートの区切り・つながりが変わった（記録の節が見つからない）」）、前の版の記録
+  （タイミングの動きを残していない）。
+- 「オリジナルに戻す」で戻したノートの次のノートとの接続した境目は、それ以上動かさない（記録の節に `hold`。次のノートは
+  「届かない」になり、理由は「前のノートをオリジナルに戻した境目は動かさない」）。戻したことで次のノートは「手で直した」の印が付く。
+- ガイドとの音程の対応が無いノートも、タイミングの組があれば割合を変えられる（音程は 0% のまま）。
+- 割合だけが変わって編集が変わらなくても、記録を変える changeset を 1 つ作る（取り消せる）。音程の割合（`pitch_center` /
+  `pitch_shape`）と一緒に渡しても 1 つの changeset。`replaces`（ポップアップの当て直し）も今までどおり。
+- `include_manual` / `restart` を省くと、`plan_edit` に渡した値を使う（プレビューと同じ。`timing` を渡したときだけ）。
+
+`plan_edit(op="guide", include_manual?, restart?)` の返り値の `timing_ratio`（記録の無い計画・タイミングの組が無いガイドでは `null`）:
+
+```json
+{"changed": [{"note": "n004", "timing": 1.0, "manual": false}],
+ "fresh": [{"note": "n009", "manual": false}],
+ "excluded_manual": ["n006"],
+ "unchangeable": [{"note": "n007", "reason": "テイクを解析し直した"}],
+ "neighbours": [{"note": "n003", "head": null, "tail": [0.912, 0.0, -0.035]}],
+ "unreachable": [{"note": "n004", "reason": "隣を追い越す", "blocker": "n003", "miss": [0.0, 0.021]}],
+ "messages": {"neighbours": "接している前のノートの長さも変わります（1 ノート）", "unreachable": "1 ノートは届きません"},
+ "message_templates": {"neighbours": "接している前のノートの長さも変わります（{n} ノート）",
+                       "unreachable": "{n} ノートは届きません"}}
+```
+
+- `changed`: 割合を変えるノート（`timing` = 今の割合）。`fresh`: 記録が無く今の状態から合わせるノート（0% から）。
+  `manual` = 手で直したノート（`include_manual` のときだけ入る）。
+- `neighbours`: 動かさないのに端が動くノート（ゆずる前のノート・接続した前のノートの尻）。端 = `[今の秒, base, move]`
+  （割合 s での編集後の秒 = 今の秒 + base + move·s）か `null`。`messages.neighbours` は 1 つ以上のときだけ。
+- `unreachable`: 0% か 100% のどちらかで目標に届かないノート。`reason` は止めた制約か `hold` の理由、`blocker` は止めたノート
+  （分かるときだけ）、`miss` = 0%・100% での目標からのずれ（秒。割合 s では `miss[0] + s·(miss[1] − miss[0])`）。
+- `messages` は文言（画面はそのまま出せる）、`message_templates` は数を差し替える型。
+
+計画の JSON（path）の `timing_ratio` は同じ中身に、プレビューを描く節を足したもの:
+`knots = [[素材の秒, 今の秒, base, move, "l"|"r"], ...]`（動く節の前後 1 つまで）、`pieces = ["s"|"k"|"g", ...]`（その間の
+区間の stretch / keep / gap）。割合 s での編集後の秒 = 今の秒 + base + move·s（計画の `knots` の「cur + d × x」と同じ形。
+画面の `planWarp` に渡せる）。確定はこれと同じ位置になる。
+
+`apply_plan(timing=…)` の返り値には、`timing`（確定した割合）と `timing_ratio` =
+`{notes, yielded, neighbours, unreachable, excluded_manual, unchangeable}` が付く（`notes` = 記録を書いたノート、
+`yielded` = 尻をゆずった前のノート、`neighbours` = 端が動いたノートの id。`unreachable` はその割合でも届かないノートだけ）。
+
 ### `get_correction_strength(note_ids?, start_sec?, end_sec?)`
 
-「ガイドに合わせる」で寄せた音程の**ノートごとの割合**を読む（画面の G のポップアップと同じ。承認済み（2026-10-11））。
+「ガイドに合わせる」で寄せた音程・タイミングの**ノートごとの割合**を読む（画面の G のポップアップと同じ。承認済み（2026-10-11））。
 対象は `note_ids` か範囲。省くと記録のあるノート全部。
 
 ```json
@@ -784,7 +847,8 @@ path の `strength` = `{version, sig, hop, notes: {ノート: {sel, fresh, state
             "reason": "テイクを解析し直した", "timing_state": "unsupported", "timing": null,
             "timing_manual": false, "timing_reason": "前の版で付けた補正（タイミングの動きを残していない）"}],
  "summary": {"center": {"mixed": false, "min": 0.7, "max": 0.7, "mean": 0.7},
-             "shape": {"mixed": false, "min": 0.7, "max": 0.7, "mean": 0.7}},
+             "shape": {"mixed": false, "min": 0.7, "max": 0.7, "mean": 0.7},
+             "timing": {"mixed": false, "min": 0.0, "max": 0.0, "mean": 0.0}},
  "stale": ["n006"], "manual": []}
 ```
 
@@ -794,14 +858,17 @@ path の `strength` = `{version, sig, hop, notes: {ノート: {sel, fresh, state
 - `center` = 音程（ノートの中心）、`shape` = 線の形（揺れ）の割合 0〜1。
 - `manual`: 合わせた後に手で直した（鉛筆・ずらし）。`set_correction_strength` は既定では変えない。
 - `summary`: stale を除いた選んだノートの割合の範囲（`mixed` = ノートごとに違う。画面は「混在」と出す）。
-- タイミング（記録だけ。変える操作はまだ無い）: `timing_state` = `ok`（100% の動きの記録がある）/ `stale`（`timing_reason`）/
-  `none`（記録が無い。`timing` は 0.0）/ `unsupported`（音程の記録だけがある前の形。タイミングの割合は分からず、`timing` は
-  `null`）。`timing` = 今かかっているタイミングの割合 0〜1。`timing_manual` = 合わせた後にタイミングを手で直した。
+  `timing` は `timing_state` が `ok` / `none` のノートの範囲（無ければ `null`）。
+- タイミング（2026-10-11 承認。`set_correction_strength(timing=…)` で変える）: `timing_state` = `ok`（変えられる。100% の動きの
+  記録がある）/ `stale`（変えられない。`timing_reason`）/ `none`（記録が無い。`timing` は 0.0。0% として扱う）/
+  `unsupported`（音程の記録だけがある前の形。タイミングの割合は分からず、`timing` は `null`）。`timing` = 今かかっている
+  タイミングの割合 0〜1。`timing_manual` = 合わせた後にタイミングを手で直した（既定では割合を変えない）。
   省くと、音程・タイミングのどちらかの記録があるノートを返す。
 
-### `set_correction_strength(note_ids?, start_sec?, end_sec?, center?, shape?, include_manual?, restart?, author?)`
+### `set_correction_strength(note_ids?, start_sec?, end_sec?, center?, shape?, timing?, include_manual?, restart?, author?)`
 
-「ガイドに合わせる」の**音程の割合を後から変える**。1 つの changeset（`undo` 1 回で割合も線も戻る）。タイミングは変えない。
+「ガイドに合わせる」の**音程・タイミングの割合を後から変える**。1 つの changeset（`undo` 1 回で割合も線も位置も戻る）。
+`center`・`shape`・`timing` のどれかを渡す。
 
 - `center` / `shape`: 0〜1。省いた側はノートごとの今の割合のまま。**割合を「足す」のではなく「その割合にする」**
   （70% のノートに 30% を渡すと 30% になり、もう一度 70% にすると前と同じ線に戻る。同じ割合なら `changeset: null`）。
@@ -812,8 +879,12 @@ path の `strength` = `{version, sig, hop, notes: {ノート: {sel, fresh, state
 - 寄せた後に入れた `shift_pitch`・`set_pitch_curve(mode="offset")` は差分として残る。
 - `include_manual=true`: 合わせた後に手で直したノートも変える（手の分は差分として残る）。既定は飛ばして `skipped.manual`。
 - `restart=true`: 変えられない（stale）ノートを今の状態から合わせ直す。既定は飛ばして `skipped.stale`。
+- `timing`: タイミングの割合 0〜1（2026-10-11 承認。省くとタイミングは変えない）。`plan_edit(op="guide")` →
+  `apply_plan(timing=…)` と同じ（上の「ノートごとのタイミングの割合」）。手で直したノート・変えられないノート
+  （`stale` / `unsupported`）の扱いは音程と同じ（`include_manual` / `restart`。飛ばしたノートは `skipped`）。
 
 返り値: `{changeset, notes, summary, skipped: {manual, stale}, next}`（`notes` / `summary` は変えた後の `get_correction_strength` と同じ）。
+`timing` を渡したときは `timing`・`timing_ratio`（`apply_plan` と同じ）も付く。
 
 **割合の記録の形**（`project/strength.py`）: ガイドの changeset に、出した鉛筆（`pitch_draw`）のほかに
 `{"op": "recipe", "kind": "guide", "version": 1, "sig": {...}, "notes": {ノート: {"pitch": {"center", "shape"}, "edits", "src", "timing", "span"}}, "material": [...], "timing_nodes": [...]}`
@@ -827,10 +898,15 @@ path の `strength` = `{version, sig, hop, notes: {ノート: {sel, fresh, state
 `timing_nodes` の節 = `{"note": 持ち主のノート, "src": 素材の秒, "side": "l" | "r", "role": "anchor" | "interp" | "end", "d": 100% の動き（秒）}`。
 `d` は `_repair` と全体の縮め（reach）の後の計画の動き（補間の値も凍結）。節は `src` と `side` で引き当てる（骨組みの節の番号は使わない）。
 持ち主は、ノートの頭（アタックを含む）→ そのノート、接続された境目（前の尻 = 次の頭）→ 次のノート、切り離した尻・休みの手前の
-音節の終わり → そのノート。ノートの中の音素の境目は持たない。位置は「0% の位置 + timing × d」。
+音節の終わり → そのノート。ノートの中の音素の境目は持たない。位置は「0% の位置 + timing × d + y」。
+ノートごとの割合を変えたとき（2026-10-11 承認）は、節に `"y"`（秒。割合のとおりの位置から外れている量 = 前のノートが
+ゆずった・届かなかった。0 なら書かない）と `"hold": 1`（前のノートを「オリジナルに戻す」で戻した境目。もう動かさない）が付く。
+割合を変えたノートの節は、その changeset の `timing_nodes` に書き直す（前の changeset の節は、そのノートについては読まない）。
+前の版のエンジンはこの 2 つの欄も読み飛ばす（`version` は 1 のまま）。
 
 ```json
 {"note": "n003", "src": 0.9, "side": "l", "role": "anchor", "d": 0.035}
+{"note": "n004", "src": 1.62, "side": "r", "role": "end", "d": -0.04, "y": 0.012}
 ```
 
 #### `mute_notes(note_ids?, start_sec?, end_sec?)`（issue #17）

@@ -581,21 +581,63 @@ function warpMap() {
   return _warpCache;
 }
 
-/** 計画の節の「表示中の位置（x0）」と「いまの位置（x）」。 */
+/** タイミングの割合（ノートごと。2026-10-11 承認）で描くか: 計画に割合の節があり、つまみを動かした・当てた後。 */
+export function planRatio(pl = S.plan) {
+  return !!pl?.data?.timing_ratio?.knots && (pl.t != null || pl.t0 != null);
+}
+
+/** 計画の節の「表示中の位置（x0）」と「いまの位置（x）」。
+ *  割合の計画（planRatio）では、節の秒 = 今の秒 + base + move·割合。表示中 = 当てた割合 t0（まだなら今の秒）、
+ *  いま = つまみの割合 t（動かしていなければ t0）。 */
 function planArrays() {
   const pl = S.plan;
   if (!pl || !pl.data) return null;
-  if (_planCache && _planCache.x === pl.x && _planCache.x0 === pl.x0
-    && _planCache.data === pl.data) return _planCache;
-  const ks = pl.data.knots;
+  if (_planCache && _planCache.x === pl.x && _planCache.x0 === pl.x0 && _planCache.t === pl.t
+    && _planCache.t0 === pl.t0 && _planCache.data === pl.data) return _planCache;
+  const ratio = planRatio(pl);
+  const ks = ratio ? pl.data.timing_ratio.knots : pl.data.knots;
   const from = new Array(ks.length); const to = new Array(ks.length);
+  const src = new Array(ks.length); const side = new Array(ks.length);
+  const t = pl.t ?? pl.t0;
   for (let i = 0; i < ks.length; i++) {
-    const [, cur, d] = ks[i];
-    from[i] = cur + d * (pl.x0 || 0);
-    to[i] = cur + d * (pl.x || 0);
+    if (ratio) {
+      const [s, cur, base, move, sd] = ks[i];
+      from[i] = pl.t0 == null ? cur : cur + base + move * pl.t0;
+      to[i] = t == null ? cur : cur + base + move * t;
+      src[i] = s; side[i] = sd;
+    } else {
+      const [s, cur, d, sd] = ks[i];
+      from[i] = cur + d * (pl.x0 || 0);
+      to[i] = cur + d * (pl.x || 0);
+      src[i] = s; side[i] = sd;
+    }
   }
-  _planCache = { x: pl.x, x0: pl.x0, data: pl.data, from, to, mode: pl.data.pieces };
+  _planCache = { x: pl.x, x0: pl.x0, t: pl.t, t0: pl.t0, data: pl.data, from, to, src, side,
+    mode: ratio ? pl.data.timing_ratio.pieces : pl.data.pieces };
   return _planCache;
+}
+
+/** 計画の節の [編集前の秒, 表示中の秒, side（'l' / 'r'）]（補正の色が測る点。corr.js）。 */
+export function planKnotsShown() {
+  const P = planArrays();
+  return P ? P.src.map((s, i) => [s, P.from[i], P.side[i]]) : [];
+}
+
+// エンジンの判定と同じ幅（timing_ratio.py の MOVE_TOL・REACH_TOL。秒）
+const NB_TOL = 1e-4;
+const REACH_TOL = 5e-4;
+/** タイミングのつまみの割合 t で、長さが変わる隣のノート（nb）と届かないノート（far = [{note, reason}]）。
+ *  つまみを動かしていなければ空（ポップアップの行・破線の縁・届かない印。2026-10-11 承認）。 */
+export function planTimingMarks(pl = S.plan) {
+  const tr = pl?.data?.timing_ratio;
+  const s = pl?.t;
+  if (!tr || s == null) return { nb: [], far: [] };
+  const moves = (e) => !!e && Math.abs(e[1] + e[2] * s) > NB_TOL;
+  return {
+    nb: (tr.neighbours || []).filter((r) => moves(r.head) || moves(r.tail)).map((r) => r.note),
+    far: (tr.unreachable || []).filter((r) => Math.abs(r.miss[0] + s * (r.miss[1] - r.miss[0])) > REACH_TOL)
+      .map((r) => ({ note: r.note, reason: r.reason })),
+  };
 }
 
 /** 計画で動かした見かけの秒（エンジンの `timing.py: realize` と同じ規則）。
@@ -959,6 +1001,7 @@ export function setPlan(data, extra = {}) {
   const strength = data?.strength || null;
   S.plan = data ? {
     data, x: 0, x0: 0, pitch: 0, pitch0: 0,
+    t: null, t0: null,       // タイミングの割合（つまみ・当てた値。null = 動かしていない・当てていない）
     shapeFrames,
     str: null, str0: null,
     strMats: strength ? parseMaterials(strength) : null,

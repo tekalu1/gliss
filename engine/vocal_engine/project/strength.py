@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
-"""「ガイドに合わせる」の割合を後から変えるための記録（recipe。2026-10-11 承認の段階 1 = 音程を変える。
-タイミングは記録だけを残し、割合を変える操作は次の段）。
+"""「ガイドに合わせる」の割合を後から変えるための記録（recipe。2026-10-11 承認。音程の割合を変えるのはここ、
+タイミングの割合を変えるのは project/timing_ratio.py）。
 
 ガイドの changeset に、出した鉛筆（`pitch_draw`）とは別に次の op を入れる。編集リスト（`_live_edits`）は
 `add` / `remove` しか見ないので、前の版のエンジンはこの op を読み飛ばし、同じ編集・同じ音のまま開く。
@@ -23,7 +23,9 @@
 `plan.d`（補間の値も凍結）。節は `src` と `side` で引き当てる（骨組みの節の番号は毎回変わる）。持ち主は
 ノートの頭（アタック・近くの頭を含む組）→ そのノート、接続された境目（前の尻 = 次の頭）→ 次のノート、
 切り離した尻 → そのノート、休みの手前の音節の終わり → そのノート。ノートの中の音素の境目は持たない
-（`timing._timing_nodes`）。位置は「0% の位置 + timing × d」（0% の位置 = 今の位置 − timing × d）。
+（`timing._timing_nodes`）。位置は「0% の位置 + timing × d + y」（0% の位置 = 今の位置 − timing × d − y）。
+y（無ければ 0）= 割合のとおりの位置から外れている量（隣にゆずった・届かなかった）。hold: 1 = 前のノートを
+「オリジナルに戻す」で戻した境目なので、もう動かさない（project/timing_ratio.py）。
 
 timing は確定したときのタイミングの強度（x）。x = 0 でも節は残す（後から割合を上げられる）。x = 0 の確定は、
 生きているタイミングの記録（ok）のあるノートには書かない（前の割合と節のまま）。
@@ -629,6 +631,32 @@ def with_timing(project, base, rec, x):
             ent["timing"] = ratio
             ent.setdefault("span", spans.get(nid))
         op["timing_nodes"] = sorted((dict(n) for nid in write for n in nodes[nid]),
+                                    key=lambda n: (n["src"], n["side"], n["note"]))
+        return out
+
+    return ops
+
+
+def with_timing_ratio(project, base, writes, sig, hop):
+    """記録の op を作る関数 base に、ノートごとのタイミングの割合を足した関数を返す（project/timing_ratio.py）。
+
+    writes = {ノート: {"timing": 割合, "nodes": [節]}}。書くノートの節は、この op の timing_nodes に入る
+    （前の記録の節は、そのノートについては読まれなくなる）。書くノートが無ければ base をそのまま返す。"""
+    if not writes:
+        return base
+    spans = {n.id: [n.start_sec, n.end_sec] for n in project.take_notes}
+
+    def ops(cs_id, edits):
+        out = list(base(cs_id, edits) or []) if base is not None else []
+        op = next((o for o in out if o.get("op") == "recipe"), None)
+        if op is None:
+            op = {"op": "recipe", "kind": "guide", "version": VERSION, "sig": sig, "hop": hop, "notes": {}}
+            out.insert(0, op)
+        for nid, w in sorted(writes.items()):
+            ent = op["notes"].setdefault(nid, {})
+            ent["timing"] = round(min(max(float(w["timing"]), 0.0), 1.0), 6)
+            ent.setdefault("span", spans.get(nid))
+        op["timing_nodes"] = sorted((dict(n) for w in writes.values() for n in w["nodes"]),
                                     key=lambda n: (n["src"], n["side"], n["note"]))
         return out
 

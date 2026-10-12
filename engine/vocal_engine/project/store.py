@@ -2114,13 +2114,14 @@ class Project:
         return cs, made
 
     def apply_changes(self, remove_ids, specs, author="ai", label=None, origin="manual",
-                      extra_ops=None):
+                      extra_ops=None, unmarked=()):
         """外す編集と入れる編集を **1 つの changeset** にする（undo で両方まとめて戻る）。
 
         `project/timing.py` の組み直しで使う（変わる範囲のタイミング編集を外して、
         正規形の stretch / crop / silence を入れ直す）。origin は `apply_edits` と同じ。
         extra_ops(changeset の id, 入れた編集) は編集リストの外の op（割合の記録 `recipe`。
-        `project/strength.py`）を返す。"""
+        `project/strength.py`）を返す。unmarked = 動いても印（手動か自動か）を付け直さないノート
+        （タイミングの割合を変えたとき、手で直した隣のノートを自動にしない。`project/timing_ratio.py`）。"""
         from .correction import Marker, kinds_of, TIMING_KINDS
         self._first_edit_takes_latest_renderer()
         structural = []
@@ -2156,6 +2157,11 @@ class Project:
         self.changesets.append(cs)
         self._replay()
         mark = marker.op()
+        if mark and unmarked:
+            skip = set(unmarked)
+            mark["timing"] = [i for i in mark["timing"] if i not in skip]
+            if not mark["timing"] and not mark["pitch"]:
+                mark = None
         if mark:
             cs.ops.append(mark)
         scopes = list(structural)

@@ -7,7 +7,8 @@
 import { analyzeTake, analyzed, call, callJob, onAnalyzed, onDocument, status, $ } from './engine.js';
 import { beginBusy, busyState, installBusy, laterBusy, refuseWhileBlocking } from './busy.js';
 import {
-  S, adopt, bandOf, clearProject, defaultPitchView, editedCurve, phSpan, pitchOf, planWarp, spanOf, strokeData, totalSec,
+  S, adopt, bandOf, clearProject, defaultPitchView, editedCurve, phSpan, pitchOf, planTimingMarks, planWarp, spanOf, strokeData,
+  totalSec,
   toEdited, utterances,
 } from './state.js';
 import {
@@ -872,6 +873,7 @@ window.__app = {
   plan: () => (S.plan ? {
     id: S.plan.data.plan_id, kind: S.plan.data.kind, x: S.plan.x, pitch: S.plan.pitch,
     x0: S.plan.x0, pitch0: S.plan.pitch0, str0: S.plan.str0 || null,
+    t: S.plan.t, t0: S.plan.t0, timingRatio: S.plan.data.timing_ratio || null, timingMarks: planTimingMarks(),
     range: S.plan.data.x_range, snap: S.plan.data.snap_x,
     guides: [...S.plan.guides], takes: [...S.plan.takes], pitchPlan: S.plan.data.pitch,
     timing: S.plan.data.timing || [],

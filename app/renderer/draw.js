@@ -3,7 +3,8 @@
 import {
   BLACK, COLORS, LAYOUT, PITCH_VIEW, S, bandOf, boundSec, boxOf, clamp, clampPitchView, editedCurve,
   currentTrack, fadeGain, fadeOf, fmtTime, guideBandOf,
-  guideFrames, isMuted, isSel, noteFrames, noteName, phSpan, pitchOf, planConnChanges, sign, spanOf, totalSec,
+  guideFrames, isMuted, isSel, noteFrames, noteName, phSpan, pitchOf, planConnChanges, planTimingMarks, sign, spanOf,
+  totalSec,
   toEdited, trHalves, warp,
 } from './state.js';
 import { withKey } from './keys.js';
@@ -62,7 +63,7 @@ function editorLoopSegments() {
   }
   return out;
 }
-const { TAKE, GUIDE, SEL, WAS, AI: AI_EDGE } = COLORS;
+const { TAKE, GUIDE, SEL, WAS, AI: AI_EDGE, NB, FAR, FAR_BG } = COLORS;
 
 let svg = null;
 let W = 1200;
@@ -968,6 +969,11 @@ export function render() {
   // 当たり判定は今までどおり透明な矩形（中央＝ノート、両端＝端のつまみ）。見た目は波形だけ。
   const eh = main && dr?.type === 'edge' ? { id: dr.id, which: dr.which }
     : main && !dr ? S.edgeHover : null;
+  // タイミングの割合を動かしている間: 長さが変わる隣 = 破線の縁、届かない = 右上の「!」（ノートの上に重ねる）
+  const tm = planTimingMarks();
+  const nbIds = new Set(tm.nb);
+  const farOf = new Map(tm.far.map((r) => [r.note, r.reason]));
+  let markSvg = '';
   for (let k = 0; k < S.pitched.length; k++) {
     const n = S.pitched[k];
     const b = boxOf(n);
@@ -994,6 +1000,19 @@ export function render() {
     if (bd0.main && S.aiNotes.has(n.id)) s += `<path data-ai="${n.id}" d="${bd0.main}" fill="none" stroke="${AI_EDGE}" stroke-width="1.2" stroke-opacity=".9" pointer-events="none"/>`;
     if (bd0.cons) s += `<path class="blob" data-cons="${n.id}" d="${bd0.cons}" fill="${desat(bc)}" pointer-events="none"/>`;
     if (S.syncing.has(n.id)) s += syncMark(n.id, bd0.main, bd0.cons);
+    if (nbIds.has(n.id) || farOf.has(n.id)) {
+      const top = yc - noteHalfMax(n, hmax) - 3;
+      const bot = yc + noteHalfMax(n, hmax) + 3;
+      if (nbIds.has(n.id)) {
+        markSvg += `<rect data-nb="${n.id}" x="${f1(x0 - 3)}" y="${f1(top)}" width="${f1(x1 - x0 + 6)}" height="${f1(bot - top)}"`
+          + ` rx="4" fill="none" stroke="${NB}" stroke-opacity=".85" stroke-width="1" stroke-dasharray="4 3" pointer-events="none"/>`;
+      }
+      if (farOf.has(n.id)) {
+        markSvg += `<g data-unreached="${n.id}" pointer-events="none">`
+          + `<circle cx="${f1(x1 - 4)}" cy="${f1(top - 4)}" r="7" fill="${FAR_BG}" stroke="${FAR}" stroke-width="1.2"/>`
+          + `<text x="${f1(x1 - 4)}" y="${f1(top - 0.5)}" text-anchor="middle" font-size="10" font-weight="700" fill="${FAR}">!</text></g>`;
+      }
+    }
     s += `<rect data-note="${n.id}" x="${f1(x0)}" y="${f1(y0)}" width="${f1(Math.max(2, x1 - x0))}" height="${f1(Math.max(4, y1 - y0))}"`
       + ' fill="transparent" style="cursor:move"/>';
     // 元の長さ（issue #37）: **選択したノートだけ**、動かしていれば元の頭〜尻を帯のいちばん太い所の上 2 px に
@@ -1051,6 +1070,7 @@ export function render() {
     s += '</g>';
   }
 
+  s += markSvg;
   s += fadeSvg;
   if (S.edgeDraft && S.edgeDraft.trackId === S.session?.current
     && !(S.edgeDraft.planId && S.plan?.data?.plan_id === S.edgeDraft.planId)) {

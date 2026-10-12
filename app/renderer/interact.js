@@ -19,7 +19,7 @@
 import {
   BLOCK_KINDS, LAYOUT, S, boxOf, buttonReleased, clamp, fadeOf, invalidateWarp, isMuted, isSel, lyricEntryAt, pitchWorld,
   frameTime, noteFrames, restoreTo, setBoundaryDrag, setPlan, setPlanX, spanOf, strokeData, strokeTo, targets, toEdited,
-  toSource, totalSec, utteranceAt,
+  planTimingMarks, toSource, totalSec, utteranceAt,
 } from './state.js';
 import {
   M, T, X, Y, blockYSpans, edStep, focusRange, hasConnFocus, nearPair, pan, render, renderToolbar, rollBottom, rollTop,
@@ -1005,7 +1005,7 @@ function openPop(x, y) {
   // スライダーはこの計画の式で描くだけ、離したら同じ計画・同じ値で確定する。
   // 計画にはノートごとの今の割合が載る（開き直すと今の値が出る。2026-10-11 承認）
   const ids = S.sel.filter((id) => S.byId.get(id)?.kind === 'note');
-  popSes = { changeset: null, ids, touched: { center: false, shape: false }, restart: [] };
+  popSes = { changeset: null, ids, touched: { center: false, shape: false, timing: false }, restart: [] };
   setPlan(null);
   const req = requestPlan({ op: 'guide', note_ids: ids.length ? ids : null, match_pitch_shape: true })
     .catch((err) => { status(`計画を作れなかった: ${err.message}`); return null; });
@@ -1013,7 +1013,7 @@ function openPop(x, y) {
   const ses = popSes;
   $('#popScope').textContent = ids.length ? `選択 ${ids.length} ノート` : '全体';   // 子音・息は数えない（計画の対象も音程ノートだけ）
   $('#popManual').checked = false;
-  $('#popTime').value = 0; $('#popTimeV').textContent = '0%';
+  $('#popTime').value = 0; $('#popTimeV').textContent = '0%'; $('#popTime').disabled = false;
   showStrength(null);
   pop.hidden = false;
   place(pop, x, y, 270, pop.offsetHeight || 190);
@@ -1055,13 +1055,67 @@ function showStrength(data) {
   const sum = st ? strengthSummary(st, { includeManual: inc, restart: popSes.restart }) : null;
   showStrengthRow('center', sum, [$('#popPitch'), $('#popPitchV'), $('#popPitchS')]);
   showStrengthRow('shape', sum, [$('#popShape'), $('#popShapeV'), $('#popShapeS')]);
-  const man = sum ? sum.manual.length : 0;
-  $('#popManualL').textContent = `手で直したノートも含める（${man}）`;
-  $('#popManual').disabled = !man;
-  $('#popManualF').hidden = !man;
+  const tr = data?.timing_ratio || null;
+  const tsum = timingSummary(tr);
+  const time = [$('#popTime'), $('#popTimeV'), $('#popTimeS')];
+  if (tr && !tsum) {                     // 割合を変えられるノートが無い（理由は下の行）
+    time[0].disabled = true; time[0].value = 0; time[1].textContent = '—'; time[1].classList.remove('mix'); time[2].hidden = true;
+  } else if (tr) { time[0].disabled = false; showStrengthRow('timing', { timing: tsum }, time); }
+  else time[2].hidden = true;            // 割合の計画が無い（記録の無い計画）: 今までどおり 0% から
+  // 手で直したノート: 音程（線）とタイミングのどちらかで手で直したもの
+  const man = new Set(sum ? sum.manual : []);
+  for (const id of tr?.excluded_manual || []) man.add(id);
+  for (const r of [...(tr?.changed || []), ...(tr?.fresh || [])]) if (r.manual) man.add(r.note);
+  $('#popManualL').textContent = `手で直したノートも含める（${man.size}）`;
+  $('#popManual').disabled = !man.size;
+  $('#popManualF').hidden = !man.size;
+  $('#popManualN').hidden = !man.size || inc;
+  $('#popManualN').textContent = `手で直した ${man.size} ノートは除いています`;
+  // タイミングの割合を変えられないノート（理由はツールチップ）
+  const lock = tr?.unchangeable || [];
+  $('#popTimeLock').hidden = !lock.length;
+  if (lock.length) {
+    const why = new Map();
+    for (const r of lock) why.set(r.reason, (why.get(r.reason) || 0) + 1);
+    $('#popTimeLock').textContent = `割合を変えられないノート ${lock.length}`;
+    $('#popTimeLock').title = [...why].map(([r, n]) => `${r}（${n}）`).join('\n');
+  }
+  // 今の状態から合わせ直せるもの: 音程の stale と、タイミングの記録が古いもの（材料が無い・節が見つからないは除く）
   const stale = sum ? sum.stale : [];
-  $('#popStale').hidden = !stale.length;
+  const tStale = lock.filter((r) => !TIMING_NO_RESTART.has(r.reason)).map((r) => r.note);
+  $('#popStale').hidden = !stale.length && !tStale.length;
+  $('#popStaleT').hidden = !stale.length;
   if (stale.length) $('#popStaleT').textContent = `${stale.length} ノートは${sum.reasons.join('・')}ため、割合を変えられない。`;
+  showTimingLines();
+}
+
+// 合わせ直しても変えられない理由（エンジンの strength.REASONS["material"]・timing_ratio.NODES_REASON）
+const TIMING_NO_RESTART = new Set(['補正の材料が無い', 'ノートの区切り・つながりが変わった（記録の節が見つからない）']);
+
+/** 計画の timing_ratio から、選んだノートのタイミングの今の割合（記録の無いノートは 0%）。動かせるノートが無ければ null。 */
+function timingSummary(tr) {
+  if (!tr) return null;
+  const vals = [...(tr.changed || []).map((r) => r.timing), ...(tr.fresh || []).map(() => 0)];
+  if (!vals.length) return null;
+  const min = Math.min(...vals);
+  const max = Math.max(...vals);
+  return { min, max, mean: vals.reduce((a, b) => a + b, 0) / vals.length, mixed: max - min > 0.005 };
+}
+
+/** タイミングのつまみを動かしたときだけ出す行: 長さが変わる隣のノート・届かないノート（理由はツールチップ）。 */
+function showTimingLines() {
+  const tr = S.plan?.data?.kind === 'guide' ? S.plan.data.timing_ratio : null;
+  const { nb, far } = planTimingMarks();
+  const tpl = tr?.message_templates || {};
+  $('#popTimeNb').hidden = !nb.length;
+  if (nb.length) $('#popTimeNb').textContent = (tpl.neighbours || '接している前のノートの長さも変わります（{n} ノート）').replace('{n}', nb.length);
+  $('#popTimeReach').hidden = !far.length;
+  if (far.length) {
+    $('#popTimeReach').textContent = (tpl.unreachable || '{n} ノートは届きません').replace('{n}', far.length);
+    const why = new Map();
+    for (const r of far) why.set(r.reason, (why.get(r.reason) || 0) + 1);
+    $('#popTimeReach').title = [...why].map(([r, n]) => `${r}（${n}）`).join('\n');
+  }
 }
 
 /** 今のつまみの値（当てる・描く）。動かしていないつまみは null（ノートごとの今の割合のまま）。 */
@@ -1101,7 +1155,11 @@ function previewMacro() {
   const str = popStrength();
   if (S.plan.data.strength) S.plan.str = str.center == null && str.shape == null ? null : str;
   else S.plan.pitch = str.center ?? 0;     // 線の形の計画が無い（ガイドの線が無い）: 今までの強度
-  S.plan.x = +$('#popTime').value / 100;
+  if (S.plan.data.timing_ratio) {          // ノートごとの割合（2026-10-11 承認）: 動かしたら選んだノートがこの割合にそろう
+    S.plan.t = popSes.touched?.timing ? +$('#popTime').value / 100 : null;
+    S.plan.x = 0;
+  } else S.plan.x = +$('#popTime').value / 100;   // 割合の計画が無い: 今までの強度（0% から）
+  showTimingLines();
   invalidateWarp();
   render();
 }
@@ -1114,19 +1172,23 @@ function releaseMacro() {
   const ses = popSes;
   const planReq = popPlan;
   const str = popStrength();
-  const want = { x: +$('#popTime').value / 100,
+  const v = +$('#popTime').value / 100;
+  const want = { x: v, timing: ses.touched?.timing ? v : null,
     strength: str.center == null && str.shape == null ? null : str };
   return enqueue(async () => {
     const data = await planReq;
     if (!data) return;
     const active = () => ses === popSes && !pop.hidden && popPlan === planReq;
-    if (!want.strength && want.x === 0 && !ses.changeset) {
+    // タイミングは割合（data.timing_ratio）で当てる。割合の計画が無いときだけ、今までの強度（x）
+    const timing = data.timing_ratio ? want.timing : null;
+    const x = data.timing_ratio ? 0 : want.x;
+    if (!want.strength && x === 0 && timing == null && !ses.changeset) {
       if (active()) previewMacro();
       return;
     }
     // 音程は割合（data.strength）で当てる。線の形の計画が作れなかった（ガイドの線が無い）ときだけ、今までの強度
     const pitch = data.strength ? null : (want.strength?.center ?? 0);
-    const r = await applyPlan({ planId: data.plan_id, x: want.x, pitch,
+    const r = await applyPlan({ planId: data.plan_id, x, timing, pitch,
       strength: data.strength ? want.strength : null, replaces: ses.changeset, drag: false });
     if (!r.ok) return;                              // 失敗: 前回の changeset はそのまま
     ses.changeset = r.changeset;                    // 0% に戻した: null（履歴の項目も消えている）
@@ -1134,6 +1196,29 @@ function releaseMacro() {
   }, { label: 'ガイドに合わせる', op: 'guide',
     // 反映待ちの縞: 選んだノート（選択が無ければ全体の音程ノート）
     notes: ses.ids?.length ? ses.ids : S.pitched.filter((n) => n.kind === 'note').map((n) => n.id) });
+}
+
+/** 手で直したノートを含める・合わせ直すを変えた: タイミングの割合の計画（隣・届かない・節）はこの 2 つで変わるので、
+ * 計画を作り直す。前の確定が当たってから、その確定を取り消した状態（= 開く前）で作る（`replaces`。曲は書き換えない）。
+ * 確定も前回ぶんを取り消してから当てるので、プレビューと結果が同じ計画になる（1 回の Ctrl+Z で開く前に戻る）。 */
+function replan() {
+  const ses = popSes;
+  const prev = popPlan;
+  let resolve;
+  const req = new Promise((r) => { resolve = r; });
+  popPlan = req;
+  enqueue(async () => {
+    const old = await prev;
+    const data = await requestPlan({ op: 'guide', note_ids: ses.ids.length ? ses.ids : null, match_pitch_shape: true,
+      include_manual: $('#popManual').checked, restart: ses.restart.length ? ses.restart : null,
+      ...(ses.changeset ? { replaces: ses.changeset } : {}) })
+      .catch((err) => { status(`計画を作れなかった: ${err.message}`); return null; });
+    resolve(data || old);                 // 作れなかった: 前の計画のまま（確定はエンジンが作り直す）
+    if (!data || popPlan !== req || pop.hidden || ses !== popSes) return;
+    setPlan(data);
+    showStrength(data);
+    previewMacro();
+  });
 }
 
 // ---- つなぎのなだらかさ（ガイドに合わせると同じ形。スライダー 1 本、離すたびに当て直す）
@@ -1241,22 +1326,32 @@ function installMenus() {
     });
     $(id).addEventListener('change', releaseMacro);
   }
-  $('#popTime').addEventListener('input', (e) => {
-    $('#popTimeV').textContent = `${e.target.value}%`;
-    previewMacro();
-  });
-  $('#popTime').addEventListener('change', releaseMacro);
+  // タイミング: 動かしたら選んだノートが全部この割合にそろう（離しただけの change でもそろえる）
+  const touchTime = () => {
+    if (popSes.touched) popSes.touched.timing = true;
+    $('#popTimeV').textContent = `${$('#popTime').value}%`;
+    $('#popTimeV').classList.remove('mix');
+    $('#popTimeS').hidden = true;
+  };
+  $('#popTime').addEventListener('input', () => { touchTime(); previewMacro(); });
+  $('#popTime').addEventListener('change', () => { touchTime(); releaseMacro(); });
   const popAgain = () => {
+    const t = popSes.touched || {};
+    const ratio = S.plan?.data?.kind === 'guide' && !!S.plan.data.timing_ratio;
+    if (ratio) replan();
     showStrength(S.plan?.data?.kind === 'guide' ? S.plan.data : null);
     previewMacro();
-    if (popSes.touched?.center || popSes.touched?.shape) releaseMacro();
+    if (t.center || t.shape || (ratio && t.timing)) releaseMacro();
   };
   $('#popManual').addEventListener('change', popAgain);
   // 解析し直した・ガイドを替えたノートは、記録の割合からは変えられない。今の状態から合わせ直す
   $('#popStaleB').addEventListener('click', () => {
     const st = S.plan?.data?.kind === 'guide' ? S.plan.data.strength : null;
-    if (!st) return;
-    popSes.restart = Object.entries(st.notes).filter(([, r]) => r.sel && r.state === 'stale').map(([n]) => n);
+    const tr = S.plan?.data?.kind === 'guide' ? S.plan.data.timing_ratio : null;
+    if (!st && !tr) return;
+    const tStale = (tr?.unchangeable || []).filter((r) => !TIMING_NO_RESTART.has(r.reason)).map((r) => r.note);
+    popSes.restart = [...new Set([
+      ...Object.entries(st?.notes || {}).filter(([, r]) => r.sel && r.state === 'stale').map(([n]) => n), ...tStale])];
     popAgain();
   });
   document.addEventListener('pointerdown', (e) => {
