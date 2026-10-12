@@ -331,6 +331,94 @@ test('(A5b) 複製・伸縮リージョンでも下段ヘッドと追従は代�
   }
 });
 
+test('(A5sel) 選択イベントのルーラーを延長し、別のイベントのバーは薄くして追従しない', async () => {
+  const id = await current();
+  const selected = { id: 'selected', song_start: 160, song_end: 164, mod_start: 0.5, mod_end: 2.5 };
+  const other = { id: 'other', song_start: 161, song_end: 165, mod_start: 2.5, mod_end: 4.5 };
+  const before = await win.evaluate(() => ({ view: { ...window.__app.S.view }, tempo: window.__app.S.session.tempo,
+    grid: { ...window.__app.grid() } }));
+  const ruler = () => win.evaluate(() => [...document.querySelectorAll('#roll [data-rlab]')]
+    .map((e) => ({ x: +e.getAttribute('x'), label: e.textContent, opacity: +e.getAttribute('opacity') })).sort((a, b) => a.x - b.x));
+  const setSelection = async (selection) => {
+    await win.evaluate((selection) => {
+      window.api.__araSetHost({ selection });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, selection);
+    await emit('selection', selection);
+    await idle();
+  };
+  try {
+    await win.evaluate(({ id, selected, other }) => {
+      window.api.__araSetHost({ tracks: [{ track_id: id, regions: [selected, other] }] });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }, { id, selected, other });
+    await setSelection({ track_id: id, ara_id: 'synthetic', region: selected });
+    await win.evaluate(() => {
+      const s = window.__app.S;
+      s.session.tempo = { bpm: 120, num: 4, den: 4, start_sec: 0 };
+      s.view = { t0: 0, span: 5 };
+      window.__app.setGrid({ fmt: 'bars', follow: false });
+      window.__app.render();
+    });
+    const labels = await ruler();
+    const beats = labels.map((e) => { const [bar, beat = '1'] = e.label.split('.'); return (+bar - 1) * 4 + +beat - 1; });
+    expect(beats.length).toBeGreaterThan(4);
+    expect(beats.every((b, i) => i === 0 || b > beats[i - 1])).toBe(true);
+    expect(labels.some((e) => e.opacity === 0.35)).toBe(true);
+    expect(labels.some((e) => e.opacity === 1)).toBe(true);
+    expect(await win.locator('#roll [data-grid][opacity="0.35"]').count()).toBeGreaterThan(0);
+    await emit('playhead', { song_sec: 162, playing: false, loop: null });
+    const primary = await win.evaluate(async () => {
+      const { araEditorHeadState } = await import('../renderer/ara.js');
+      return araEditorHeadState();
+    });
+    expect(primary).toEqual({ head: (await win.evaluate(() => window.__app.S.off)) + 1.5, secondary: false });
+    await expect(win.locator('#roll #ph')).toHaveAttribute('opacity', '1');
+    await emit('playhead', { song_sec: 164.5, playing: false, loop: null });
+    await expect(win.locator('#roll #ph')).toHaveAttribute('opacity', '0.35');
+    await win.evaluate(() => window.__app.render());
+    await expect(win.locator('#roll #ph')).toHaveAttribute('opacity', '0.35');
+    expect(await ruler()).toEqual(labels); // 再生イベントが変わっても数字は動かない。
+    await win.evaluate(() => {
+      window.__app.S.view = { t0: 0, span: 0.5 };
+      window.__app.setGrid({ follow: true });
+    });
+    await emit('playhead', { song_sec: 164.6, playing: true, loop: null });
+    expect(await win.evaluate(() => window.__app.S.view.t0)).toBe(0);
+    await emit('playhead', { song_sec: 162, playing: false, loop: null });
+    expect(await win.evaluate(() => window.__app.S.view.t0)).toBeGreaterThan(1);
+    await emit('playhead', { song_sec: 165.1, playing: false, loop: null });
+    await expect(win.locator('#roll #ph')).toBeHidden();
+    await setSelection(null);
+    await emit('playhead', { song_sec: 162, playing: false, loop: null });
+    await expect(win.locator('#roll #ph')).toHaveAttribute('opacity', '1');
+    const unselected = await win.evaluate(async () => (await import('../renderer/ara.js')).araEditorHeadState());
+    expect(unselected.head).toBeCloseTo((await win.evaluate(() => window.__app.S.off)) + 3, 6);
+    // 別の修飾が選択中でも、編集中の修飾は従来の対応を使う。
+    await win.evaluate(async (selected) => {
+      // まだ読み込まれていない修飾の通知では、表示中のトラックは変わらない。
+      window.api.__araEmit('selection', { track_id: 'different-modification', region: selected });
+      const { araEditorHeadState } = await import('../renderer/ara.js');
+      window.__araOtherHead = araEditorHeadState();
+    }, selected);
+    expect(await win.evaluate(() => window.__araOtherHead)).toEqual(unselected);
+  } finally {
+    await setSelection(null);
+    await emit('playhead', { song_sec: 0, playing: false, loop: null });
+    await win.evaluate(async ({ before, id }) => {
+      const s = window.__app.S;
+      s.view = before.view; s.session.tempo = before.tempo;
+      window.api.__araSetHost({ selection: null, tracks: [{ track_id: id, regions: [] }] });
+      await (await import('../renderer/ara.js')).pullHostState();
+      // 上段の全体表示は自動では縮まない。遠い配置を使った試験の範囲を後の試験へ残さない。
+      const dir = s.session.dir;
+      s.session.dir = null; window.__app.renderTracks();
+      s.session.dir = dir; window.__app.renderTracks();
+      window.__app.setGrid(before.grid);
+    }, { before, id });
+  }
+});
+
 test('(A5path) 表示中の project_dir は区切り文字と大小文字の差があっても現在選択より優先する', async () => {
   const matched = await win.evaluate(async () => {
     const { araEditorTrack } = await import('../renderer/ara.js');

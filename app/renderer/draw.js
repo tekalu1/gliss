@@ -20,7 +20,7 @@ import { bandColor, desat, lineColorer } from './corr.js';
 import { GUIDE_LOOK as GL, MANUAL } from './palette.js';
 import { createFollower } from './follow.js';
 import { syncLegend } from './legend.js';
-import { ARA, araEditorHead, araEditorRegion, araEditorTrack, araRegions, araScale } from './ara.js';
+import { ARA, araEditorHeadState, araEditorRegion, araEditorSelectedRegion, araEditorTrack, araRegions, araScale } from './ara.js';
 
 const { KEYS_W, SCALE_H, LANE_H, EDGE } = LAYOUT;
 
@@ -29,18 +29,19 @@ function editorTicks(labelPx = 50) {
   if (!ARA) return ticks(S.view.t0 + S.off, S.view.t0 + S.view.span + S.off,
     pps(), GRID_MIN_PX, labelPx).out.map((g) => ({ ...g, local: g.t - S.off }));
   const track = araEditorTrack();
+  const selected = araEditorSelectedRegion();
   const out = [];
-  for (const r of (track && araRegions(track)) || []) {
+  for (const r of selected ? [selected] : (track && araRegions(track)) || []) {
     const scale = araScale(r);
-    const lo = Math.max(S.view.t0, r.mod_start);
-    const hi = Math.min(S.view.t0 + S.view.span, r.mod_end);
+    const lo = selected ? S.view.t0 : Math.max(S.view.t0, r.mod_start);
+    const hi = selected ? S.view.t0 + S.view.span : Math.min(S.view.t0 + S.view.span, r.mod_end);
     if (hi <= lo || r.mod_end <= r.mod_start || r.song_end <= r.song_start) continue;
     const a = r.song_start + (lo - r.mod_start) * scale;
     const b = r.song_start + (hi - r.mod_start) * scale;
     for (const g of ticks(a, b, pps() / scale, GRID_MIN_PX, labelPx).out) {
       const local = r.mod_start + (g.t - r.song_start) / scale;
-      if (local < lo - 1e-9 || local >= hi - 1e-9 || araEditorRegion(local)?.id !== r.id) continue;
-      out.push({ ...g, local });
+      if (local < lo - 1e-9 || local >= hi - 1e-9 || (!selected && araEditorRegion(local)?.id !== r.id)) continue;
+      out.push({ ...g, local, outside: !!selected && (local < r.mod_start || local >= r.mod_end) });
     }
   }
   return out;
@@ -860,7 +861,7 @@ export function render() {
   for (const g of editorTicks()) {
     const gx = Math.round(X(g.local)) + 0.5;
     if (gx < KEYS_W || gx > W) continue;
-    s += `<line data-grid="${g.l}" x1="${gx}" y1="${ROLL_T}" x2="${gx}" y2="${ROLL_B}" stroke="${GRIDC[g.l]}" pointer-events="none"/>`;
+    s += `<line data-grid="${g.l}" x1="${gx}" y1="${ROLL_T}" x2="${gx}" y2="${ROLL_B}" stroke="${GRIDC[g.l]}" opacity="${g.outside ? 0.35 : 1}" pointer-events="none"/>`;
   }
 
   // ---- ループ区間（S.loop はタイムラインの秒）
@@ -1254,8 +1255,8 @@ export function render() {
       + `<rect x="${f1(lx)}" y="${ROLL_B}" width="${f1(lw)}" height="${LANE_H}" fill="none" stroke="${SEL}" stroke-opacity=".6" pointer-events="none"/>`;
   }
 
-  const head = araEditorHead();
-  s += `<g id="ph"${head == null ? ' style="display:none"' : ` transform="translate(${f1(X(head - S.off))},0)`}"} pointer-events="none">`
+  const { head, secondary } = araEditorHeadState();
+  s += `<g id="ph" opacity="${secondary ? 0.35 : 1}"${head == null ? ' style="display:none"' : ` transform="translate(${f1(X(head - S.off))},0)`}"} pointer-events="none">`
     + `<line x1="0" y1="0" x2="0" y2="${H}" stroke="${SEL}" stroke-width="1"/>`
     + `<path d="M-4,0 L4,0 L0,6 Z" fill="${SEL}"/></g>`;
 
@@ -1328,8 +1329,8 @@ function scaleSvg() {
     if (g.l === 2 && !g.lab) continue;
     const tx = X(g.local);
     if (tx < KEYS_W - 1) continue;
-    s += `<line x1="${f1(tx)}" y1="${SCALE_H - (g.lab || g.l === 0 ? 8 : 4)}" x2="${f1(tx)}" y2="${SCALE_H}" stroke="#3a3a3e" pointer-events="none"/>`;
-    if (g.lab) s += `<text data-rlab="1" x="${f1(tx + 3)}" y="12" font-size="10" fill="#8f8f94" pointer-events="none">${g.lab}</text>`;
+    s += `<line x1="${f1(tx)}" y1="${SCALE_H - (g.lab || g.l === 0 ? 8 : 4)}" x2="${f1(tx)}" y2="${SCALE_H}" stroke="#3a3a3e" opacity="${g.outside ? 0.35 : 1}" pointer-events="none"/>`;
+    if (g.lab) s += `<text data-rlab="1" x="${f1(tx + 3)}" y="12" font-size="10" fill="#8f8f94" opacity="${g.outside ? 0.35 : 1}" pointer-events="none">${g.lab}</text>`;
   }
   s += `<rect data-scale="1" x="${KEYS_W}" y="0" width="${W - KEYS_W}" height="${SCALE_H}" fill="transparent" style="cursor:default"/>`;
   return s;
@@ -1337,9 +1338,10 @@ function scaleSvg() {
 
 export function movePlayhead() {
   const g = svg?.querySelector('#ph');
-  const head = araEditorHead();
+  const { head, secondary } = araEditorHeadState();
   if (g) {
     g.style.display = head == null ? 'none' : '';
+    g.setAttribute('opacity', secondary ? '0.35' : '1');
     if (head != null) g.setAttribute('transform', `translate(${f1(X(head - S.off))},0)`);
   }
   const c = document.querySelector('#clock');
@@ -1355,11 +1357,11 @@ export function movePlayhead() {
 export function follow({ locate = false } = {}) {
   locateNext = locate;
   if (!S.vd) return;
-  const head = araEditorHead();
+  const { head, secondary } = araEditorHeadState();
   const t = head == null ? null : head - S.off;
   const total = totalSec();
   // 編集中のトラックの外（他のトラックだけ鳴っている）は対象外
-  const go = lowerFollow.check({ playing: S.playing, locate, view: S.view, head: t, valid: t != null && t >= 0 && t <= total });
+  const go = lowerFollow.check({ playing: S.playing, locate, view: S.view, head: t, valid: !secondary && t != null && t >= 0 && t <= total });
   if (!go || S.drag || !G.follow) return;
   const v = S.view;
   v.t0 = clamp(t - v.span * 0.02, 0, Math.max(0, total - v.span));

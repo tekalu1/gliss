@@ -45,20 +45,30 @@ export const araSelectedModification = () => (ARA && A.sel
 export const araRegions = (t) => (ARA ? A.regions.get(t.id) || null : null);
 /** ピアノロールだけで使う表示秒 + S.off。上段と時計の S.head はソング秒。リージョン外は null。 */
 export function araEditorHead() {
-  if (!ARA) return S.head;
-  const t = S.tracks.find((x) => S.projectDir && x.project_dir && norm(x.project_dir) === norm(S.projectDir))
-    || S.tracks.find((x) => x.id === S.session?.current);
-  const rs = t && A.regions.get(t.id);
-  if (!rs) return null;
-  // C++ PlayheadState と同じく、重なるリージョンでは後から始まるものを選ぶ。
-  let r = null;
-  for (const x of rs) {
-    if (S.head >= x.song_start && S.head < x.song_end && (!r || x.song_start > r.song_start)) r = x;
-  }
-  if (!r) return null;
-  const modSec = r.mod_start + (S.head - r.song_start) / araScale(r);
-  // mod は編集済 PCM の出力秒。ドラッグ中の見かけの warp は再生位置に適用しない。
-  return S.off + modSec;
+  return araEditorHeadState().head;
+}
+
+/** 選択イベント内を優先し、別のイベントだけが鳴る位置は薄いバーにする。範囲は末尾を含まない。 */
+export function araHeadForSong(regions, song, selected = null) {
+  const contains = (r) => song >= r.song_start && song < r.song_end;
+  const primary = selected && contains(selected) ? selected : null;
+  const r = primary || regions.filter(contains).sort((a, b) => b.song_start - a.song_start)[0];
+  return { head: r ? r.mod_start + (song - r.song_start) / araScale(r) : null,
+    secondary: !!selected && !!r && !primary };
+}
+
+/** 表示中の修飾に対する DAW の選択。シークとループの範囲の判定には使わない。 */
+export function araEditorSelectedRegion() {
+  const track = araEditorTrack();
+  return ARA && track && A.sel?.track_id === track.id ? A.sel.region || null : null;
+}
+
+/** 下段の位置と濃淡。mod は実 PCM の出力秒なので、ドラッグ中の仮の warp は適用しない。 */
+export function araEditorHeadState() {
+  if (!ARA) return { head: S.head, secondary: false };
+  const track = araEditorTrack();
+  const state = araHeadForSong((track && A.regions.get(track.id)) || [], S.head, araEditorSelectedRegion());
+  return { ...state, head: state.head == null ? null : S.off + state.head };
 }
 /** トラックビュー・見出しを描き直すかの判定に足す（リージョンとキャッシュの状態）。 */
 export const araSig = () => (ARA ? JSON.stringify([[...A.regions], [...A.cache].map(([k, v]) => [k, v.state])]) : '');
@@ -241,6 +251,8 @@ const isVocal = (id) => S.tracks.some((t) => t.id === id && t.kind === 'vocal');
 async function onSelection(sel) {
   const before = A.sel;
   A.sel = sel && sel.track_id ? sel : null;
+  // 同じ修飾の選び直し・空の選択も、ルーラーとバーの基準をすぐ描き直す。
+  if (JSON.stringify(before) !== JSON.stringify(A.sel)) H.render?.();
   if (before?.track_id !== A.sel?.track_id || before?.ara_id !== A.sel?.ara_id) {
     window.dispatchEvent(new CustomEvent('gliss-ara-selection', {
       detail: A.sel ? { track_id: A.sel.track_id, ara_id: A.sel.ara_id } : null,
