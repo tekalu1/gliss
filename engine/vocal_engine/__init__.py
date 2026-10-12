@@ -14,7 +14,7 @@
   - ログは stderr ではなく <project>/engine.log に自前で書く。
 """
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 import time as _time
 
