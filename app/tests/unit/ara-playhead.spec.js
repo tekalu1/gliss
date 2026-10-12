@@ -71,3 +71,25 @@ test('ARA position uses host timestamps, keeps song/output axes separate, and sn
     globalThis.cancelAnimationFrame = oldCancel;
   }
 });
+
+test('同じ修飾の重なる・離れたイベントで選択内の位置を優先し、別のイベントだけなら薄くする', async () => {
+  const { araHeadForSong, araRegionForMod } = await import('../../renderer/ara.js');
+  const selected = { id: 'selected', song_start: 160, song_end: 164, mod_start: 0.5, mod_end: 2.5 };
+  const other = { id: 'other', song_start: 161, song_end: 165, mod_start: 2.5, mod_end: 4.5 };
+  const regions = [selected, other];
+  expect(araHeadForSong(regions, 160, selected)).toEqual({ head: 0.5, secondary: false });
+  expect(araHeadForSong(regions, 162, selected)).toEqual({ head: 1.5, secondary: false });
+  expect(araHeadForSong(regions, 164, selected)).toEqual({ head: 4, secondary: true });
+  expect(araHeadForSong(regions, 164.5, selected)).toEqual({ head: 4.25, secondary: true });
+  expect(araHeadForSong(regions, 165, selected)).toEqual({ head: null, secondary: false });
+  expect(araHeadForSong(regions, 159, selected)).toEqual({ head: null, secondary: false });
+  expect(araHeadForSong(regions, 162)).toEqual({ head: 3, secondary: false });
+  const shifted = { ...other, song_start: 170, song_end: 174 };
+  expect(araHeadForSong([selected, shifted], 172, selected)).toEqual({ head: 3.5, secondary: true });
+  expect(araHeadForSong([selected, shifted], 166, selected)).toEqual({ head: null, secondary: false });
+  expect(araHeadForSong([selected, shifted], 172)).toEqual({ head: 3.5, secondary: false });
+  // シークとループは従来の範囲判定を保ち、ルーラーの延長に影響されない。
+  expect(araRegionForMod(regions, 1.5, selected.id, 162)).toBe(selected);
+  expect(araRegionForMod(regions, 3, selected.id, 162)).toBe(other);
+  expect(araRegionForMod(regions, 5, selected.id, 162)).toBeNull();
+});

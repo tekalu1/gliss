@@ -271,6 +271,15 @@ AI からの手順:
 
 ### エディタ（`GlissEditor`・`plugin/src/editor`）
 
+下段のルーラーと再生バー（2026-10-12 承認）:
+
+- 表示中の修飾のイベントを DAW で選んでいるとき、小節・拍の数字と線はそのイベントの対応だけで描く。
+  イベントの範囲の外も `song = song_start + (mod − mod_start) × (song_length / mod_length)` を延ばし、数字と線を薄くする。
+- 再生位置が選択イベントの中なら再生バーを濃く出す。同じ修飾の別のイベントだけの中なら、そのイベントに対応する位置で不透明度 0.35 のバーを出す。
+  どのイベントの外でもバーは出さない。ページ送り・スクロール追従は濃いバーだけで行う。
+- 選択が無い・別の修飾を選んでいるときは従来の対応を使う。上段と時計はソング秒のまま。
+  単体モード、DAW の再生・書き出し、試聴の担当は変わらない。
+
 - `GlissEditor` は ARA の `EditorView` のドキュメントから `DocumentBridge`（`plugin/src/ara/DocumentBridge.h`。`GlissDocumentController` が実装する）を `dynamic_cast` で得る。
   得られれば画面（`editor::EditorWebView`）を出し、`EditorView` の選択の変化（`onNewSelection`。開いた時点の選択も）を `DocumentBridge::editorSelectionChanged` へ渡す。
   得られない（ARA に対応しないホスト・普通の VST3 として挿された）ときは「ARA に対応した DAW で、オーディオのイベントに挿してください」の案内だけを出す。
